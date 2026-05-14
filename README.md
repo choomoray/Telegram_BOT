@@ -14,12 +14,20 @@
    npm install
    ```
 
-2. **创建 `.env` 文件：**
+2. **配置环境变量：**
+
+   复制模板文件并填写自己的配置（所有变量说明见文件内注释）：
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   或手动创建 `.env` 文件，最少需要以下三项：
 
    ```
-   TELEGRAM_BOT_TOKEN=your_bot_token
-   MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net
-   ADMIN_CHAT_ID=123456789,987654321
+   TELEGRAM_BOT_TOKEN=从 @BotFather 获取的 Token
+   MONGODB_URI=mongodb+srv://用户:密码@集群.mongodb.net/
+   ADMIN_CHAT_ID=向 @userinfobot 获取的 ID
    ```
 
 3. **启动机器人：**
