@@ -1,0 +1,21 @@
+{
+  "name": "telegrambot-v0.4",
+  "version": "0.4.2",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "async": "^3.2.6",
+    "axios": "^1.13.5",
+    "chalk": "^4.1.2",
+    "dotenv": "^17.2.4",
+    "mongodb": "^6.21.0",
+    "node-telegram-bot-api": "^0.67.0",
+    "telegraf": "^4.16.3"
+  }
+}

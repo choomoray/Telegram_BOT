@@ -1,0 +1,16 @@
+- # 机器人命令清单
+  - `/chat` — 进入聊天模式（你正在使用的模式）
+  - `/media_group` — 媒体合并模式
+  - `/media_hide` — 媒体遮罩模式
+  - `/media_unhide` — 媒体去遮罩模式
+  - `/message_reply` — 消息回复模式
+  - `/search` — 查找模式
+  - `/delete` — 删除单一媒体
+  - `/delete_group` — 删除媒体组
+  - `/clean` — 数据库清理模式
+  - `/random_videos` — 随机视频
+    - 可以根据02-database.md文件，修改显示数量
+  - `/random_pictures` — 随机图片
+    - 可以根据02-database.md文件，修改显示数量及数据来源
+  - `/mark` — 标记模式
+  - `/log` — 日志统计
