@@ -6,6 +6,31 @@
 
 ---
 
+## 快速开始
+
+1. **克隆项目并安装依赖：**
+
+   ```bash
+   npm install
+   ```
+
+2. **创建 `.env` 文件：**
+
+   ```
+   TELEGRAM_BOT_TOKEN=your_bot_token
+   MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net
+   ADMIN_CHAT_ID=123456789,987654321
+   ```
+
+3. **启动机器人：**
+
+   ```bash
+   node index.js          # 正常模式
+   node index.js --test   # 测试模式（使用测试数据库）
+   ```
+
+---
+
 ## 目录
 
 - [整体架构](#整体架构)
@@ -23,7 +48,6 @@
   - [AI 集成层 — ai/](#11-ai-集成层--ai)
   - [业务处理层 — handlers/](#12-业务处理层--handlers)
 - [数据流详解](#数据流详解)
-- [快速开始](#快速开始)
 - [环境变量](#环境变量)
 - [指令列表](#指令列表)
 - [数据库设计](#数据库设计)
@@ -934,28 +958,6 @@ handleGroupEditedMessage()
     │
     └── 记录 MEDIA_EDIT 日志
 ```
-
----
-
-## 快速开始
-
-1. **克隆项目并安装依赖：**
-   ```bash
-   npm install
-   ```
-
-2. **创建 `.env` 文件：**
-   ```
-   TELEGRAM_BOT_TOKEN=your_bot_token
-   MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net
-   ADMIN_CHAT_ID=123456789,987654321
-   ```
-
-3. **启动机器人：**
-   ```bash
-   node index.js          # 正常模式
-   node index.js --test   # 测试模式（使用测试数据库）
-   ```
 
 ---
 
