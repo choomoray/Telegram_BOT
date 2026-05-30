@@ -23,6 +23,7 @@ async function start() {
 
         // 4. 启动机器人
         const bot = require('./bot');
+        bot.startBotPolling();
         const { handlePrivateMessage } = require('./handlers/messageHandlers');
         const { handleGroupMessage, handleGroupEditedMessage } = require('./handlers/groupMessageHandlers');
         const { handleCallbackQuery } = require('./handlers/callbackHandler');
@@ -141,7 +142,7 @@ async function start() {
             }
         });
 
-        logger.info('Telegram Bot 已启动，等待消息...');
+        logger.success('系统就绪，Telegram Bot 已启动并等待消息...');
     } catch (err) {
         logger.error(`启动失败: ${err.message}`);
         process.exit(1);

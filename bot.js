@@ -3,20 +3,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const { TELEGRAM_BOT_TOKEN } = require('./config');
 const logger = require('./logger');
 
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
-    polling: {
-        params: {
-            allowed_updates: [
-                'message',
-                'edited_message',
-                'callback_query',
-                'chat_member',
-                'my_chat_member',
-                'chat_join_request'   // 新增：监听加入请求
-            ]
-        }
-    }
-});
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
 
 let lastPollingError = null;
 
@@ -31,6 +18,20 @@ bot.on('polling_error', (error) => {
     }
 });
 
-logger.info('Telegram Bot 已启动，等待消息...');
+function startBotPolling() {
+    bot.startPolling({
+        params: {
+            allowed_updates: [
+                'message',
+                'edited_message',
+                'callback_query',
+                'chat_member',
+                'my_chat_member',
+                'chat_join_request'
+            ]
+        }
+    });
+}
 
 module.exports = bot;
+module.exports.startBotPolling = startBotPolling;
