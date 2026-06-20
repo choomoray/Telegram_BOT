@@ -9,6 +9,7 @@ const toggleCallback = require('./toggleCallback');
 const randomShowCallback = require('./randomShowCallback');
 const cleanCallback = require('./cleanCallback');
 const cleanContinueCallback = require('./cleanContinueCallback');
+const batchContinueCallback = require('./batchContinueCallback');
 const selectModelCallback = require('./selectModel');
 const toggleThinkingCallback = require('./toggleThinking');
 const retryModelCallback = require('./retryModel');
@@ -39,6 +40,15 @@ const callbackHandlers = {
     },
     clean_cancel: async (query) => {
         await handleCleanCancel(query);
+    },
+    qbatch: batchContinueCallback,
+    qbatch_stop: async (query) => {
+        await bot.answerCallbackQuery(query.id, { text: '⏹ 已停止发送' });
+        await bot.editMessageText('⏹ 已停止', {
+            chat_id: query.message.chat.id,
+            message_id: query.message.message_id
+        }).catch(() => {});
+        await bot.sendMessage(query.from.id, '⏹ 已停止发送，如需继续可重新搜索后查看');
     },
     transport: async (query) => {
         await transportMode.handleCallback(query);

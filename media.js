@@ -20,11 +20,23 @@ function extractMediaFromMessage(msg) {
                 fileId = msg[type].file_id;
                 fileUniqueId = msg[type].file_unique_id;
             }
+
+            // 音频文件无注释时，自动用标题和艺术家生成搜索用文本
+            let caption = msg.caption || '';
+            if (!caption && type === 'audio') {
+                const audio = msg.audio;
+                const title = audio.title || '';
+                const performer = audio.performer || '';
+                if (title || performer) {
+                    caption = [title, performer].filter(Boolean).join(' - ');
+                }
+            }
+
             return {
                 type,
                 fileId,
                 fileUniqueId,
-                caption: msg.caption || '',
+                caption,
                 has_spoiler: msg.has_media_spoiler || false,
                 videoTime
             };
@@ -202,6 +214,46 @@ async function sendMediaGroup(chatId, groupId) {
     }
 }
 
+/**
+ * 分批发送媒体组，每批最多 5 个 subgroup
+ * @param {number} chatId - 目标用户/群组 ID
+ * @param {string} groupId - 媒体组 ID
+ * @param {number} startSubgroupIdx - 从第几个 subgroup 开始（0-based）
+ * @param {number} [batchSize=5] - 每批最多发送多少个 subgroup
+ * @returns {Promise<{done: boolean, nextSubgroupIdx: number, sentInBatch: number, totalSent: number, totalMedia: number, totalSubgroups: number}>}
+ */
+async function sendMediaGroupBatched(chatId, groupId, startSubgroupIdx = 0, batchSize = 5) {
+    const mediaCol = getCollection(COLLECTIONS.MEDIA);
+    const subgroups = await mediaCol.distinct('subgroup', { group_id: groupId });
+    subgroups.sort((a, b) => a - b);
+
+    const totalSubgroups = subgroups.length;
+    const totalMedia = await mediaCol.countDocuments({ group_id: groupId });
+    const endSubgroupIdx = Math.min(startSubgroupIdx + batchSize, totalSubgroups);
+    const batchSubgroups = subgroups.slice(startSubgroupIdx, endSubgroupIdx);
+
+    let sentInBatch = 0;
+    for (const subgroup of batchSubgroups) {
+        try {
+            const subgroupMedia = await getMediaByGroupIdAndSubgroup(groupId, subgroup);
+            await sendMediaSubgroup(chatId, groupId, subgroup);
+            sentInBatch += subgroupMedia.length;
+        } catch (err) {
+            logger.error(`分批发送 subgroup=${subgroup} 失败: ${err.message}`);
+        }
+    }
+
+    const isDone = endSubgroupIdx >= totalSubgroups;
+    return {
+        done: isDone,
+        nextSubgroupIdx: endSubgroupIdx,
+        sentInBatch,
+        totalSent: 0, // 由调用方维护累加值
+        totalMedia,
+        totalSubgroups
+    };
+}
+
 module.exports = {
     extractMediaFromMessage,
     sendMediaAsReply,
@@ -210,5 +262,6 @@ module.exports = {
     getMediaByGroupIdSorted,
     getMediaByGroupIdAndSubgroup,
     sendMediaSubgroup,
-    sendMediaGroup
+    sendMediaGroup,
+    sendMediaGroupBatched
 };
