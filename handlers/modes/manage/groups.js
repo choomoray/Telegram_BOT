@@ -10,6 +10,7 @@ const {
 } = require('../../../db/channelGroup');
 const { extractChatInfo } = require('../../../db/transport');
 const { escapeHTML } = require('../../../utils/sanitize');
+const { paginationRow } = require('../../../utils/reply');
 
 async function showGroupList(userId, messageId) {
     const groups = await getAllChannelGroups();
@@ -82,15 +83,7 @@ async function showGroupManageView(userId, messageId, page = 1) {
     }
 
     if (totalPages > 1) {
-        const navRow = [];
-        if (page > 1) {
-            navRow.push({ text: '◀ 上一页', callback_data: `manage:manage_page:${page - 1}` });
-        }
-        navRow.push({ text: `${page} / ${totalPages}`, callback_data: 'noop' });
-        if (page < totalPages) {
-            navRow.push({ text: '下一页 ▶', callback_data: `manage:manage_page:${page + 1}` });
-        }
-        keyboard.push(navRow);
+        keyboard.push(paginationRow(page, totalPages, (p) => `manage:manage_page:${p}`));
     }
     keyboard.push([{ text: '🔙 返回列表', callback_data: 'manage:groups' }]);
 

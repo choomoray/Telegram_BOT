@@ -152,7 +152,7 @@ async function handleNewMediaMessage(msg) {
                             { text: '🔗 跳转查看', url: link }
                         ]]
                     };
-                    await bot.editMessageText('✖️ 数据重复', {
+                    await bot.editMessageText('❌ 数据重复', {
                         chat_id: chatId,
                         message_id: processingMsg.message_id,
                         reply_markup: button
@@ -165,7 +165,7 @@ async function handleNewMediaMessage(msg) {
                             { text: '🔗 跳转查看', url: link }
                         ]]
                     };
-                    await bot.editMessageText('✖️ 数据重复', {
+                    await bot.editMessageText('❌ 数据重复', {
                         chat_id: chatId,
                         message_id: processingMsg.message_id,
                         reply_markup: button
@@ -176,7 +176,7 @@ async function handleNewMediaMessage(msg) {
                 }
             } else {
                 if (shouldReply) {
-                    await updateProcessingMessage(msg, processingMsg.message_id, '✖️ 未收录的重复数据', false);
+                    await updateProcessingMessage(msg, processingMsg.message_id, '❌ 未收录的重复数据', false);
                 }
             }
 

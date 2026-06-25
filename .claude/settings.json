@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e ' *)",
+      "Bash(node -e \"try { require\\('./handlers/commands/manage'\\); console.log\\('OK'\\); } catch\\(e\\) { console.log\\('FAIL: ' + e.message\\); }\")"
+    ]
+  }
+}

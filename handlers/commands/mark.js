@@ -7,14 +7,14 @@ const {
     updateUserActivity
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
-const { insertLog } = require('../../db/log');
+const { repeatModeMsg } = require('../../utils/reply');
 
 async function handleMarkCommand(userId, msg) {
     const state = getUserState(userId);
     if (state && state.mode === 'mark') {
         updateUserActivity(userId);
         logger.info(`用户 ${userId} 重复发送 /mark，仅重置活动时间`);
-        await bot.sendMessage(userId, '您已经在标记模式中，请发送要标记的媒体。')
+        await bot.sendMessage(userId, repeatModeMsg('标记', '请发送要标记的媒体'))
             .catch(err => logger.error('发送消息失败:', err.message));
         return;
     }

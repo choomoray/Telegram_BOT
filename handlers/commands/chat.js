@@ -7,12 +7,13 @@ const { getUserState,
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
 const { loadSystemPrompt } = require('../../utils/loadSystemPrompt');
+const { repeatModeMsg } = require('../../utils/reply');
 
 async function handleChatCommand(userId, msg) {
     const state = getUserState(userId);
     if (state && state.mode === 'chat') {
         logger.info(`用户 ${userId} 重复发送 /chat，仅重置活动时间`);
-        await bot.sendMessage(userId, '您已经在聊天模式中，继续对话吧～').catch(() => { });
+        await bot.sendMessage(userId, repeatModeMsg('聊天', '继续对话吧')).catch(() => { });
         updateUserActivity(userId);
         return;
     }

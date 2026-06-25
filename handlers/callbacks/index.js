@@ -100,8 +100,8 @@ async function handleCallbackQuery(query) {
         return;
     }
 
-    // 动态分发 pwd_ 前缀 (密码)
-    if (data.startsWith('pwd_')) {
+    // 动态分发 password: 前缀 (密码)
+    if (data.startsWith('password:')) {
         try {
             await passwordMode.handleCallback(query);
         } catch (err) {

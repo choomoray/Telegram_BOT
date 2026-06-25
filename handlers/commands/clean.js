@@ -10,13 +10,14 @@ const {
 const { cleanPreviousMode } = require('../../utils/enterMode');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { insertLog } = require('../../db/log');
+const { repeatModeMsg } = require('../../utils/reply');
 
 async function handleCleanCommand(userId, msg) {
     const rawState = getRawUserState(userId);
     if (rawState && rawState.mode === 'clean') {
         updateUserActivity(userId);
         logger.info(`用户 ${userId} 重复发送 /clean，仅重置活动时间`);
-        await bot.sendMessage(userId, '您已经在数据库清理模式中，请使用按钮操作或输入 /exit 退出。')
+        await bot.sendMessage(userId, repeatModeMsg('数据库清理', '请使用按钮操作或输入 /exit 退出'))
             .catch(err => logger.error('发送消息失败:', err.message));
         return;
     }
@@ -37,7 +38,7 @@ async function handleCleanCommand(userId, msg) {
     setUserState(userId, {
         mode: 'clean',
         lastActivity: Date.now(),
-        waitMsgId: processingMsg.message_id,
+        processingMsgId: processingMsg.message_id,
         _onExit: async () => { }
     });
 

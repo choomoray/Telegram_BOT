@@ -28,13 +28,13 @@ function formatResultLine(item, index, total) {
     return `${icon} ${number} <a href="${link}">${text}</a>`;
 }
 
-function formatQueryResults(results, total, keyword, currentPage, totalPages) {
+function formatQueryResults(results, total, keyword, currentPage, totalPages, pageSize = 15) {
     const lines = [];
     lines.push(`🔍 找到 ${total} 条数据：`);
     lines.push('');
 
     results.forEach((item, idx) => {
-        const globalIndex = (currentPage - 1) * 15 + idx + 1;
+        const globalIndex = (currentPage - 1) * pageSize + idx + 1;
         lines.push(formatResultLine(item, globalIndex, total));
     });
 
@@ -68,7 +68,7 @@ function buildFoldKeyboard(totalPages, currentPage, sessionId) {
     return { inline_keyboard: keyboard };
 }
 
-function buildNumberKeyboard(sessionId, currentPage, totalPages, pageResults, total) {
+function buildNumberKeyboard(sessionId, currentPage, totalPages, pageResults, total, pageSize = 15) {
     const keyboard = [];
 
     const itemCount = pageResults.length;
@@ -77,7 +77,7 @@ function buildNumberKeyboard(sessionId, currentPage, totalPages, pageResults, to
         for (let i = 0; i < itemCount; i += buttonsPerRow) {
             const row = [];
             for (let j = i; j < i + buttonsPerRow && j < itemCount; j++) {
-                const globalIndex = (currentPage - 1) * 15 + j + 1;
+                const globalIndex = (currentPage - 1) * pageSize + j + 1;
                 row.push({
                     text: total >= 10 ? String(globalIndex).padStart(2, '0') : String(globalIndex),
                     callback_data: `qmedia:${sessionId}:${currentPage}:${j + 1}`

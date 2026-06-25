@@ -2,6 +2,7 @@
 const { getRawUserState, getUserState, deleteUserState } = require('../states');
 const { clearMediaGroupState } = require('../media');
 const logger = require('../logger');
+const { repeatModeMsg } = require('./reply');
 
 /**
  * 安全进入新模式（处理冲突和清理）
@@ -21,7 +22,8 @@ async function enterMode(userId, targetMode, newState, bot) {
         updateUserActivity(userId);
         logger.info(`用户 ${userId} 已在 ${targetMode} 模式中，仅重置活动时间`);
         if (bot) {
-            await bot.sendMessage(userId, `您已经在${targetMode === 'chat' ? '聊天' : '该'}模式中，继续操作即可。`)
+            const modeName = targetMode === 'chat' ? '聊天' : (targetMode || '该');
+            await bot.sendMessage(userId, repeatModeMsg(modeName, '继续操作即可'))
                 .catch(err => logger.error('发送重复进入提示失败:', err.message));
         }
         return false;

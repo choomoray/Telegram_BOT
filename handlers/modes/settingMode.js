@@ -4,6 +4,7 @@ const logger = require('../../logger');
 const { getSettings, updateSetting } = require('../../db/settings');
 const { getRawUserState, setUserState, deleteUserState } = require('../../states');
 const { insertLog } = require('../../db/log');
+const { paginationRow } = require('../../utils/reply');
 
 const TIME_OPTIONS = [
     { label: '全部时长', value: 'all' },
@@ -194,20 +195,8 @@ async function showSettings(userId, page, editMessageId = null) {
         keyboard.push(row);
     }
 
-    const navRow = [];
     if (totalPages > 1) {
-        if (page > 1) {
-            navRow.push({ text: '◀ 上一页', callback_data: `set_page:${page - 1}` });
-        } else {
-            navRow.push({ text: '◀ 上一页', callback_data: 'noop' });
-        }
-        navRow.push({ text: `${page} / ${totalPages}`, callback_data: 'noop' });
-        if (page < totalPages) {
-            navRow.push({ text: '下一页 ▶', callback_data: `set_page:${page + 1}` });
-        } else {
-            navRow.push({ text: '下一页 ▶', callback_data: 'noop' });
-        }
-        keyboard.push(navRow);
+        keyboard.push(paginationRow(page, totalPages, (p) => `set_page:${p}`));
     }
 
     keyboard.push([{ text: '🚪 退出设置', callback_data: 'set_exit' }]);

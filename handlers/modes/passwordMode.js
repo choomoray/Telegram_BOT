@@ -105,7 +105,7 @@ async function processMediaForView(userId, msg, state) {
     }
 
     if (!mediaDoc.pwd) {
-        await bot.sendMessage(userId, '♻️ 该文件并没有设置密码', { reply_to_message_id: msg.message_id });
+        await bot.sendMessage(userId, '✅ 该文件没有设置密码', { reply_to_message_id: msg.message_id });
     } else {
         await bot.sendMessage(userId, `🔑 密码：${mediaDoc.pwd}`, { reply_to_message_id: msg.message_id });
     }
@@ -122,12 +122,12 @@ async function handleCallback(query) {
     const state = getRawUserState(userId);
     if (!state || state.mode !== 'password') return false;
 
-    if (data === 'pwd_update') {
+    if (data === 'password:update') {
         await handleUpdatePassword(userId, messageId, state);
         await bot.answerCallbackQuery(query.id);
         return true;
     }
-    if (data === 'pwd_view') {
+    if (data === 'password:view') {
         await handleViewPassword(userId, messageId, state);
         await bot.answerCallbackQuery(query.id);
         return true;

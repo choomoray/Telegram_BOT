@@ -8,6 +8,7 @@ const {
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
 const { insertLog } = require('../../db/log');
+const { entryMsg } = require('../../utils/reply');
 
 async function handleDeleteCommand(userId, msg) {
     const rawState = getRawUserState(userId);
@@ -18,9 +19,9 @@ async function handleDeleteCommand(userId, msg) {
 
     await cleanPreviousMode(userId);
 
-    let waitMsg;
+    let processingMsg;
     try {
-        waitMsg = await bot.sendMessage(userId, '🗑️ 数据删除模式启动，请发送要删除的媒体', {
+        processingMsg = await bot.sendMessage(userId, entryMsg('数据删除模式', '请发送要删除的媒体'), {
             reply_to_message_id: msg.message_id,
             allow_sending_without_reply: true
         });
@@ -32,12 +33,12 @@ async function handleDeleteCommand(userId, msg) {
     setUserState(userId, {
         mode: 'delete',
         deleteType: 'single',
-        waitMsgId: waitMsg.message_id,
+        processingMsgId: processingMsg.message_id,
         lastActivity: Date.now(),
         _onExit: async () => { }
     });
 
-    logger.info(`用户 ${userId} 进入【单一媒体删除模式】，等待消息ID: ${waitMsg.message_id}`);
+    logger.info(`用户 ${userId} 进入【单一媒体删除模式】，等待消息ID: ${processingMsg.message_id}`);
 
     insertLog(19, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
 }

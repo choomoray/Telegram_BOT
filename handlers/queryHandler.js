@@ -160,14 +160,14 @@ async function handleQuery(msg) {
                 allResults,
                 total,
                 keyword,
-                { query, sortRules, parsed, settings }
+                { query, sortRules, parsed, settings, pageSize: 15 }
             );
 
             const pageSize = 15;
             const totalPages = Math.ceil(total / pageSize);
             const pageResults = allResults.slice(0, pageSize);
 
-            const formattedText = formatQueryResults(pageResults, total, keyword, 1, totalPages);
+            const formattedText = formatQueryResults(pageResults, total, keyword, 1, totalPages, pageSize);
 
             let keyboard;
             if (totalPages === 1) {

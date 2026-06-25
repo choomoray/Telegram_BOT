@@ -32,12 +32,13 @@ function generateSessionId() {
  */
 function createSession(userId, originalText, results, total, keyword, queryParams = {}) {
     const sessionId = generateSessionId();
+    const pageSize = queryParams.pageSize || 15;
     const session = {
         userId,
         originalText,
         results,
         total,
-        pageSize: 15,
+        pageSize,
         keyword,
         queryParams,
         mode: 'fold',          // 默认折叠

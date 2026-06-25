@@ -8,13 +8,14 @@ const {
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
 const { insertLog } = require('../../db/log');
+const { repeatModeMsg } = require('../../utils/reply');
 
 async function handleMediaHideCommand(userId, msg) {
     const state = getUserState(userId);
     if (state && state.mode === 'media_hide') {
         updateUserActivity(userId);
         logger.info(`用户 ${userId} 重复发送 /media_hide，仅重置活动时间`);
-        await bot.sendMessage(userId, '您已经在媒体遮罩模式中，继续发送媒体即可。')
+        await bot.sendMessage(userId, repeatModeMsg('媒体遮罩', '继续发送媒体即可'))
             .catch(err => logger.error('发送消息失败:', err.message));
         return;
     }

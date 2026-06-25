@@ -33,7 +33,7 @@ async function handleSettingCommand(userId, msg) {
         step: 'main',
         page: 1,
         lastActivity: Date.now(),
-        loadingMsgId: loadingMsg.message_id,
+        processingMsgId: loadingMsg.message_id,
         _onExit: async () => { }
     });
 

@@ -9,13 +9,14 @@ const {
     updateUserActivity
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
+const { repeatModeMsg } = require('../../utils/reply');
 
 async function handleMediaGroupCommand(userId, msg) {
     const state = getUserState(userId);
     if (state && state.mode === 'media_group') {
         updateUserActivity(userId);
         logger.info(`用户 ${userId} 重复发送 /media_group，仅重置活动时间`);
-        await bot.sendMessage(userId, '您已经在媒体合并模式中，继续发送媒体即可。')
+        await bot.sendMessage(userId, repeatModeMsg('媒体合并', '继续发送媒体即可'))
             .catch(err => logger.error('发送消息失败:', err.message));
         return;
     }

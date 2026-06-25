@@ -9,13 +9,14 @@ const {
 const { cleanPreviousMode } = require('../../utils/enterMode');
 const { insertLog } = require('../../db/log');
 const { clearUserContext } = require('../modes/messageReplyMode');
+const { repeatModeMsg } = require('../../utils/reply');
 
 async function handleMessageReplyCommand(userId, msg) {
     const state = getUserState(userId);
     if (state && state.mode === 'message_reply') {
         updateUserActivity(userId);
         logger.info(`用户 ${userId} 重复发送 /message_reply，仅重置活动时间`);
-        await bot.sendMessage(userId, '您已经在消息回复模式中，继续操作即可。')
+        await bot.sendMessage(userId, repeatModeMsg('消息回复'))
             .catch(err => logger.error('发送消息失败:', err.message));
         return;
     }

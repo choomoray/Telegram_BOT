@@ -4,6 +4,7 @@ const logger = require('../../../logger');
 const { setUserState } = require('../../../states');
 const { getAllUsers, setUserWhite } = require('../../../db/users');
 const { escapeHTML } = require('../../../utils/sanitize');
+const { paginationRow } = require('../../../utils/reply');
 
 async function showWhiteMenu(userId, messageId) {
     const keyboard = {
@@ -48,15 +49,7 @@ async function showWhiteListView(userId, messageId, page = 1) {
 
     const keyboard = [];
     if (totalPages > 1) {
-        const navRow = [];
-        if (page > 1) {
-            navRow.push({ text: '◀ 上一页', callback_data: `manage:white_view_page:${page - 1}` });
-        }
-        navRow.push({ text: `${page} / ${totalPages}`, callback_data: 'noop' });
-        if (page < totalPages) {
-            navRow.push({ text: '下一页 ▶', callback_data: `manage:white_view_page:${page + 1}` });
-        }
-        keyboard.push(navRow);
+        keyboard.push(paginationRow(page, totalPages, (p) => `manage:white_view_page:${p}`));
     }
     keyboard.push([{ text: '🔙 返回白名单菜单', callback_data: 'manage:white_menu' }]);
 
@@ -136,15 +129,7 @@ async function showWhiteRemoveView(userId, messageId, page = 1) {
     }
 
     if (totalPages > 1) {
-        const navRow = [];
-        if (page > 1) {
-            navRow.push({ text: '◀ 上一页', callback_data: `manage:white_remove_page:${page - 1}` });
-        }
-        navRow.push({ text: `${page} / ${totalPages}`, callback_data: 'noop' });
-        if (page < totalPages) {
-            navRow.push({ text: '下一页 ▶', callback_data: `manage:white_remove_page:${page + 1}` });
-        }
-        keyboard.push(navRow);
+        keyboard.push(paginationRow(page, totalPages, (p) => `manage:white_remove_page:${p}`));
     }
     keyboard.push([{ text: '🔙 返回白名单菜单', callback_data: 'manage:white_menu' }]);
 

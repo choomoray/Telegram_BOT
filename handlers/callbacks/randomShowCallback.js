@@ -28,9 +28,10 @@ async function handleRandomShowCallback(query) {
     }
 
     const { totalPages, currentPage, total, pageResults } = pageData;
+    const pageSize = session.pageSize || 15;
 
-    const keyboard = buildNumberKeyboard(sessionId, currentPage, totalPages, pageResults, total);
-    const formattedText = formatQueryResults(pageResults, total, session.keyword, currentPage, totalPages);
+    const keyboard = buildNumberKeyboard(sessionId, currentPage, totalPages, pageResults, total, pageSize);
+    const formattedText = formatQueryResults(pageResults, total, session.keyword, currentPage, totalPages, pageSize);
 
     try {
         await bot.editMessageText(formattedText, {

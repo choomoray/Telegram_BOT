@@ -7,14 +7,14 @@ const {
     updateUserActivity
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
-const { insertLog } = require('../../db/log');
+const { repeatModeMsg } = require('../../utils/reply');
 
 async function handleSearchCommand(userId, msg) {
     const state = getUserState(userId);
     if (state && state.mode === 'search') {
         updateUserActivity(userId);
         logger.info(`用户 ${userId} 重复发送 /search，仅重置活动时间`);
-        await bot.sendMessage(userId, '您已经在查找模式中，请发送需要查找的媒体。')
+        await bot.sendMessage(userId, repeatModeMsg('查找', '请发送需要查找的媒体'))
             .catch(err => logger.error('发送消息失败:', err.message));
         return;
     }

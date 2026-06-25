@@ -126,7 +126,7 @@ async function handleRandomVideosCommand(userId, msg) {
                     results,
                     total,
                     '',
-                    { source: 'random_videos' }
+                    { source: 'random_videos', pageSize: textCount }
                 );
                 const title = `🔍 找到 ${total} 条视频数据：\n`;
                 const lines = [title];

@@ -28,15 +28,16 @@ async function handlePageCallback(query) {
     }
 
     const { totalPages, currentPage, total, pageResults } = pageData;
+    const pageSize = session.pageSize || 15;
 
     let keyboard;
     if (session.mode === 'fold') {
         keyboard = buildFoldKeyboard(totalPages, currentPage, sessionId);
     } else {
-        keyboard = buildNumberKeyboard(sessionId, currentPage, totalPages, pageResults, total);
+        keyboard = buildNumberKeyboard(sessionId, currentPage, totalPages, pageResults, total, pageSize);
     }
 
-    const formattedText = formatQueryResults(pageResults, total, session.keyword, currentPage, totalPages);
+    const formattedText = formatQueryResults(pageResults, total, session.keyword, currentPage, totalPages, pageSize);
 
     try {
         await bot.editMessageText(formattedText, {

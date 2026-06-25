@@ -36,7 +36,7 @@ async function handleDeleteMode(msg, state) {
     try {
         const mediaDoc = await findMediaByFileUniqueId(fileUniqueId);
         if (!mediaDoc) {
-            await bot.editMessageText('✖️ 该数据不存在', {
+            await bot.editMessageText('❌ 该数据不存在', {
                 chat_id: userId,
                 message_id: processingMsg.message_id
             });
