@@ -1,11 +1,9 @@
 // handlers/modes/chatMode.js
-const bot = require('../../bot');
-const logger = require('../../logger');
-const { handleChatMessage } = require('../commands/chat');
+const handleChatMessage = require('./chatMode/index');
 
 async function handleChatMode(msg, state) {
     if (!msg.text) return false;
-    return handleChatMessage(msg.from.id, msg);
+    return handleChatMessage(msg, state);
 }
 
 module.exports = handleChatMode;
