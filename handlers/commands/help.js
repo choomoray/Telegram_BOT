@@ -10,19 +10,19 @@ async function handleHelpCommand(userId, msg) {
         inline_keyboard: [
             [
                 { text: '🔍 查找', callback_data: 'exec_cmd:/search' },
-                { text: '🧹 清理', callback_data: 'exec_cmd:/clean' }
+                { text: '✏️ 编辑', callback_data: 'exec_cmd:/edit' }
             ],
             [
                 { text: '🗑️ 删除', callback_data: 'exec_cmd:/delete' },
                 { text: '📦 删除组', callback_data: 'exec_cmd:/delete_group' }
             ],
             [
-                { text: '🏷️ 标记', callback_data: 'exec_cmd:/mark' },
-                { text: '🚚 搬运', callback_data: 'exec_cmd:/transport' }
+                { text: '🧹 清理', callback_data: 'exec_cmd:/clean' },
+                { text: '🏷️ 标记', callback_data: 'exec_cmd:/mark' }
             ],
             [
-                { text: '📊 日志', callback_data: 'exec_cmd:/log' },
-                { text: '💬 聊天', callback_data: 'exec_cmd:/chat' }
+                { text: '🚚 搬运', callback_data: 'exec_cmd:/transport' },
+                { text: '📊 日志', callback_data: 'exec_cmd:/log' }
             ],
             [
                 { text: '🔒 遮罩', callback_data: 'exec_cmd:/media_hide' },

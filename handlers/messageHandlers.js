@@ -63,9 +63,23 @@ async function handlePrivateMessage(msg) {
         const mode = rawState.mode;
 
         if (mode === 'media_group' || mode === 'media_hide' || mode === 'media_unhide') {
+            const totalMedia = (rawState.mediaItems || []).length;
             await clearMediaGroupState(userId, true, rawState);
             let modeName = mode === 'media_hide' ? '媒体遮罩模式' : (mode === 'media_unhide' ? '媒体去遮罩模式' : '媒体合并模式');
-            await bot.sendMessage(userId, `✅ 已退出${modeName}（超时）`).catch(() => { });
+
+            let exitMsg = `✅ 已退出${modeName}（超时）`;
+            if (mode === 'media_group' && totalMedia > 0) {
+                const groupTotal = rawState.groupSize || 10;
+                const fullGroups = Math.floor(totalMedia / groupTotal);
+                const remainder = totalMedia % groupTotal;
+                if (remainder > 0) {
+                    exitMsg += `，共合并媒体 ${fullGroups * groupTotal} (+${remainder}) 个，${fullGroups} (+1) 组`;
+                } else {
+                    exitMsg += `，共合并媒体 ${totalMedia} 个，${fullGroups} 组`;
+                }
+            }
+
+            await bot.sendMessage(userId, exitMsg).catch(() => { });
             deleteUserState(userId);
             logger.info(`用户 ${userId} ${mode}模式超时自动退出`);
             currentState = getUserState(userId);

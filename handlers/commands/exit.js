@@ -37,12 +37,26 @@ async function handleExitCommand(userId, msg) {
     if (['media_group', 'media_hide', 'media_unhide'].includes(mode)) {
         // 提取状态副本，因为 exit 会删除状态
         const stateCopy = { ...rawState };
+        const totalMedia = (stateCopy.mediaItems || []).length;
         await clearMediaGroupState(userId, true, stateCopy);
         let modeName;
         if (mode === 'media_hide') modeName = '媒体遮罩模式';
         else if (mode === 'media_unhide') modeName = '媒体去遮罩模式';
         else modeName = '媒体合并模式';
-        await bot.sendMessage(userId, `✅ 已退出${modeName}`)
+
+        let exitMsg = `✅ 已退出${modeName}`;
+        if (mode === 'media_group' && totalMedia > 0) {
+            const groupTotal = stateCopy.groupSize || 10;
+            const fullGroups = Math.floor(totalMedia / groupTotal);
+            const remainder = totalMedia % groupTotal;
+            if (remainder > 0) {
+                exitMsg += `，共合并媒体 ${fullGroups * groupTotal} (+${remainder}) 个，${fullGroups} (+1) 组`;
+            } else {
+                exitMsg += `，共合并媒体 ${totalMedia} 个，${fullGroups} 组`;
+            }
+        }
+
+        await bot.sendMessage(userId, exitMsg)
             .catch(err => logger.error('发送退出提醒失败:', err.message));
         logger.info(`用户 ${userId} 手动退出${modeName}`);
         return;
