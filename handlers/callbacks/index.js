@@ -10,6 +10,7 @@ const randomShowCallback = require('./randomShowCallback');
 const cleanCallback = require('./cleanCallback');
 const cleanContinueCallback = require('./cleanContinueCallback');
 const batchContinueCallback = require('./batchContinueCallback');
+const editConfirmDbOnly = require('./editConfirmDbOnly');
 const selectModelCallback = require('./selectModel');
 const toggleThinkingCallback = require('./toggleThinking');
 const retryModelCallback = require('./retryModel');
@@ -34,6 +35,17 @@ const callbackHandlers = {
     retry_model: retryModelCallback,
     exec_cmd: execCmdCallback,
     switch_model: handleSwitchModelCallback,
+    edit_dbonly: editConfirmDbOnly,
+    edit_dbonly_cancel: async (query) => {
+        const userId = query.from.id;
+        const { deleteUserState } = require('../../states');
+        deleteUserState(userId);
+        await bot.editMessageText('⏹ 已取消', {
+            chat_id: query.message.chat.id,
+            message_id: query.message.message_id
+        }).catch(() => {});
+        await bot.answerCallbackQuery(query.id, { text: '已取消' });
+    },
     clean_confirm: async (query) => {
         const action = query.data.split(':')[1];
         await handleCleanConfirm(action, query);

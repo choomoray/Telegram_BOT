@@ -113,77 +113,25 @@ async function handleEditMode(msg, state) {
             targetMessageId,
             targetGroupId,
             targetFileUniqueId,
-            targetMediaType
+            targetMediaType,
+            processingMsgId
         } = state;
 
         const messageCol = getCollection(COLLECTIONS.MESSAGE);
         const isClearing = (messageText.trim() === 'null');
 
+        // 提取等级标记（如果文本末尾有 #S 等）
+        const level = extractLevel(messageText);
+        const cleanText = removeLevelSuffix(messageText);
+
         try {
-            // 查询现有消息记录
-            const existingMessage = await messageCol.findOne({
-                chat_id: targetChatId,
-                message_id: targetMessageId
-            });
-
+            // 先尝试编辑 Telegram 消息的 caption（可能会因超时而失败）
             if (isClearing) {
-                // ---------- 清空文本 ----------
-                if (existingMessage) {
-                    // 删除 message 记录
-                    await messageCol.deleteOne({ chat_id: targetChatId, message_id: targetMessageId });
-                    logger.info(`已删除消息记录: chat_id=${targetChatId}, message_id=${targetMessageId}`);
-
-                    // 检查该组是否还有其他文本消息
-                    const otherMessages = await messageCol.countDocuments({ group_id: targetGroupId });
-                    if (otherMessages === 0) {
-                        // 无其他文本，设置 group_list.is_delete 为当前时间戳
-                        await setGroupDelete(targetGroupId, Date.now());
-                        logger.info(`组内无其他文本，设置 is_delete 为时间戳: group_id=${targetGroupId}`);
-                    } else {
-                        // 还有文本，确保 is_delete = 0
-                        await setGroupDelete(targetGroupId, 0);
-                    }
-                } else {
-                    logger.info(`清空操作但数据库中无记录，无需操作`);
-                }
-
-                // 编辑 Telegram 消息的 caption 为空字符串
                 await bot.editMessageCaption('', {
                     chat_id: targetChatId,
                     message_id: targetMessageId
                 });
             } else {
-                // ---------- 编辑或新增文本 ----------
-                // 提取等级标记（如果文本末尾有 #S 等）
-                const level = extractLevel(messageText);
-                const cleanText = removeLevelSuffix(messageText);
-
-                if (existingMessage) {
-                    // 更新现有记录
-                    await messageCol.updateOne(
-                        { chat_id: targetChatId, message_id: targetMessageId },
-                        { $set: { text: cleanText, level: level } }
-                    );
-                    logger.info(`已更新消息文本: chat_id=${targetChatId}, message_id=${targetMessageId}`);
-                } else {
-                    // 插入新记录
-                    const newMessage = {
-                        chat_id: targetChatId,
-                        message_id: targetMessageId,
-                        text: cleanText,
-                        file_unique_id: targetFileUniqueId,
-                        media_type: targetMediaType,
-                        level: level,
-                        group_id: targetGroupId
-                    };
-                    await messageCol.insertOne(newMessage);
-                    logger.info(`已插入新消息记录: chat_id=${targetChatId}, message_id=${targetMessageId}`);
-                }
-
-                // 确保 group_list.is_delete = 0（该组有文本）
-                await setGroupDelete(targetGroupId, 0);
-
-                // 编辑 Telegram 消息的 caption
                 await bot.editMessageCaption(messageText, {
                     chat_id: targetChatId,
                     message_id: targetMessageId,
@@ -191,24 +139,63 @@ async function handleEditMode(msg, state) {
                 });
             }
 
-            // 回复用户修改成功（引用用户输入的新文本）
+            // Telegram 编辑成功 → 更新数据库
+            await updateMessageDb(messageCol, {
+                isClearing, targetChatId, targetMessageId, targetGroupId,
+                targetFileUniqueId, targetMediaType, cleanText, level
+            });
+
             await bot.sendMessage(chatId, '✅ 修改完毕', {
                 reply_to_message_id: messageId
             });
-
-            // 插入操作日志
             insertLog(23, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
-
             logger.info(`用户 ${userId} 成功编辑消息 ${targetChatId}/${targetMessageId}`);
-        } catch (err) {
-            logger.error(`编辑失败: ${err.message}`);
-            await bot.sendMessage(chatId, '❌ 修改失败，请检查是否有权限或消息是否已过期', {
-                reply_to_message_id: messageId
-            });
-        }
 
-        // 退出编辑模式
-        deleteUserState(userId);
+            deleteUserState(userId);
+        } catch (err) {
+            const errMsg = err.message || '';
+            // 判断是否为"消息无法编辑"类错误（超过48小时、权限不足等）
+            const isEditDenied = errMsg.includes("can't be edited") || errMsg.includes("Can't edit");
+
+            if (isEditDenied) {
+                // 保存待执行的数据操作到状态，询问用户
+                setUserState(userId, {
+                    ...state,
+                    step: 'confirm_db_only',
+                    pendingEdit: { isClearing, cleanText, level },
+                    lastActivity: Date.now()
+                });
+
+                const keyboard = {
+                    inline_keyboard: [[
+                        { text: '✅ 仅更新数据库', callback_data: `edit_dbonly:${targetGroupId}` },
+                        { text: '❌ 取消', callback_data: `edit_dbonly_cancel` }
+                    ]]
+                };
+
+                await bot.editMessageText(
+                    `⚠️ 消息已超过编辑时效（48小时），无法修改 Telegram 上的描述。\n是否只更改数据库中的描述？`,
+                    {
+                        chat_id: chatId,
+                        message_id: processingMsgId,
+                        reply_markup: keyboard
+                    }
+                );
+                logger.info(`用户 ${userId} 编辑消息超时，已询问是否仅更新数据库`);
+            } else {
+                logger.error(`编辑失败: ${err.message}`);
+                await bot.sendMessage(chatId, '❌ 修改失败，请稍后重试', {
+                    reply_to_message_id: messageId
+                });
+                deleteUserState(userId);
+            }
+        }
+        return true;
+    }
+
+    // 步骤3：处理确认仅更新数据库的回调
+    if (state.step === 'confirm_db_only') {
+        // 由回调处理器处理，此处无需操作
         return true;
     }
 
@@ -216,6 +203,55 @@ async function handleEditMode(msg, state) {
     logger.warn(`用户 ${userId} 编辑模式未知步骤: ${state.step}，自动退出`);
     deleteUserState(userId);
     return true;
+}
+
+/**
+ * 执行数据库更新操作（更新/插入 message 记录 + group_list 标记）
+ */
+async function updateMessageDb(messageCol, {
+    isClearing, targetChatId, targetMessageId, targetGroupId,
+    targetFileUniqueId, targetMediaType, cleanText, level
+}) {
+    if (isClearing) {
+        const existing = await messageCol.findOne({
+            chat_id: targetChatId, message_id: targetMessageId
+        });
+        if (existing) {
+            await messageCol.deleteOne({ chat_id: targetChatId, message_id: targetMessageId });
+            logger.info(`已删除消息记录: chat_id=${targetChatId}, message_id=${targetMessageId}`);
+
+            const otherMessages = await messageCol.countDocuments({ group_id: targetGroupId });
+            if (otherMessages === 0) {
+                await setGroupDelete(targetGroupId, Date.now());
+                logger.info(`组内无其他文本，设置 is_delete 为时间戳: group_id=${targetGroupId}`);
+            } else {
+                await setGroupDelete(targetGroupId, 0);
+            }
+        }
+    } else {
+        const existing = await messageCol.findOne({
+            chat_id: targetChatId, message_id: targetMessageId
+        });
+        if (existing) {
+            await messageCol.updateOne(
+                { chat_id: targetChatId, message_id: targetMessageId },
+                { $set: { text: cleanText, level: level } }
+            );
+            logger.info(`已更新消息文本: chat_id=${targetChatId}, message_id=${targetMessageId}`);
+        } else {
+            await messageCol.insertOne({
+                chat_id: targetChatId,
+                message_id: targetMessageId,
+                text: cleanText,
+                file_unique_id: targetFileUniqueId,
+                media_type: targetMediaType,
+                level: level,
+                group_id: targetGroupId
+            });
+            logger.info(`已插入新消息记录: chat_id=${targetChatId}, message_id=${targetMessageId}`);
+        }
+        await setGroupDelete(targetGroupId, 0);
+    }
 }
 
 module.exports = handleEditMode;
