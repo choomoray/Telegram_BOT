@@ -13,6 +13,8 @@ const { handleSettingMessage } = require('./settingMode');
 const { handleTransportMessage } = require('./transportMode');
 const { handlePasswordMessage } = require('./passwordMode');
 const { handleManageMessage } = require('./manage');
+const { handleArticleMessage } = require('./articleMode');
+const { handleCollectionMessage } = require('./collectionMode');
 
 const modeHandlers = {
     chat: chatMode,
@@ -29,7 +31,9 @@ const modeHandlers = {
     setting: handleSettingMessage,
     transport: handleTransportMessage,
     password: handlePasswordMessage,
-    manage: handleManageMessage
+    manage: handleManageMessage,
+    article: handleArticleMessage,
+    collection: handleCollectionMessage
 };
 
 async function handleModeMessage(msg, state) {

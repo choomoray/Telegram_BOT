@@ -8,7 +8,11 @@ const COLLECTIONS = {
     CHANNEL_GROUP: 'channel_group',
     USERS: 'users',
     TRANSPORT: 'transport',
-    SETTINGS: 'settings'
+    SETTINGS: 'settings',
+    ARTICLE: 'article',
+    SUB_ARTICLE: 'sub_article',
+    COLLECTION: 'collection',
+    SUB_COLLECTION: 'sub_collection'
 };
 
 module.exports = COLLECTIONS;

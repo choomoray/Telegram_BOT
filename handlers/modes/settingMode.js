@@ -155,6 +155,39 @@ const SETTINGS = [
             await updateSetting({}, 'media_group_num', num);
         }
     },
+    {
+        key: 'article_sort', type: 'enum', label: '文章排序方式',
+        options: [
+            { label: '最近修改', value: 'recent' },
+            { label: '按时间顺序（从早到晚）', value: 'time_asc' },
+            { label: '按时间逆序（从晚到早）', value: 'time_desc' }
+        ],
+        getValue: async () => {
+            const s = await getSettings();
+            const current = s.article_sort || 'recent';
+            const map = { recent: '最近修改', time_asc: '从早到晚', time_desc: '从晚到早' };
+            return map[current] || '最近修改';
+        },
+        update: async (val) => {
+            await updateSetting({}, 'article_sort', val);
+        }
+    },
+    {
+        key: 'sub_article_sort', type: 'enum', label: '子文章排序方式',
+        options: [
+            { label: '时间逆序', value: 'time_desc' },
+            { label: '按时间顺序（从早到晚）', value: 'time_asc' }
+        ],
+        getValue: async () => {
+            const s = await getSettings();
+            const current = s.sub_article_sort || 'time_desc';
+            const map = { time_desc: '时间逆序', time_asc: '从早到晚' };
+            return map[current] || '时间逆序';
+        },
+        update: async (val) => {
+            await updateSetting({}, 'sub_article_sort', val);
+        }
+    },
 ];
 
 const ITEMS_PER_PAGE = 20;

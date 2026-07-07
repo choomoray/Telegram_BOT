@@ -29,7 +29,11 @@ async function handleHelpCommand(userId, msg) {
                 { text: '🔓 去遮罩', callback_data: 'exec_cmd:/media_unhide' }
             ],
             [
-                { text: '🔐 密码', callback_data: 'exec_cmd:/password' }
+                { text: '🔐 密码', callback_data: 'exec_cmd:/password' },
+                { text: '📚 合集', callback_data: 'exec_cmd:/collection' }
+            ],
+            [
+                { text: '📄 文章', callback_data: 'exec_cmd:/articles' }
             ]
         ]
     };

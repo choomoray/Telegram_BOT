@@ -42,6 +42,26 @@ async function initCollections() {
         await usersCol.createIndex({ group: 1 });
         await usersCol.createIndex({ state: 1, white: 1 });
 
+        // article 集合索引
+        const articleCol = db.collection(COLLECTIONS.ARTICLE);
+        await articleCol.createIndex({ id: 1 }, { unique: true });
+        await articleCol.createIndex({ updated_at: -1 });
+
+        // sub_article 集合索引
+        const subArticleCol = db.collection(COLLECTIONS.SUB_ARTICLE);
+        await subArticleCol.createIndex({ id: 1 }, { unique: true });
+        await subArticleCol.createIndex({ article_id: 1, updated_at: -1 });
+
+        // collection 集合索引
+        const collectionCol = db.collection(COLLECTIONS.COLLECTION);
+        await collectionCol.createIndex({ id: 1 }, { unique: true });
+        await collectionCol.createIndex({ type: 1, updated_at: -1 });
+
+        // sub_collection 集合索引
+        const subCollectionCol = db.collection(COLLECTIONS.SUB_COLLECTION);
+        await subCollectionCol.createIndex({ id: 1 }, { unique: true });
+        await subCollectionCol.createIndex({ collection_id: 1, updated_at: -1 });
+
         logger.success('数据库集合索引创建完成');
     } catch (err) {
         logger.error('初始化集合索引失败:', err.message);

@@ -19,7 +19,9 @@ const DEFAULT_SETTINGS = {
     random_videos_time: '<1min',
     random_videos_num_text: 15,
     random_videos_num_video: 10,
-    media_group_num: 10
+    media_group_num: 10,
+    article_sort: 'recent',
+    sub_article_sort: 'time_desc'
 };
 
 // 允许更新的 key 列表

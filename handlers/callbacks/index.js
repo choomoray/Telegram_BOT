@@ -127,6 +127,40 @@ async function handleCallbackQuery(query) {
         return;
     }
 
+    // 动态分发 collection: 前缀 (合集)
+    if (data.startsWith('collection:')) {
+        try {
+            const collectionMode = require('../modes/collectionMode');
+            const handled = await collectionMode.handleCallback(query);
+            if (!handled) {
+                await bot.answerCallbackQuery(query.id, { text: '❌ 未知合集操作' });
+            }
+        } catch (err) {
+            logger.error(`处理合集回调 ${data} 时发生错误: ${err.message}`);
+            try { await bot.answerCallbackQuery(query.id, { text: '❌ 处理失败' }); } catch (e) {}
+        }
+        return;
+    }
+
+    // 动态分发 article: 前缀 (文章)
+    if (data.startsWith('article:')) {
+        try {
+            const articleMode = require('../modes/articleMode');
+            const handled = await articleMode.handleCallback(query);
+            if (!handled) {
+                await bot.answerCallbackQuery(query.id, { text: '❌ 未知文章操作' });
+            }
+        } catch (err) {
+            logger.error(`处理文章回调 ${data} 时发生错误: ${err.message}`);
+            try {
+                await bot.answerCallbackQuery(query.id, { text: '❌ 处理失败' });
+            } catch (answerErr) {
+                logger.warn(`answerCallbackQuery 失败: ${answerErr.message}`);
+            }
+        }
+        return;
+    }
+
     const prefix = data.split(':')[0];
     const handler = callbackHandlers[prefix];
     if (handler) {
