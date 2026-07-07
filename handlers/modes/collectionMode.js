@@ -40,10 +40,12 @@ async function showList(userId, messageId, type, page = 1, viewMode = 'fold') {
     const pageItems = items.slice(start, start + PAGE_SIZE);
     const typeLabel = TYPE_LABELS[type] || type;
 
+    const isMisc = type === 'misc';
     let text = `📋 ${typeLabel}列表（共 ${items.length} 个）：\n`;
     if (pageItems.length === 0) {
         text += '暂无内容';
-    } else {
+    } else if (!isMisc) {
+        // 合集：显示编号列表
         for (let i = 0; i < pageItems.length; i++) {
             const idx = start + i + 1;
             text += `${idx}. ${escapeHTML(pageItems[i].name)}\n`;
@@ -52,17 +54,33 @@ async function showList(userId, messageId, type, page = 1, viewMode = 'fold') {
 
     const keyboard = [];
 
-    // 展开模式才显示编号按钮矩阵
+    // 展开模式才显示按钮
     if (viewMode === 'number' && pageItems.length > 0) {
-        for (let i = 0; i < pageItems.length; i += 5) {
-            const row = [];
-            for (let j = i; j < i + 5 && j < pageItems.length; j++) {
-                row.push({
-                    text: String(start + j + 1),
-                    callback_data: `collection:item:${type}:${pageItems[j].id}`
-                });
+        if (isMisc) {
+            // 杂集：按钮显示标题文字，每行最多3个
+            for (let i = 0; i < pageItems.length; i += 3) {
+                const row = [];
+                for (let j = i; j < i + 3 && j < pageItems.length; j++) {
+                    const name = pageItems[j].name;
+                    row.push({
+                        text: name.length > 12 ? name.substring(0, 10) + '…' : name,
+                        callback_data: `collection:item:${type}:${pageItems[j].id}`
+                    });
+                }
+                keyboard.push(row);
             }
-            keyboard.push(row);
+        } else {
+            // 合集：编号按钮矩阵，每行5个
+            for (let i = 0; i < pageItems.length; i += 5) {
+                const row = [];
+                for (let j = i; j < i + 5 && j < pageItems.length; j++) {
+                    row.push({
+                        text: String(start + j + 1),
+                        callback_data: `collection:item:${type}:${pageItems[j].id}`
+                    });
+                }
+                keyboard.push(row);
+            }
         }
     }
 
