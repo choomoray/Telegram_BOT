@@ -49,12 +49,14 @@ function formatTime(ts) {
 }
 
 /**
- * 格式化单条标记记录（格式与查找结果类似，次数置前，时间置后）
+ * 格式化单条标记记录
+ * 按次数排序：🎬 5次丨01 XXX
+ * 按时间排序：🎬 5次丨01 XXX丨⏱️ 2026-08-14 21:30
  */
-function formatMarkRecordLine(item, index, total) {
-    const markCount = `🔖 ${item.mark || 0}次`;
+function formatMarkRecordLine(item, index, total, sortMode) {
     const icon = MEDIA_ICON[item.media_type] || '📎';
     const number = total >= 10 ? String(index).padStart(2, '0') : index;
+    const markCount = `${item.mark || 0}次`;
 
     let text = (item.text || '').trim();
     text = removeLevelSuffix(text);
@@ -69,8 +71,12 @@ function formatMarkRecordLine(item, index, total) {
         display = escapeHTML(text);
     }
 
-    const markTime = `⏱ ${formatTime(item.last_mark_time)}`;
-    return `${markCount} ${icon} ${number} ${display} — ${markTime}`;
+    let line = `${icon} ${markCount}丨${number} ${display}`;
+    // 仅按时间排序时展示最后标记时间
+    if (sortMode === 'time') {
+        line += `丨⏱️ ${formatTime(item.last_mark_time)}`;
+    }
+    return line;
 }
 
 /**
@@ -84,7 +90,7 @@ function formatMarkRecords(results, total, currentPage, totalPages, pageSize, so
 
     results.forEach((item, idx) => {
         const globalIndex = (currentPage - 1) * pageSize + idx + 1;
-        lines.push(formatMarkRecordLine(item, globalIndex, total));
+        lines.push(formatMarkRecordLine(item, globalIndex, total, sortMode));
     });
 
     if (totalPages > 1) {
