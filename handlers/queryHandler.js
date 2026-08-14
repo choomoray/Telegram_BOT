@@ -1,7 +1,7 @@
 // handlers/queryHandler.js
 const bot = require('../bot');
 const logger = require('../logger');
-const { ADMIN_CHAT_IDS } = require('../config');
+const { isAdmin } = require('../utils/permissions');
 const { getCollection, COLLECTIONS } = require('../db/getCollection');
 const { getSettings } = require('../db/settings');
 const { parseQuery } = require('../utils/queryParser');
@@ -10,10 +10,6 @@ const { createSession } = require('../utils/queryCache');
 const { insertLog } = require('../db/log');
 
 const LEVELS = ['S', 'A', 'B', 'C', 'D'];
-
-function isAdmin(userId) {
-    return ADMIN_CHAT_IDS.includes(userId);
-}
 
 function buildQuery(parsed) {
     const { types, specifiedLevels, levelGTE, levelLTE, keyword } = parsed;
@@ -105,8 +101,13 @@ async function handleQuery(msg) {
     const text = msg.text || '';
 
     if (!isAdmin(userId)) {
-        logger.info(`用户 ${userId} 非管理员，查询请求已忽略`);
-        return;
+        // 白名单用户（非管理员）允许基础查询（与 README 权限模型一致）
+        const { isUserAllowed } = require('../db/users');
+        const allowed = await isUserAllowed(userId);
+        if (!allowed) {
+            logger.info(`用户 ${userId} 非管理员且不在白名单，查询请求已忽略`);
+            return;
+        }
     }
 
     const parsed = parseQuery(text);

@@ -1,6 +1,8 @@
 // handlers/commands/index.js
 const fs = require('fs');
 const path = require('path');
+const logger = require('../../logger');
+const { isAdmin } = require('../../utils/permissions');
 
 const commandMap = new Map();
 
@@ -42,31 +44,36 @@ for (const file of commandFiles) {
 }
 
 /**
- * 执行命令（严格匹配完整命令）
+ * 白名单用户（非管理员）允许使用的命令
+ * 与 README 权限模型一致：白名单用户仅可使用基础查询功能
+ */
+const WHITELIST_ALLOWED_COMMANDS = new Set(['/search', '/exit']);
+
+/**
+ * 执行命令（严格匹配完整命令，其次匹配短命令）
  * @param {string} fullCommandText - 用户输入的命令文本
  * @param {number} userId - 用户ID
  * @param {Object} msg - Telegram 消息对象
- * @returns {Promise<boolean>} 是否成功执行
+ * @returns {Promise<string>} 'executed' | 'forbidden' | 'not_found'
  */
 async function executeCommand(fullCommandText, userId, msg) {
     const normalized = fullCommandText.trim();
-
-    // 精确匹配完整命令
-    let handler = commandMap.get(normalized);
-    if (handler) {
-        await handler(userId, msg);
-        return true;
-    }
-
-    // 降级匹配短命令（去掉参数）
     const shortCommand = normalized.split(' ')[0];
-    handler = commandMap.get(shortCommand);
-    if (handler) {
-        await handler(userId, msg);
-        return true;
+
+    // 精确匹配完整命令，降级匹配短命令（去掉参数）
+    const handler = commandMap.get(normalized) || commandMap.get(shortCommand);
+    if (!handler) {
+        return 'not_found';
     }
 
-    return false;
+    // 权限校验：非管理员只能执行白名单命令（防止通过 /help 按钮或 AI 指令越权）
+    if (!isAdmin(userId) && !WHITELIST_ALLOWED_COMMANDS.has(shortCommand)) {
+        logger.warn(`用户 ${userId} 尝试执行无权限命令: ${shortCommand}`);
+        return 'forbidden';
+    }
+
+    await handler(userId, msg);
+    return 'executed';
 }
 
 module.exports = {

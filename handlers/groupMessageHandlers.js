@@ -379,7 +379,7 @@ async function handleGroupMessage(msg) {
             if (messageText.startsWith('/')) {
                 const fullCommand = messageText.trim();
                 const executed = await executeCommand(fullCommand, userId, msg);
-                if (executed) {
+                if (executed === 'executed') {
                     logger.info(`[群组] 管理员 ${userId} 执行命令: ${fullCommand}`);
                     return;
                 }

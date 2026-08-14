@@ -5,7 +5,6 @@ const { getUserDisplayName } = require('../utils/helpers');
 const {
     getUserState,
     updateUserActivity,
-    setUserState,
     getRawUserState,
     deleteUserState
 } = require('../states');
@@ -46,8 +45,14 @@ async function handlePrivateMessage(msg) {
 
     if (messageText.startsWith('/')) {
         const fullCommand = messageText.trim();
-        const executed = await executeCommand(fullCommand, userId, msg);
-        if (executed) {
+        const result = await executeCommand(fullCommand, userId, msg);
+        if (result === 'executed') {
+            return;
+        } else if (result === 'forbidden') {
+            await bot.sendMessage(userId, '❌ 无权使用该指令', {
+                reply_to_message_id: msg.message_id,
+                allow_sending_without_reply: true
+            }).catch(err => logger.error('发送权限提示失败:', err.message));
             return;
         } else {
             await bot.sendMessage(userId, '❌ 指令错误', {
@@ -82,7 +87,6 @@ async function handlePrivateMessage(msg) {
             await bot.sendMessage(userId, exitMsg).catch(() => { });
             deleteUserState(userId);
             logger.info(`用户 ${userId} ${mode}模式超时自动退出`);
-            currentState = getUserState(userId);
         } else {
             if (rawState._onExit) {
                 await rawState._onExit(userId, rawState);
@@ -92,18 +96,7 @@ async function handlePrivateMessage(msg) {
             const modeName = getModeName(mode);
             await bot.sendMessage(userId, `✅ 已退出${modeName}（超时）`).catch(() => { });
             logger.info(`用户 ${userId} ${mode}模式超时自动退出`);
-            currentState = getUserState(userId);
         }
-    }
-
-    if (!currentState && rawState) {
-        const mode = rawState.mode;
-        logger.info(`用户 ${userId} 状态超时后仍然存在，强制重新激活 (mode=${mode})`);
-        setUserState(userId, {
-            ...rawState,
-            lastActivity: Date.now()
-        });
-        currentState = getUserState(userId);
     }
 
     if (currentState) {
