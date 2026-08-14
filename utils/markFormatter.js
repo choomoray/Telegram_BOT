@@ -49,9 +49,10 @@ function formatTime(ts) {
 }
 
 /**
- * 格式化单条标记记录（格式与查找结果类似，附加标记信息）
+ * 格式化单条标记记录（格式与查找结果类似，次数置前，时间置后）
  */
-function formatMarkRecordLine(item, index, total, sortMode) {
+function formatMarkRecordLine(item, index, total) {
+    const markCount = `🔖 ${item.mark || 0}次`;
     const icon = MEDIA_ICON[item.media_type] || '📎';
     const number = total >= 10 ? String(index).padStart(2, '0') : index;
 
@@ -68,10 +69,8 @@ function formatMarkRecordLine(item, index, total, sortMode) {
         display = escapeHTML(text);
     }
 
-    const markCount = `🔖 ${item.mark || 0}次`;
     const markTime = `⏱ ${formatTime(item.last_mark_time)}`;
-    const markInfo = sortMode === 'time' ? `${markTime} · ${markCount}` : `${markCount} · ${markTime}`;
-    return `${icon} ${number} ${display} — ${markInfo}`;
+    return `${markCount} ${icon} ${number} ${display} — ${markTime}`;
 }
 
 /**
@@ -85,7 +84,7 @@ function formatMarkRecords(results, total, currentPage, totalPages, pageSize, so
 
     results.forEach((item, idx) => {
         const globalIndex = (currentPage - 1) * pageSize + idx + 1;
-        lines.push(formatMarkRecordLine(item, globalIndex, total, sortMode));
+        lines.push(formatMarkRecordLine(item, globalIndex, total));
     });
 
     if (totalPages > 1) {

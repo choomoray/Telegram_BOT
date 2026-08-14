@@ -59,32 +59,35 @@ test('缺省字段记录排最后（time 模式）', () => {
     assert.deepStrictEqual(sorted.map(r => r.group_id), ['a', 'b']);
 });
 
-test('格式化单条记录：图标 + 编号 + 链接 + 标记信息', () => {
+test('格式化单条记录：次数置前 + 图标 + 编号 + 链接 + 时间置后', () => {
     const line = formatMarkRecordLine(
         { group_id: 'g1', mark: 3, last_mark_time: 1710000000000, text: '测试内容', chat_id: -1001234567890, message_id: 42, media_type: 'video' },
-        1, 100, 'count'
+        1, 100
     );
+    assert.ok(line.startsWith('🔖 3次'), `行应以次数开头: ${line}`);
     assert.ok(line.includes('🎬'));
     assert.ok(line.includes('01'));
     assert.ok(line.includes('https://t.me/c/1234567890/42'));
     assert.ok(line.includes('测试内容'));
-    assert.ok(line.includes('🔖 3次'));
+    assert.ok(line.includes('⏱'));
+    // 时间应在末尾（最后出现）
+    assert.ok(line.lastIndexOf('⏱') > line.indexOf('测试内容'), `时间应在文本之后: ${line}`);
 });
 
-test('格式化单条记录：time 模式标记信息顺序', () => {
-    const line = formatMarkRecordLine(
-        { group_id: 'g1', mark: 3, last_mark_time: 1710000000000, text: '测试', chat_id: -1001, message_id: 1, media_type: 'photo' },
-        1, 10, 'time'
-    );
+test('次数置前与排序模式无关', () => {
+    // sortMode 不再影响行格式，行首始终为次数
+    const item = { group_id: 'g1', mark: 3, last_mark_time: 1710000000000, text: '测试', chat_id: -1001, message_id: 1, media_type: 'photo' };
+    const line = formatMarkRecordLine(item, 1, 10);
+    assert.ok(line.startsWith('🔖 3次'));
     assert.ok(line.includes('⏱'));
-    assert.ok(line.includes('🔖 3次'));
 });
 
 test('无消息信息时无链接，空文本显示无标题', () => {
     const line = formatMarkRecordLine(
         { group_id: 'g1', mark: 1, last_mark_time: null, text: '', chat_id: null, message_id: null, media_type: null },
-        1, 5, 'count'
+        1, 5
     );
+    assert.ok(line.startsWith('🔖 1次'));
     assert.ok(!line.includes('<a href'));
     assert.ok(line.includes('（无标题）'));
     assert.ok(line.includes('⏱ 未知'));
@@ -94,7 +97,7 @@ test('长文本截断', () => {
     const longText = 'x'.repeat(100);
     const line = formatMarkRecordLine(
         { group_id: 'g1', mark: 1, last_mark_time: null, text: longText, chat_id: -1001, message_id: 1, media_type: 'photo' },
-        1, 1, 'count'
+        1, 1
     );
     assert.ok(line.includes('…'));
     assert.ok(!line.includes('x'.repeat(50)));
