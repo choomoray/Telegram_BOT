@@ -22,7 +22,9 @@
   <header class="topbar">
     <div class="topbar-title">🗄️ 数据库控制台</div>
     <div class="topbar-right">
-      <button id="refresh-btn" class="btn btn-sm">🔄 刷新数据</button>
+      <select id="collection-select-top" class="coll-select" title="选择数据库（默认全部）"></select>
+      <button id="refresh-btn" class="btn btn-sm">🔄 刷新</button>
+      <label class="auto-refresh"><input type="checkbox" id="auto-refresh"> 定时刷新</label>
       <button id="logout-btn" class="btn-ghost btn-sm">退出</button>
     </div>
   </header>
@@ -36,7 +38,7 @@
       </div>
       <div class="op-panel">
         <div class="op-row">
-          <select id="collection-select" title="选择数据库（默认全部）">
+          <select id="collection-select-op" class="coll-select" title="选择数据库（与顶部同步，默认全部）">
             <option value="__all__">全部数据库</option>
           </select>
           <button id="selected-btn" class="btn btn-sm selected-off" title="点击右侧数据可选中，用于操作定位">未选中</button>

@@ -26,7 +26,7 @@ const { callDeepSeek } = require('./ai');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const SESSION_TTL = 12 * 60 * 60 * 1000; // 会话有效期 12 小时
 const ALL_COLLECTIONS_KEY = '__all__';   // "全部集合" 模式
-const ALL_COLLECTIONS_LIMIT = 100;       // 全部模式下每个集合最多取 100 条
+const ALL_COLLECTIONS_LIMIT = 50;        // 全部模式下每个集合最多取 50 条
 
 // 登录会话：token -> { createdAt }
 const sessions = new Map();

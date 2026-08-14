@@ -12,10 +12,11 @@
     collections: [],
     collection: ALL_KEY,
     page: 1,
-    pageSize: 20,
+    pageSize: 50,
     totalPages: 1,
     selected: null,       // { collection, doc }
-    logCount: 0
+    autoRefresh: false,
+    timer: null
   };
 
   // ---------- 基础 ----------
@@ -80,6 +81,7 @@
   function logout() {
     localStorage.removeItem(TOKEN_KEY);
     stopLogStream();
+    stopAutoRefresh();
     $('#app-view').classList.add('hidden');
     $('#login-view').classList.remove('hidden');
   }
@@ -90,14 +92,42 @@
     try {
       const data = await api('/db/collections');
       state.collections = data.collections;
-      const sel = $('#collection-select');
-      sel.innerHTML = `<option value="${ALL_KEY}">全部数据库</option>` +
+      const options = `<option value="${ALL_KEY}">全部数据库</option>` +
         data.collections.map(c => `<option value="${c}">${c}</option>`).join('');
+      $('#collection-select-top').innerHTML = options;
+      $('#collection-select-op').innerHTML = options;
       startLogStream();
       await runQuery(1);
     } catch (err) {
       toast(err.message, true);
     }
+  }
+
+  // 两个数据库选择（顶部 + 操作区）双向同步
+  function syncCollectionSelect(from) {
+    const top = $('#collection-select-top');
+    const op = $('#collection-select-op');
+    const val = from === 'top' ? top.value : op.value;
+    if (top.value !== val) top.value = val;
+    if (op.value !== val) op.value = val;
+    state.collection = val;
+  }
+
+  // ---------- 定时刷新 ----------
+
+  function toggleAutoRefresh() {
+    state.autoRefresh = $('#auto-refresh').checked;
+    if (state.autoRefresh) {
+      stopAutoRefresh();
+      state.timer = setInterval(() => { if (!document.hidden) runQuery(state.page); }, 5000);
+      toast('已开启定时刷新（5 秒）');
+    } else {
+      stopAutoRefresh();
+    }
+  }
+
+  function stopAutoRefresh() {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
   }
 
   // ---------- 查询与渲染 ----------
@@ -113,8 +143,7 @@
     const meta = $('#data-meta');
 
     if (data.all) {
-      meta.textContent = `跨集合浏览（每集合最多显示 ${data.limit} 条，点击文档可选中）`;
-      const groups = data.groups.filter(g => g.items.length > 0 || g.total > 0);
+      meta.textContent = `跨集合浏览（每集合最多显示 ${data.limit} 条，点击文档可选中）`;      const groups = data.groups.filter(g => g.items.length > 0 || g.total > 0);
       if (!groups.length) {
         list.innerHTML = '<div class="text-dim" style="padding:20px;text-align:center">未找到数据</div>';
         state.totalPages = 1;
@@ -160,21 +189,60 @@
   function renderPagination() {
     const wrap = $('#pagination');
     wrap.innerHTML = '';
-    if (state.totalPages <= 1) return;
-    const prev = document.createElement('button');
-    prev.className = 'btn btn-sm';
-    prev.textContent = '⬅ 上一页';
-    prev.disabled = state.page <= 1;
-    prev.onclick = () => runQuery(state.page - 1);
-    const info = document.createElement('span');
-    info.className = 'page-info';
-    info.textContent = `${state.page} / ${state.totalPages}`;
-    const next = document.createElement('button');
-    next.className = 'btn btn-sm';
-    next.textContent = '下一页 ➡';
-    next.disabled = state.page >= state.totalPages;
-    next.onclick = () => runQuery(state.page + 1);
-    wrap.append(prev, info, next);
+    const N = state.totalPages;
+    if (N <= 1) return;
+
+    const addBtn = (label, page, disabled) => {
+      const b = document.createElement('button');
+      b.className = 'btn btn-sm';
+      b.textContent = label;
+      b.disabled = disabled;
+      b.onclick = () => runQuery(page);
+      wrap.appendChild(b);
+    };
+    const addEllipsis = () => {
+      const el = document.createElement('span');
+      el.className = 'page-ellipsis';
+      el.textContent = '···';
+      wrap.appendChild(el);
+    };
+
+    // << 首页
+    addBtn('<<', 1, state.page <= 1);
+    if (state.page > 3) addEllipsis();
+
+    // 当前页前后两页页码
+    for (let i = Math.max(1, state.page - 2); i <= Math.min(N, state.page + 2); i++) {
+      if (i === state.page) {
+        const cur = document.createElement('span');
+        cur.className = 'page-current';
+        cur.textContent = String(i);
+        wrap.appendChild(cur);
+      } else {
+        addBtn(String(i), i, false);
+      }
+    }
+
+    if (state.page < N - 2) addEllipsis();
+
+    // >> 末页
+    addBtn('>>', N, state.page >= N);
+
+    // 手动输入跳转（回车）
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = 1;
+    input.max = N;
+    input.placeholder = '页码';
+    input.className = 'page-input';
+    input.title = '输入页码后回车跳转';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const v = parseInt(input.value, 10);
+        if (v >= 1 && v <= N) runQuery(v);
+      }
+    });
+    wrap.appendChild(input);
   }
 
   // ---------- 选中 ----------
@@ -304,13 +372,13 @@
 
   $('#login-btn').onclick = login;
   $('#login-password').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
-  $('#logout-btn').onclick = logout;
+  $('#logout-btn').onclick = () => { stopAutoRefresh(); logout(); };
   $('#refresh-btn').onclick = () => runQuery(state.page);
+  $('#auto-refresh').onchange = toggleAutoRefresh;
 
-  $('#collection-select').onchange = () => {
-    state.collection = $('#collection-select').value;
-    runQuery(1);
-  };
+  // 两个数据库选择（顶部 + 操作区）同步
+  $('#collection-select-top').onchange = () => { syncCollectionSelect('top'); runQuery(1); };
+  $('#collection-select-op').onchange = () => { syncCollectionSelect('op'); runQuery(1); };
 
   $('#selected-btn').onclick = () => {
     // 点击选中按钮：取消选中（若有）
