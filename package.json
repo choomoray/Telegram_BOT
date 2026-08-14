@@ -14,13 +14,12 @@
   ],
   "author": "",
   "license": "ISC",
-  "description": "Telegram 媒体管理机器人：群组/频道媒体自动收录、检索、回复与管理，集成 AI 聊天智能体与群组权限管理",
+  "description": "Telegram 媒体管理机器人：群组/频道媒体自动收录、检索、回复与管理，集成群组管理与用户权限控制",
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
     "async": "^3.2.6",
-    "axios": "^1.13.5",
     "chalk": "^4.1.2",
     "mongodb": "^6.21.0",
     "node-telegram-bot-api": "^0.67.0"

@@ -1,8 +1,8 @@
 # Telegram 媒体管理机器人
 
-一个功能丰富的 Telegram Bot，基于 Node.js 开发，用于群组/频道媒体消息的自动收录、检索、回复与管理，并集成 AI 聊天智能体、群组管理和用户权限控制。
+一个功能丰富的 Telegram Bot，基于 Node.js 开发，用于群组/频道媒体消息的自动收录、检索、回复与管理，并集成群组管理和用户权限控制。
 
-**版本:** 0.4.3 | **运行环境:** Node.js | **数据库:** MongoDB Atlas | **AI 接口:** DeepSeek API / LM Studio
+**版本:** 0.4.3 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
 
 ---
 
@@ -59,8 +59,7 @@
   - [健康检查 — healthServer.js](#8-健康检查--healthserverjs)
   - [工具函数层 — utils/](#9-工具函数层--utils)
   - [数据库操作层 — db/](#10-数据库操作层--db)
-  - [AI 集成层 — ai/](#11-ai-集成层--ai)
-  - [业务处理层 — handlers/](#12-业务处理层--handlers)
+  - [业务处理层 — handlers/](#11-业务处理层--handlers)
 - [数据流详解](#数据流详解)
 - [环境变量](#环境变量)
 - [指令列表](#指令列表)
@@ -104,10 +103,10 @@
 └─────────────────────────────────────────────────────┘
    │        │          │
    ▼        ▼          ▼
-┌────────┐ ┌────────┐ ┌──────────┐
-│  db/   │ │  ai/   │ │ utils/   │
-│数据库层│ │AI集成层│ │工具函数层│
-└────────┘ └────────┘ └──────────┘
+┌────────┐ ┌──────────┐
+│  db/   │ │ utils/   │
+│数据库层│ │工具函数层│
+└────────┘ └──────────┘
 ```
 
 **设计要点：**
@@ -115,7 +114,6 @@
 - **事件驱动：** index.js 注册 Telegram 事件监听，按消息来源（私聊/群组/回调）分发给不同处理器
 - **命令自动加载：** commands/index.js 自动扫描目录注册所有 /command 处理器
 - **模式系统：** modes/ 实现"模式"概念——用户进入某种模式后，后续消息由对应模式处理器接管，直到 /exit 退出
-- **AI 智能体循环：** AI 回复支持嵌入式指令（数据库查询、设置更新、命令执行等），通过递归解析器实现多轮 Agent 调用
 
 ---
 
@@ -203,12 +201,6 @@ const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, {
 | `MONGODB_URI` | string | 主数据库连接串 |
 | `TEST_MONGODB_URI` | string | 测试数据库连接串 |
 | `ADMIN_CHAT_IDS` | number[] | 管理员用户 ID 列表 |
-| `DEEPSEEK_API_URL` | string | DeepSeek API 地址 |
-| `DEEPSEEK_API_KEY` | string | DeepSeek API 密钥 |
-| `DEEPSEEK_MODEL` | string | 模型名称 |
-| `LMSTUDIO_API_URL` | string | LM Studio API 地址 |
-| `LMSTUDIO_MODEL` | string | 本地模型名称 |
-| `CONNECTION_POOL_MAX_SOCKETS` | number | HTTP 连接池最大套接字数 |
 
 ---
 
@@ -414,16 +406,11 @@ function generateGroupIdFromMessage(msg) { ... }
 维护模式标识符到中文名称的映射表：
 ```javascript
 module.exports = {
-  'chat': 'AI 聊天',
   'media_group': '媒体合并',
   'search': '搜索',
   // ...
 };
 ```
-
-#### loadSystemPrompt.js — AI 系统提示加载
-
-从 `ai/AI Read/` 目录读取 Markdown 文件，拼接为 AI 系统提示词。
 
 #### enterMode.js — 模式切换清理
 
@@ -481,8 +468,6 @@ module.exports = {
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `STREAM_OUTPUT` | boolean | true | AI 是否流式输出 |
-| `STREAM_UPDATE_INTERVAL` | number | 500 | 流式刷新间隔(ms) |
 | `search_level` | boolean | false | 搜索是否按等级显示 |
 | `search_random` | boolean | false | 是否随机搜索结果 |
 | `random_pictures` | boolean | false | 随机图片功能开关 |
@@ -569,44 +554,7 @@ module.exports = {
 
 ---
 
-### 11. AI 集成层 — ai/
-
-**路径:** `ai/` **职责:** 封装 AI 模型的 API 调用
-
-#### ai/deepseek.js — DeepSeek API 客户端
-
-**实现要点：**
-- 使用 `axios` 发起 HTTP 请求，连接池配置 keep-alive
-- 支持两种模式：
-  - `callDeepSeekStream(messages, onChunk, onDone)` — SSE 流式解析，逐块回调
-  - `callDeepSeek(messages)` — 非流式，等待完整响应
-- 兼容标准 OpenAI Chat Completions API 格式
-- 可通过环境变量配置 API 地址、密钥和模型名
-- 支持 `thinking` 模式（temperature 设为 0.2，适用于推理任务）
-
-#### ai/lmstudio.js — LM Studio API 客户端
-
-**实现要点：**
-- 与 deepseek.js 相同的接口签名，方便切换
-- 默认连接 `http://localhost:1234/v1/chat/completions`
-- 无 API 密钥（本地部署）
-- 支持流式和非流式两种模式
-
-#### ai/AI Read/ — AI 知识库
-
-三个 Markdown 文件构成 AI 助手的系统提示知识库：
-
-| 文件 | 内容 |
-|------|------|
-| `00-core.md` | 核心规则：AI 的身份定位、行为准则、交互格式 |
-| `01-commands.md` | 命令文档：所有 Telegram 命令的用途和用法 |
-| `02-database.md` | 数据库模式：集合结构、字段说明、查询示例 |
-
-AI 可以通过 `[LOAD 文件名]` 指令动态加载这些知识库文件。
-
----
-
-### 12. 业务处理层 — handlers/
+### 11. 业务处理层 — handlers/
 
 **路径:** `handlers/` **职责:** 实现具体的业务逻辑
 
@@ -702,7 +650,6 @@ for (const file of commandFiles) {
 
 | 命令 | 文件 | 功能 | 实现要点 |
 |------|------|------|----------|
-| `/chat` | chat.js | AI 聊天模式 | 设置 mode=chat，后续消息转发到 chatMode |
 | `/clean` | clean.js | 数据库清理模式 | 扫描空数据的 group_list，批量删除 |
 | `/delete` | delete.js | 删除单一媒体 | 进入 delete 模式，等待用户发送媒体或链接 |
 | `/delete_group` | deleteGroup.js | 删除整个媒体组 | 进入 deleteGroup 模式，等待用户操作 |
@@ -730,7 +677,6 @@ for (const file of commandFiles) {
 function handleModeMessage(userId, msgText, msg, userName) {
   const state = getUserState(userId);
   switch (state.mode) {
-    case 'chat': return handleChatMode(userId, msgText, msg, userName);
     case 'search': return handleSearchMode(userId, msgText, msg);
     case 'media_group':
     case 'media_hide':
@@ -740,49 +686,6 @@ function handleModeMessage(userId, msgText, msg, userName) {
   }
 }
 ```
-
-**chatMode/ — AI 聊天模式（最复杂的子系统）**
-
-```
-用户发送消息
-    │
-    ├── aiQueue.enqueue(userId, task)  → 串行化请求
-    │
-    ├── chatMode/index.js
-    │   ├── 构建消息上下文 (系统提示 + 历史消息)
-    │   ├── callModel() → 模型调用 (带自动故障切换)
-    │   │   ├── DeepSeek (流式/非流式)
-    │   │   └── LM Studio (流式/非流式)
-    │   │
-    │   ├── 流式输出: 每 500ms 更新一次消息文本
-    │   │
-    │   └── processAIReply() → AI 回复处理
-    │       │
-    │       ├── parseAIReply() → 拆分为 @bot, @ai, @user 块
-    │       │
-    │       ├── extractCommands() → 提取嵌入式指令
-    │       │   ├── [CMD /xxx] → 执行 Telegram 命令
-    │       │   ├── [LOAD file] → 加载知识库文件
-    │       │   ├── [DB query] → 执行数据库查询
-    │       │   ├── [DB:update ...] → 执行数据库更新
-    │       │   ├── [QUERY ...] → 关键字搜索
-    │       │   ├── [GET ...] → 获取媒体信息
-    │       │   └── [BUTTON ...] → 模拟按钮点击
-    │       │
-    │       └── 结果反馈给 AI → 继续递归处理 (最多 3 轮)
-    │
-    └── 最终 @user 块显示给用户
-```
-
-**AI 请求队列 (aiQueue.js)：**
-- 每个用户独立队列，保证同一用户的 AI 请求顺序执行
-- 正在处理中的请求不会被新请求打断
-- 使用 `async/await` 实现，非传统的 callback 队列
-
-**模型自动故障切换 (modelCall.js)：**
-- 优先使用 DeepSeek（远程 API）
-- DeepSeek 失败 → 自动回退到 LM Studio（本地模型）
-- 用户可通过内联按钮手动选择/切换模型
 
 **manage/ — 管理面板**
 
@@ -815,10 +718,6 @@ const callbackMap = {
   'random_show_': randomShowCallback,
   'clean_': cleanCallback,
   'clean_continue_': cleanContinueCallback,
-  'select_model': selectModel,
-  'switch_model_': switchModel,
-  'toggle_thinking': toggleThinking,
-  'retry_model_': retryModel,
   'exec_cmd_': execCmd,
 };
 
@@ -838,10 +737,6 @@ const dynamicPrefixes = ['manage_', 'set_', 'pwd_'];
 | `randomShowCallback.js` | 随机结果显示切换 |
 | `cleanCallback.js` | 清理模式确认/取消 |
 | `cleanContinueCallback.js` | 清理完成后继续/退出 |
-| `selectModel.js` | AI 模型选择 |
-| `switchModel.js` | AI 模型切换 |
-| `toggleThinking.js` | AI 思考模式开关 |
-| `retryModel.js` | AI 重试（切换模型重试） |
 | `execCmd.js` | 执行指定命令 |
 
 ---
@@ -916,43 +811,7 @@ handleQuery()
                          → bot.editMessageReplyMarkup(...)
 ```
 
-### 场景三：AI 聊天（用户消息 → 模型调用 → 嵌入式指令执行）
-
-```
-用户在聊天模式发送消息
-    │
-    ▼
-handleChatMode()
-    │
-    ├── aiQueue.enqueue(userId, async () => {
-    │   ├── 构建 messages 数组
-    │   │   ├── system prompt (loadSystemPrompt + 知识库)
-    │   │   └── 对话历史 (最近 N 轮)
-    │   │
-    │   ├── callModel(messages, onChunk)
-    │   │   ├── 尝试 DeepSeek (流式)
-    │   │   ├── 失败 → 回退 LM Studio (流式)
-    │   │   ├── onChunk: 每 500ms 更新消息文本
-    │   │   └── onDone: 返回完整文本
-    │   │
-    │   └── processAIReply(fullText)
-    │       │
-    │       ├── parseAIReply → @bot, @ai, @user 块
-    │       │
-    │       ├── @bot 块 → extractCommands()
-    │       │   ├── [QUERY xxx] → handleQuery(xxx) → 结果回填
-    │       │   ├── [DB:query xxx] → dbOperations.query(xxx) → 结果回填
-    │       │   ├── [CMD /xxx] → executeCommand(xxx)
-    │       │   └── [LOAD xxx] → 读取知识库 → 回填
-    │       │
-    │       ├── @ai 块 → 继续递归 (最多 3 轮)
-    │       │
-    │       └── @user 块 → 最终显示给用户
-    │   })
-    └──
-```
-
-### 场景四：群组消息编辑同步
+### 场景三：群组消息编辑同步
 
 ```
 用户在群组中编辑了一条已收录的消息
@@ -983,12 +842,6 @@ handleGroupEditedMessage()
 | `MONGODB_URI` | 是 | MongoDB Atlas 连接串 |
 | `TEST_MONGODB_URI` | 否 | 测试数据库连接串 |
 | `ADMIN_CHAT_ID` | 是 | 管理员 Telegram 用户 ID，多个用逗号分隔 |
-| `DEEPSEEK_API_URL` | 否 | DeepSeek API 地址 |
-| `DEEPSEEK_API_KEY` | 否 | DeepSeek API 密钥 |
-| `DEEPSEEK_MODEL` | 否 | DeepSeek 模型名 |
-| `LMSTUDIO_API_URL` | 否 | LM Studio API 地址 |
-| `LMSTUDIO_MODEL` | 否 | LM Studio 模型名 |
-| `CONNECTION_POOL_MAX_SOCKETS` | 否 | HTTP 连接池最大套接字数 |
 
 ---
 
@@ -998,7 +851,6 @@ handleGroupEditedMessage()
 
 | 命令 | 功能 | 所属模块 |
 |------|------|----------|
-| `/chat` | AI 聊天模式（支持模型选择/切换） | modes/chatMode/ |
 | `/media_group` | 媒体合并模式 | modes/mediaCollectMode.js |
 | `/media_hide` | 媒体遮罩模式（Spoiler） | modes/mediaCollectMode.js |
 | `/media_unhide` | 媒体去遮罩模式 | modes/mediaCollectMode.js |
@@ -1045,8 +897,6 @@ handleGroupEditedMessage()
 | `log` | 操作审计日志 | 每次操作一条 |
 | `transport` | 搬运源链接 | 每个搬运源一条 |
 | `settings` | 全局设置（单文档） | 固定1条 |
-
-详情参见 `ai/AI Read/02-database.md`。
 
 ---
 

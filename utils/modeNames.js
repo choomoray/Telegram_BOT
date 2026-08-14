@@ -1,7 +1,6 @@
 // utils/modeNames.js
 
 const MODE_NAMES = {
-    chat: '聊天模式',
     message_reply: '消息回复模式',
     search: '查找模式',
     delete: '数据删除模式',

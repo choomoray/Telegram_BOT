@@ -118,30 +118,6 @@ const SETTINGS = [
         }
     },
     {
-        key: 'STREAM_OUTPUT', type: 'bool', label: 'AI流式输出',
-        getValue: async () => {
-            const s = await getSettings();
-            return s.STREAM_OUTPUT ? '开启' : '关闭';
-        },
-        update: async (val) => {
-            await updateSetting({}, 'STREAM_OUTPUT', val === '1');
-        }
-    },
-    {
-        key: 'STREAM_UPDATE_INTERVAL', type: 'number', label: '流式输出间隔',
-        getValue: async () => {
-            const s = await getSettings();
-            return s.STREAM_UPDATE_INTERVAL.toString();
-        },
-        update: async (val) => {
-            let num = parseInt(val);
-            if (isNaN(num)) num = 500;
-            if (num < 100) num = 100;
-            if (num > 500) num = 500;
-            await updateSetting({}, 'STREAM_UPDATE_INTERVAL', num);
-        }
-    },
-    {
         key: 'media_group_num', type: 'number', label: '媒体组合并每组数量',
         getValue: async () => {
             const s = await getSettings();

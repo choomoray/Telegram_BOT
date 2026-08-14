@@ -1,6 +1,5 @@
 // handlers/modes/index.js
 const logger = require('../../logger');
-const chatMode = require('./chatMode');
 const mediaCollectMode = require('./mediaCollectMode');
 const messageReplyMode = require('./messageReplyMode');
 const searchMode = require('./searchMode');
@@ -17,7 +16,6 @@ const { handleArticleMessage } = require('./articleMode');
 const { handleCollectionMessage } = require('./collectionMode');
 
 const modeHandlers = {
-    chat: chatMode,
     media_group: mediaCollectMode,
     media_hide: mediaCollectMode,
     media_unhide: mediaCollectMode,

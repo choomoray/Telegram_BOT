@@ -11,11 +11,7 @@ const cleanCallback = require('./cleanCallback');
 const cleanContinueCallback = require('./cleanContinueCallback');
 const batchContinueCallback = require('./batchContinueCallback');
 const editConfirmDbOnly = require('./editConfirmDbOnly');
-const selectModelCallback = require('./selectModel');
-const toggleThinkingCallback = require('./toggleThinking');
-const retryModelCallback = require('./retryModel');
 const execCmdCallback = require('./execCmd');
-const handleSwitchModelCallback = require('./switchModel');
 const transportMode = require('../modes/transportMode');
 const settingMode = require('../modes/settingMode');
 const passwordMode = require('../modes/passwordMode');
@@ -30,11 +26,7 @@ const callbackHandlers = {
     rshow: randomShowCallback,
     clean: cleanCallback,
     clean_continue: cleanContinueCallback,
-    select_model: selectModelCallback,
-    toggle_thinking: toggleThinkingCallback,
-    retry_model: retryModelCallback,
     exec_cmd: execCmdCallback,
-    switch_model: handleSwitchModelCallback,
     edit_dbonly: editConfirmDbOnly,
     edit_dbonly_cancel: async (query) => {
         const userId = query.from.id;

@@ -8,9 +8,6 @@ const SETTINGS_ID = 'app_settings';
 const DEFAULT_SETTINGS = {
     _id: SETTINGS_ID,
     // 全局
-    STREAM_OUTPUT: true,
-    STREAM_UPDATE_INTERVAL: 500,
-    // 原 user_setting 字段，现为全局
     search_level: 0,
     search_random: 1,
     random_pictures: 0,
