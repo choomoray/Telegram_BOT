@@ -34,7 +34,13 @@ function makeStubDeps() {
     return {
         fakeCol,
         getCollection: () => fakeCol,
-        callAI: async () => JSON.stringify({ explain: '测试查询', filter: { mark: { $gt: 5 } } }),
+        callAI: async (messages) => {
+            const hasSelected = JSON.stringify(messages).includes('用户当前已选中文档');
+            return JSON.stringify({
+                explain: hasSelected ? '针对选中文档的操作' : '测试操作',
+                operation: { action: 'query', collection: 'users', filter: { white: 1 }, limit: 10 }
+            });
+        },
         password: TEST_PASSWORD
     };
 }
@@ -68,6 +74,24 @@ async function login() {
     return { 'Content-Type': 'application/json', Authorization: `Bearer ${r.body.token}` };
 }
 
+async function withServer(deps, fn) {
+    const s = createWebUI(deps);
+    await new Promise(resolve => s.listen(0, resolve));
+    const b = `http://127.0.0.1:${s.address().port}`;
+    try {
+        const auth = await (async () => {
+            const r = await fetch(b + '/api/login', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: TEST_PASSWORD })
+            }).then(r => r.json());
+            return { 'Content-Type': 'application/json', Authorization: `Bearer ${r.token}` };
+        })();
+        return await fn(b, auth, deps);
+    } finally {
+        await new Promise(resolve => s.close(resolve));
+    }
+}
+
 // ---------------- 登录与鉴权 ----------------
 
 test('错误密码登录返回 401', async () => {
@@ -91,27 +115,42 @@ test('未登录访问 API 返回 401', async () => {
     assert.strictEqual((await req('/api/db/collections')).status, 401);
 });
 
-// ---------------- 集合与查询 ----------------
-
 test('获取集合白名单', async () => {
     const auth = await login();
     const r = await req('/api/db/collections', { headers: auth });
     assert.strictEqual(r.status, 200);
-    assert.ok(Array.isArray(r.body.collections));
     assert.ok(r.body.collections.includes('users'));
     assert.ok(r.body.collections.includes('group_list'));
 });
 
-test('查询返回分页结构与文档', async () => {
+// ---------------- 查询（指定集合 / 全部集合） ----------------
+
+test('查询指定集合返回分页结构', async () => {
     const auth = await login();
     const r = await req('/api/db/query', {
         method: 'POST', headers: auth,
         body: JSON.stringify({ collection: 'users', filter: { white: 1 }, page: 1, pageSize: 20 })
     });
     assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.all, false);
+    assert.strictEqual(r.body.collection, 'users');
     assert.strictEqual(r.body.total, 42);
-    assert.strictEqual(r.body.items.length, 1);
     assert.strictEqual(r.body.items[0].name, '示例文档');
+});
+
+test('查询全部集合返回分组数据', async () => {
+    const auth = await login();
+    const r = await req('/api/db/query', {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({ collection: '__all__', filter: {} })
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.all, true);
+    assert.ok(Array.isArray(r.body.groups));
+    const usersGroup = r.body.groups.find(g => g.collection === 'users');
+    assert.ok(usersGroup);
+    assert.strictEqual(usersGroup.total, 42);
+    assert.strictEqual(usersGroup.items.length, 1);
 });
 
 test('非法集合被拒绝', async () => {
@@ -124,185 +163,163 @@ test('非法集合被拒绝', async () => {
     assert.ok(r.body.error.includes('不允许的集合'));
 });
 
-// ---------------- 新增 / 修改 / 删除 ----------------
+// ---------------- 执行操作（execute） ----------------
 
-test('插入文档调用 insertOne 并移除 _id', async () => {
-    const deps = makeStubDeps();
-    const s2 = createWebUI(deps);
-    await new Promise(resolve => s2.listen(0, resolve));
-    const b2 = `http://127.0.0.1:${s2.address().port}`;
-    try {
-        const auth = await (async () => {
-            const r = await fetch(b2 + '/api/login', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: TEST_PASSWORD })
-            }).then(r => r.json());
-            return { 'Content-Type': 'application/json', Authorization: `Bearer ${r.token}` };
-        })();
-        const r = await fetch(b2 + '/api/db/insert', {
-            method: 'POST', headers: auth,
-            body: JSON.stringify({ collection: 'users', data: { id: 999, name: '新用户', _id: 'should-be-removed' } })
-        }).then(r => r.json());
-        assert.strictEqual(r.ok, true);
-        const inserted = deps.fakeCol.calls.insert[0];
-        assert.strictEqual(inserted.id, 999);
-        assert.ok(!('_id' in inserted), '不应允许手动指定 _id');
-    } finally {
-        await new Promise(resolve => s2.close(resolve));
-    }
-});
-
-test('更新文档：空 filter 返回 400', async () => {
+test('执行 query 返回结果', async () => {
     const auth = await login();
-    const r = await req('/api/db/update', {
+    const r = await req('/api/db/execute', {
         method: 'POST', headers: auth,
-        body: JSON.stringify({ collection: 'users', filter: {}, data: { white: 1 } })
+        body: JSON.stringify({ operation: { action: 'query', collection: 'users', filter: { white: 1 }, limit: 10 } })
     });
-    assert.strictEqual(r.status, 400);
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.type, 'query');
+    assert.strictEqual(r.body.total, 42);
+    assert.strictEqual(r.body.items.length, 1);
 });
 
-test('更新文档调用 updateOne 且使用 $set', async () => {
-    const deps = makeStubDeps();
-    const s2 = createWebUI(deps);
-    await new Promise(resolve => s2.listen(0, resolve));
-    const b2 = `http://127.0.0.1:${s2.address().port}`;
-    try {
-        const auth = await (async () => {
-            const r = await fetch(b2 + '/api/login', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: TEST_PASSWORD })
-            }).then(r => r.json());
-            return { 'Content-Type': 'application/json', Authorization: `Bearer ${r.token}` };
-        })();
-        const r = await fetch(b2 + '/api/db/update', {
+test('执行 insert 调用 insertOne 并移除 _id', async () => {
+    await withServer(makeStubDeps(), async (b, auth, deps) => {
+        const r = await fetch(b + '/api/db/execute', {
             method: 'POST', headers: auth,
-            body: JSON.stringify({ collection: 'users', filter: { id: 123 }, data: { white: 1 } })
+            body: JSON.stringify({ operation: { action: 'insert', collection: 'users', data: { id: 999, name: '新用户', _id: 'x' } } })
         }).then(r => r.json());
-        assert.strictEqual(r.ok, true);
-        assert.strictEqual(r.matchedCount, 1);
-        const call = deps.fakeCol.calls.update[0];
-        assert.deepStrictEqual(call.filter, { id: 123 });
-        assert.deepStrictEqual(call.update, { $set: { white: 1 } });
-    } finally {
-        await new Promise(resolve => s2.close(resolve));
-    }
-});
-
-test('删除文档：缺少 confirm 返回 400', async () => {
-    const auth = await login();
-    const r = await req('/api/db/delete', {
-        method: 'POST', headers: auth,
-        body: JSON.stringify({ collection: 'users', filter: { id: 1 } })
+        assert.strictEqual(r.type, 'insert');
+        assert.ok(!('_id' in deps.fakeCol.calls.insert[0]));
     });
-    assert.strictEqual(r.status, 400);
-    assert.ok(r.body.error.includes('二次确认'));
 });
 
-test('删除文档：confirm 但空 filter 返回 400（禁止全表删除）', async () => {
+test('执行 update：空 filter 返回 400，合法调用 $set', async () => {
     const auth = await login();
-    const r = await req('/api/db/delete', {
+    const bad = await req('/api/db/execute', {
         method: 'POST', headers: auth,
-        body: JSON.stringify({ collection: 'users', filter: {}, confirm: true })
+        body: JSON.stringify({ operation: { action: 'update', collection: 'users', filter: {}, data: { white: 1 } } })
     });
-    assert.strictEqual(r.status, 400);
+    assert.strictEqual(bad.status, 400);
+
+    await withServer(makeStubDeps(), async (b, auth2, deps) => {
+        const r = await fetch(b + '/api/db/execute', {
+            method: 'POST', headers: auth2,
+            body: JSON.stringify({ operation: { action: 'update', collection: 'users', filter: { id: 123 }, data: { white: 1 } } })
+        }).then(r => r.json());
+        assert.strictEqual(r.type, 'update');
+        assert.deepStrictEqual(deps.fakeCol.calls.update[0], { filter: { id: 123 }, update: { $set: { white: 1 } } });
+    });
 });
 
-test('删除文档：confirm + filter 时调用 deleteOne', async () => {
-    const deps = makeStubDeps();
-    const s2 = createWebUI(deps);
-    await new Promise(resolve => s2.listen(0, resolve));
-    const b2 = `http://127.0.0.1:${s2.address().port}`;
-    try {
-        const auth = await (async () => {
-            const r = await fetch(b2 + '/api/login', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: TEST_PASSWORD })
-            }).then(r => r.json());
-            return { 'Content-Type': 'application/json', Authorization: `Bearer ${r.token}` };
-        })();
-        const r = await fetch(b2 + '/api/db/delete', {
+test('执行 delete：无 confirm / 空 filter 均被拒绝', async () => {
+    const auth = await login();
+    const noConfirm = await req('/api/db/execute', {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({ operation: { action: 'delete', collection: 'users', filter: { id: 1 } } })
+    });
+    assert.strictEqual(noConfirm.status, 400);
+    assert.ok(noConfirm.body.error.includes('二次确认'));
+
+    const emptyFilter = await req('/api/db/execute', {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({ operation: { action: 'delete', collection: 'users', filter: {} }, confirm: true })
+    });
+    assert.strictEqual(emptyFilter.status, 400);
+    assert.ok(emptyFilter.body.error.includes('禁止全表删除'));
+});
+
+test('执行 delete：confirm + filter 时调用 deleteOne', async () => {
+    await withServer(makeStubDeps(), async (b, auth, deps) => {
+        const r = await fetch(b + '/api/db/execute', {
             method: 'POST', headers: auth,
-            body: JSON.stringify({ collection: 'users', filter: { id: 123 }, confirm: true })
+            body: JSON.stringify({ operation: { action: 'delete', collection: 'users', filter: { id: 123 } }, confirm: true })
         }).then(r => r.json());
-        assert.strictEqual(r.ok, true);
+        assert.strictEqual(r.type, 'delete');
         assert.strictEqual(r.deletedCount, 1);
         assert.deepStrictEqual(deps.fakeCol.calls.delete[0], { id: 123 });
-    } finally {
-        await new Promise(resolve => s2.close(resolve));
-    }
+    });
 });
 
-// ---------------- AI 查询翻译 ----------------
+test('执行非法操作类型返回 400', async () => {
+    const auth = await login();
+    const r = await req('/api/db/execute', {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({ operation: { action: 'drop', collection: 'users' } })
+    });
+    assert.strictEqual(r.status, 400);
+});
 
-test('AI 查询：返回翻译后的 filter 且不执行查询', async () => {
-    const deps = makeStubDeps();
-    const s2 = createWebUI(deps);
-    await new Promise(resolve => s2.listen(0, resolve));
-    const b2 = `http://127.0.0.1:${s2.address().port}`;
-    try {
-        const auth = await (async () => {
-            const r = await fetch(b2 + '/api/login', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: TEST_PASSWORD })
-            }).then(r => r.json());
-            return { 'Content-Type': 'application/json', Authorization: `Bearer ${r.token}` };
-        })();
-        const r = await fetch(b2 + '/api/ai/query', {
+// ---------------- AI 翻译 ----------------
+
+test('AI 翻译返回操作计划且不执行数据库', async () => {
+    await withServer(makeStubDeps(), async (b, auth, deps) => {
+        const r = await fetch(b + '/api/ai/plan', {
             method: 'POST', headers: auth,
-            body: JSON.stringify({ collection: 'group_list', prompt: '标记次数超过5的组' })
+            body: JSON.stringify({ prompt: '查一下白名单用户' })
         }).then(r => r.json());
-        assert.deepStrictEqual(r.filter, { mark: { $gt: 5 } });
-        assert.strictEqual(r.explain, '测试查询');
-        // AI 只翻译，不应触发任何数据库读写
+        assert.strictEqual(r.explain, '测试操作');
+        assert.strictEqual(r.operation.action, 'query');
+        assert.strictEqual(r.operation.collection, 'users');
+        // AI 只翻译不执行
         assert.strictEqual(deps.fakeCol.calls.find.length, 0);
         assert.strictEqual(deps.fakeCol.calls.insert.length, 0);
-        assert.strictEqual(deps.fakeCol.calls.update.length, 0);
-        assert.strictEqual(deps.fakeCol.calls.delete.length, 0);
-    } finally {
-        await new Promise(resolve => s2.close(resolve));
-    }
+    });
 });
 
-test('AI 查询：缺少 prompt 返回 400', async () => {
+test('AI 翻译携带选中文档信息', async () => {
+    const deps = makeStubDeps();
+    const seenMessages = [];
+    deps.callAI = async (messages) => { seenMessages.push(messages); return JSON.stringify({ explain: 'x', operation: { action: 'delete', collection: 'users', filter: { _id: 'abc123' } } }); };
+    await withServer(deps, async (b, auth) => {
+        const r = await fetch(b + '/api/ai/plan', {
+            method: 'POST', headers: auth,
+            body: JSON.stringify({
+                prompt: '把这条删掉',
+                selected: { collection: 'users', doc: { _id: 'abc123', name: '张三' } }
+            })
+        }).then(r => r.json());
+        assert.strictEqual(r.operation.filter._id, 'abc123');
+        assert.ok(seenMessages[0].some(m => m.content.includes('张三')), 'AI 应收到选中文档内容');
+    });
+});
+
+test('AI 翻译缺少 prompt 返回 400', async () => {
     const auth = await login();
-    const r = await req('/api/ai/query', {
+    const r = await req('/api/ai/plan', {
         method: 'POST', headers: auth,
-        body: JSON.stringify({ collection: 'users', prompt: '' })
+        body: JSON.stringify({ prompt: '' })
     });
     assert.strictEqual(r.status, 400);
 });
 
-test('AI 查询：非法集合返回 400', async () => {
-    const auth = await login();
-    const r = await req('/api/ai/query', {
-        method: 'POST', headers: auth,
-        body: JSON.stringify({ collection: 'evil', prompt: '查询' })
-    });
-    assert.strictEqual(r.status, 400);
-});
-
-test('AI 查询：AI 返回无效格式时返回 502', async () => {
+test('AI 返回无效格式时返回 502', async () => {
     const deps = makeStubDeps();
     deps.callAI = async () => '这不是 JSON';
-    const s2 = createWebUI(deps);
-    await new Promise(resolve => s2.listen(0, resolve));
-    const b2 = `http://127.0.0.1:${s2.address().port}`;
-    try {
-        const auth = await (async () => {
-            const r = await fetch(b2 + '/api/login', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: TEST_PASSWORD })
-            }).then(r => r.json());
-            return { 'Content-Type': 'application/json', Authorization: `Bearer ${r.token}` };
-        })();
-        const r = await fetch(b2 + '/api/ai/query', {
+    await withServer(deps, async (b, auth) => {
+        const r = await fetch(b + '/api/ai/plan', {
             method: 'POST', headers: auth,
-            body: JSON.stringify({ collection: 'users', prompt: '查询' })
+            body: JSON.stringify({ prompt: '查询' })
         });
         assert.strictEqual(r.status, 502);
+    });
+});
+
+// ---------------- SSE 日志流 ----------------
+
+test('SSE 日志流返回 text/event-stream', async () => {
+    const r = await req('/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: TEST_PASSWORD })
+    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 800);
+    try {
+        const res = await fetch(`${base}/api/logs/stream?token=${encodeURIComponent(r.body.token)}`, { signal: controller.signal });
+        assert.strictEqual(res.status, 200);
+        assert.match(res.headers.get('content-type'), /text\/event-stream/);
     } finally {
-        await new Promise(resolve => s2.close(resolve));
+        clearTimeout(timer);
     }
+});
+
+test('SSE 无 token 返回 401', async () => {
+    const res = await fetch(base + '/api/logs/stream', { signal: AbortSignal.timeout(800) });
+    assert.strictEqual(res.status, 401);
 });
 
 // ---------------- 静态页面 / 404 ----------------
@@ -312,7 +329,8 @@ test('首页返回 HTML（登录页默认可见）', async () => {
     assert.strictEqual(res.status, 200);
     const text = await res.text();
     assert.ok(text.includes('数据库控制台'));
-    assert.ok(text.includes('AI 查询'));
+    assert.ok(text.includes('AI 翻译'));
+    assert.ok(text.includes('全部数据库'));
 });
 
 test('未知 API 返回 404', async () => {

@@ -27,6 +27,19 @@ const LOG_FILES = {
     info: 'operation.log',
 };
 
+// 日志实时订阅者（Web UI SSE 日志流使用）
+const logListeners = new Set();
+
+/**
+ * 订阅日志输出（每次 log() 时回调）
+ * @param {Function} cb - ({level, message, timestamp, text}) => void
+ * @returns {Function} 取消订阅函数
+ */
+function onLog(cb) {
+    logListeners.add(cb);
+    return () => logListeners.delete(cb);
+}
+
 // 确保 logs 目录存在
 const LOG_DIR = path.join(__dirname, 'logs');
 fs.mkdir(LOG_DIR, { recursive: true }).catch(() => { });
@@ -75,6 +88,15 @@ async function log(level, message, ...args) {
     // 将写入任务推入队列
     const queue = getQueue(filePath);
     queue.push({ path: filePath, content: fileMsg });
+
+    // 广播给实时订阅者（Web UI 日志流）
+    for (const listener of logListeners) {
+        try {
+            listener({ level, message: `${message} ${args.join(' ')}`.trim(), timestamp, text: fileMsg.trim() });
+        } catch (err) {
+            console.error(chalk.red('[LOG_LISTENER_ERROR]'), err.message);
+        }
+    }
 }
 
 // 便捷方法
@@ -83,4 +105,5 @@ module.exports = {
     warn: (msg, ...args) => log('warn', msg, ...args),
     success: (msg, ...args) => log('success', msg, ...args),
     info: (msg, ...args) => log('info', msg, ...args),
+    onLog
 };

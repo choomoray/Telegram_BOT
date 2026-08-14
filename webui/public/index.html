@@ -22,63 +22,43 @@
   <header class="topbar">
     <div class="topbar-title">🗄️ 数据库控制台</div>
     <div class="topbar-right">
-      <select id="collection-select"></select>
-      <button id="refresh-btn" class="btn btn-sm">🔄 刷新</button>
-      <label class="auto-refresh"><input type="checkbox" id="auto-refresh"> 自动刷新</label>
+      <button id="refresh-btn" class="btn btn-sm">🔄 刷新数据</button>
       <button id="logout-btn" class="btn-ghost btn-sm">退出</button>
     </div>
   </header>
 
   <div class="panels">
-    <!-- 左：实时数据 -->
+    <!-- 左栏：上 2/3 后端实时日志，下 1/3 数据库操作 -->
     <section class="panel panel-left">
-      <div class="query-bar">
-        <input id="filter-input" class="filter-input" placeholder='查询条件 filter（JSON），如 {"mark":{"$gt":5}}；留空查全部'>
-        <button id="query-btn" class="btn">查询</button>
-        <button id="ai-query-btn" class="btn btn-ai">AI 查询</button>
+      <div class="log-panel">
+        <div class="log-title">📡 后端实时日志 <span id="log-status" class="text-dim"></span></div>
+        <div id="log-list" class="log-list"></div>
       </div>
-      <div id="ai-input-area" class="ai-input-area hidden">
-        <input id="ai-prompt" class="filter-input" placeholder="用自然语言描述查询，如：标记次数超过5的组">
-        <button id="ai-generate-btn" class="btn btn-ai btn-sm">生成查询条件</button>
-        <span id="ai-status" class="text-dim"></span>
+      <div class="op-panel">
+        <div class="op-row">
+          <select id="collection-select" title="选择数据库（默认全部）">
+            <option value="__all__">全部数据库</option>
+          </select>
+          <button id="selected-btn" class="btn btn-sm selected-off" title="点击右侧数据可选中，用于操作定位">未选中</button>
+          <input id="prompt-input" class="prompt-input" placeholder='自然语言操作，如：查标记次数超过5的组 / 把用户12345设为白名单'>
+          <button id="ai-btn" class="btn btn-ai btn-sm">AI 翻译</button>
+          <button id="exec-btn" class="btn btn-sm">执行</button>
+        </div>
+        <div class="op-result">
+          <div class="op-result-title">📤 执行结果</div>
+          <textarea id="op-json" class="op-json" placeholder="AI 翻译的操作 JSON 将显示在这里（可编辑），点【执行】按此执行"></textarea>
+          <pre id="result-box" class="result-box">—</pre>
+        </div>
       </div>
-      <div id="data-meta" class="data-meta"></div>
-      <div class="table-wrap">
-        <table id="data-table">
-          <thead><tr><th>#</th><th>文档内容</th></tr></thead>
-          <tbody id="data-tbody"></tbody>
-        </table>
-        <div id="data-empty" class="empty hidden">暂无数据</div>
-      </div>
-      <div id="pagination" class="pagination"></div>
     </section>
 
-    <!-- 右：数据库操作 -->
+    <!-- 右栏：数据库数据浏览（可滚动、点击选中） -->
     <section class="panel panel-right">
-      <h3>⚙️ 数据库操作 <span id="op-collection" class="badge badge-blue"></span></h3>
-      <p class="hint">修改 / 删除 使用左侧查询栏当前条件（filter）定位文档。</p>
-
-      <div class="op-group">
-        <div class="op-title">➕ 新增文档</div>
-        <textarea id="insert-data" class="json-input" placeholder='{"字段": 值, ...}'></textarea>
-        <button id="insert-btn" class="btn btn-sm">插入</button>
+      <div class="data-toolbar">
+        <span id="data-meta" class="data-meta">加载中...</span>
       </div>
-
-      <div class="op-group">
-        <div class="op-title">✏️ 修改文档</div>
-        <textarea id="update-data" class="json-input" placeholder='要更新的字段 {"字段": 新值, ...}'></textarea>
-        <button id="update-btn" class="btn btn-sm">更新</button>
-      </div>
-
-      <div class="op-group">
-        <div class="op-title">🗑️ 删除文档</div>
-        <button id="delete-btn" class="btn btn-danger btn-sm">删除（二次确认）</button>
-      </div>
-
-      <div class="op-group">
-        <div class="op-title">📤 执行结果</div>
-        <pre id="result-box" class="result-box">—</pre>
-      </div>
+      <div id="data-list" class="data-list"></div>
+      <div id="pagination" class="pagination"></div>
     </section>
   </div>
 </div>

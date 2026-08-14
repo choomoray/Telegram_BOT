@@ -4,17 +4,18 @@
 
   const TOKEN_KEY = 'webui_token';
   const API = '/api';
+  const ALL_KEY = '__all__';
 
   const $ = (sel) => document.querySelector(sel);
 
   const state = {
-    collection: '',
-    filterText: '',
+    collections: [],
+    collection: ALL_KEY,
     page: 1,
     pageSize: 20,
     totalPages: 1,
-    autoRefresh: false,
-    timer: null
+    selected: null,       // { collection, doc }
+    logCount: 0
   };
 
   // ---------- 基础 ----------
@@ -25,7 +26,7 @@
     el.classList.toggle('error', isError);
     el.classList.remove('hidden');
     clearTimeout(toast._t);
-    toast._t = setTimeout(() => el.classList.add('hidden'), 3000);
+    toast._t = setTimeout(() => el.classList.add('hidden'), 3500);
   }
 
   async function api(path, body) {
@@ -46,13 +47,11 @@
     return data;
   }
 
-  function parseJson(text) {
+  function parseJson(text, label = 'JSON') {
     try {
-      const v = JSON.parse(text);
-      if (v === null || typeof v !== 'object' || Array.isArray(v)) throw new Error('需要 JSON 对象');
-      return v;
+      return JSON.parse(text);
     } catch (e) {
-      throw new Error(`JSON 解析失败: ${e.message}`);
+      throw new Error(`${label}解析失败: ${e.message}`);
     }
   }
 
@@ -80,73 +79,82 @@
 
   function logout() {
     localStorage.removeItem(TOKEN_KEY);
-    stopAutoRefresh();
+    stopLogStream();
     $('#app-view').classList.add('hidden');
     $('#login-view').classList.remove('hidden');
-  }
-
-  async function loadCollections() {
-    const data = await api('/db/collections');
-    const sel = $('#collection-select');
-    sel.innerHTML = data.collections.map(c => `<option value="${c}">${c}</option>`).join('');
-    state.collection = data.collections[0] || '';
-    await runQuery(1);
   }
 
   async function enterApp() {
     $('#login-view').classList.add('hidden');
     $('#app-view').classList.remove('hidden');
     try {
-      await loadCollections();
+      const data = await api('/db/collections');
+      state.collections = data.collections;
+      const sel = $('#collection-select');
+      sel.innerHTML = `<option value="${ALL_KEY}">全部数据库</option>` +
+        data.collections.map(c => `<option value="${c}">${c}</option>`).join('');
+      startLogStream();
+      await runQuery(1);
     } catch (err) {
       toast(err.message, true);
     }
   }
 
-  // ---------- 查询 ----------
+  // ---------- 查询与渲染 ----------
 
   async function runQuery(page = state.page) {
-    if (!state.collection) return;
     state.page = page;
-    let filter = {};
-    if (state.filterText.trim()) {
-      try {
-        filter = parseJson(state.filterText);
-      } catch (e) {
-        toast(e.message, true);
-        return;
-      }
-    }
-    try {
-      const data = await api('/db/query', {
-        collection: state.collection,
-        filter,
-        page: state.page,
-        pageSize: state.pageSize
-      });
-      state.totalPages = Math.max(1, Math.ceil(data.total / data.pageSize));
-      renderTable(data);
-      renderPagination();
-      $('#op-collection').textContent = state.collection;
-    } catch (err) {
-      toast(err.message, true);
-    }
+    const data = await api('/db/query', { collection: state.collection, page: state.page, pageSize: state.pageSize });
+    renderData(data);
   }
 
-  function renderTable(data) {
-    const tbody = $('#data-tbody');
-    const empty = $('#data-empty');
-    $('#data-meta').textContent = `集合 ${state.collection}：共 ${data.total} 条，第 ${data.page}/${state.totalPages} 页（每页 ${data.pageSize} 条）`;
-    if (!data.items.length) {
-      tbody.innerHTML = '';
-      empty.classList.remove('hidden');
-      return;
+  function renderData(data) {
+    const list = $('#data-list');
+    const meta = $('#data-meta');
+
+    if (data.all) {
+      meta.textContent = `跨集合浏览（每集合最多显示 ${data.limit} 条，点击文档可选中）`;
+      const groups = data.groups.filter(g => g.items.length > 0 || g.total > 0);
+      if (!groups.length) {
+        list.innerHTML = '<div class="text-dim" style="padding:20px;text-align:center">未找到数据</div>';
+        state.totalPages = 1;
+        renderPagination();
+        return;
+      }
+      state.totalPages = 1;
+      list.innerHTML = groups.map(g => `
+        <div class="col-group">
+          <div class="col-group-title">📁 ${g.collection} <span class="count">共 ${g.total} 条${g.items.length < g.total ? `，显示前 ${g.items.length} 条` : ''}</span></div>
+          ${g.items.map(doc => docCard(g.collection, doc)).join('')}
+        </div>`).join('');
+    } else {
+      state.totalPages = Math.max(1, Math.ceil(data.total / data.pageSize));
+      meta.textContent = `集合 ${data.collection}：共 ${data.total} 条，第 ${data.page}/${state.totalPages} 页（每页 ${data.pageSize} 条）`;
+      list.innerHTML = data.items.length
+        ? data.items.map(doc => docCard(data.collection, doc)).join('')
+        : '<div class="text-dim" style="padding:20px;text-align:center">未找到数据</div>';
+      renderPagination();
     }
-    empty.classList.add('hidden');
-    tbody.innerHTML = data.items.map((doc, i) => {
-      const globalIdx = (data.page - 1) * data.pageSize + i + 1;
-      return `<tr><td class="text-dim">${globalIdx}</td><td><div class="doc-json">${esc(JSON.stringify(doc, null, 2))}</div></td></tr>`;
-    }).join('');
+
+    bindDocCards();
+    updateSelectedUI();
+  }
+
+  function docCard(collection, doc) {
+    const key = collection + ':' + (doc._id || JSON.stringify(doc).slice(0, 20));
+    return `<div class="doc-card" data-key="${esc(key)}" data-collection="${esc(collection)}" data-json="${esc(JSON.stringify(doc))}">
+      <div class="doc-json">${esc(JSON.stringify(doc, null, 2))}</div>
+    </div>`;
+  }
+
+  function bindDocCards() {
+    document.querySelectorAll('.doc-card').forEach(card => {
+      card.onclick = () => {
+        const collection = card.dataset.collection;
+        const doc = JSON.parse(card.dataset.json);
+        toggleSelect(collection, doc);
+      };
+    });
   }
 
   function renderPagination() {
@@ -169,87 +177,121 @@
     wrap.append(prev, info, next);
   }
 
-  // ---------- AI 查询 ----------
+  // ---------- 选中 ----------
 
-  async function aiGenerate() {
-    const prompt = $('#ai-prompt').value.trim();
-    if (!prompt) { toast('请输入自然语言查询描述', true); return; }
-    const status = $('#ai-status');
-    status.textContent = 'AI 翻译中...';
+  function toggleSelect(collection, doc) {
+    const key = collection + ':' + (doc._id || JSON.stringify(doc).slice(0, 20));
+    if (state.selected && state.selected.collection === collection &&
+        (state.selected.doc._id || 'x') === (doc._id || 'y') && state.selected._key === key) {
+      state.selected = null; // 再次点击取消选中
+    } else {
+      state.selected = { collection, doc, _key: key };
+    }
+    updateSelectedUI();
+  }
+
+  function updateSelectedUI() {
+    const btn = $('#selected-btn');
+    if (state.selected) {
+      btn.classList.remove('selected-off');
+      btn.classList.add('selected-on');
+      btn.textContent = '✅ 已选中';
+      btn.title = `已选中 ${state.selected.collection} 中的文档`;
+    } else {
+      btn.classList.remove('selected-on');
+      btn.classList.add('selected-off');
+      btn.textContent = '未选中';
+      btn.title = '点击右侧数据可选中';
+    }
+    document.querySelectorAll('.doc-card').forEach(el => {
+      el.classList.toggle('selected', el.dataset.key === (state.selected ? state.selected._key : ''));
+    });
+  }
+
+  // ---------- AI 翻译与执行 ----------
+
+  async function aiTranslate() {
+    const prompt = $('#prompt-input').value.trim();
+    if (!prompt) { toast('请输入自然语言操作描述', true); return; }
     try {
-      const data = await api('/ai/query', { collection: state.collection, prompt });
-      $('#filter-input').value = JSON.stringify(data.filter);
-      state.filterText = $('#filter-input').value;
-      toast(`✅ ${data.explain || '已生成查询条件（未执行，可编辑后点查询）'}`);
+      const payload = { prompt };
+      if (state.selected) {
+        payload.selected = { collection: state.selected.collection, doc: state.selected.doc };
+      }
+      const data = await api('/ai/plan', payload);
+      $('#op-json').value = JSON.stringify(data.operation, null, 2);
+      showResult(`🔍 AI 翻译：${data.explain}\n\n（可编辑上方 JSON，点【执行】执行）`, false);
+      toast('✅ 已翻译，确认后点【执行】');
     } catch (err) {
       toast(err.message, true);
-    } finally {
-      status.textContent = '';
     }
   }
 
-  // ---------- 数据库操作 ----------
-
-  async function doInsert() {
+  async function doExecute() {
+    let operation;
     try {
-      const data = parseJson($('#insert-data').value);
-      const r = await api('/db/insert', { collection: state.collection, data });
-      showResult(r);
-      toast('✅ 插入成功');
-      $('#insert-data').value = '';
-      await runQuery(1);
-    } catch (err) { showResult({ error: err.message }, true); }
-  }
-
-  async function doUpdate() {
+      operation = parseJson($('#op-json').value.trim(), '操作');
+    } catch (e) {
+      showResult(e.message, true);
+      return;
+    }
+    if (!operation || !operation.action || !operation.collection) {
+      showResult('❌ 操作 JSON 缺少 action / collection 字段', true);
+      return;
+    }
     try {
-      const filter = getCurrentFilter();
-      const data = parseJson($('#update-data').value);
-      const r = await api('/db/update', { collection: state.collection, filter, data });
-      showResult(r);
-      toast(r.matchedCount ? '✅ 更新成功' : '⚠️ 未匹配到文档');
-      if (r.matchedCount) $('#update-data').value = '';
-      await runQuery();
-    } catch (err) { showResult({ error: err.message }, true); }
+      let confirm = false;
+      if (operation.action === 'delete') {
+        confirm = window.confirm(`⚠️ 二次确认：确定执行删除操作吗？\n\n${JSON.stringify(operation, null, 2)}`);
+        if (!confirm) { toast('已取消删除', true); return; }
+      }
+      const data = await api('/db/execute', { operation, confirm });
+      showResult(`✅ 执行成功：\n${JSON.stringify(data, null, 2)}`, false);
+      toast('✅ 执行完成');
+      await runQuery(1); // 执行后刷新数据
+    } catch (err) {
+      showResult(`❌ 执行失败：${err.message}`, true);
+    }
   }
 
-  async function doDelete() {
-    try {
-      const filter = getCurrentFilter();
-      if (!confirm(`⚠️ 二次确认：确定删除 ${state.collection} 中满足以下条件的文档吗？\n\n${JSON.stringify(filter, null, 2)}`)) return;
-      const r = await api('/db/delete', { collection: state.collection, filter, confirm: true });
-      showResult(r);
-      toast(r.deletedCount ? '🗑️ 删除成功' : '⚠️ 未匹配到文档');
-      await runQuery(1);
-    } catch (err) { showResult({ error: err.message }, true); }
-  }
-
-  function getCurrentFilter() {
-    if (!state.filterText.trim()) throw new Error('查询栏 filter 为空，请先填写条件（修改/删除需精确定位）');
-    return parseJson(state.filterText);
-  }
-
-  function showResult(data, isError = false) {
+  function showResult(text, isError) {
     const box = $('#result-box');
     box.classList.toggle('error', isError);
-    box.textContent = JSON.stringify(data, null, 2);
+    box.textContent = text;
   }
 
-  // ---------- 自动刷新 ----------
+  // ---------- SSE 日志流 ----------
 
-  function toggleAutoRefresh() {
-    state.autoRefresh = $('#auto-refresh').checked;
-    if (state.autoRefresh) {
-      stopAutoRefresh();
-      state.timer = setInterval(() => { if (!document.hidden) runQuery(state.page); }, 5000);
-      toast('已开启自动刷新（5秒）');
-    } else {
-      stopAutoRefresh();
-    }
+  let logSource = null;
+
+  function startLogStream() {
+    stopLogStream();
+    const token = localStorage.getItem(TOKEN_KEY);
+    const source = new EventSource(`${API}/logs/stream?token=${encodeURIComponent(token)}`);
+    source.onopen = () => { $('#log-status').textContent = '已连接'; };
+    source.onmessage = (e) => {
+      try { appendLog(JSON.parse(e.data)); } catch { /* ignore */ }
+    };
+    source.onerror = () => { $('#log-status').textContent = '重连中...'; };
+    logSource = source;
   }
 
-  function stopAutoRefresh() {
-    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  function stopLogStream() {
+    if (logSource) { logSource.close(); logSource = null; }
+  }
+
+  function appendLog(entry) {
+    const list = $('#log-list');
+    const levelClass = { info: 'log-info', success: 'log-success', warn: 'log-warn', error: 'log-error' }[entry.level] || 'log-info';
+    const time = (entry.timestamp || '').slice(0, 19) || '';
+    const div = document.createElement('div');
+    div.className = `log-line ${levelClass}`;
+    div.innerHTML = `<span class="log-time">[${esc(time)}]</span> [${esc((entry.level || 'info').toUpperCase())}] ${esc(entry.message || '')}`;
+    list.appendChild(div);
+    // 限制最多 600 条
+    while (list.children.length > 600) list.removeChild(list.firstChild);
+    list.scrollTop = list.scrollHeight;
+    state.logCount++;
   }
 
   // ---------- 工具 ----------
@@ -263,32 +305,25 @@
   $('#login-btn').onclick = login;
   $('#login-password').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
   $('#logout-btn').onclick = logout;
+  $('#refresh-btn').onclick = () => runQuery(state.page);
 
   $('#collection-select').onchange = () => {
     state.collection = $('#collection-select').value;
-    state.filterText = '';
-    $('#filter-input').value = '';
     runQuery(1);
   };
-  $('#query-btn').onclick = () => {
-    state.filterText = $('#filter-input').value;
-    runQuery(1);
-  };
-  $('#filter-input').addEventListener('keydown', e => { if (e.key === 'Enter') { state.filterText = e.target.value; runQuery(1); } });
-  $('#refresh-btn').onclick = () => runQuery(state.page);
-  $('#auto-refresh').onchange = toggleAutoRefresh;
 
-  $('#ai-query-btn').onclick = () => {
-    const area = $('#ai-input-area');
-    area.classList.toggle('hidden');
-    if (!area.classList.contains('hidden')) $('#ai-prompt').focus();
+  $('#selected-btn').onclick = () => {
+    // 点击选中按钮：取消选中（若有）
+    if (state.selected) {
+      state.selected = null;
+      updateSelectedUI();
+      toast('已取消选中');
+    }
   };
-  $('#ai-generate-btn').onclick = aiGenerate;
-  $('#ai-prompt').addEventListener('keydown', e => { if (e.key === 'Enter') aiGenerate(); });
 
-  $('#insert-btn').onclick = doInsert;
-  $('#update-btn').onclick = doUpdate;
-  $('#delete-btn').onclick = doDelete;
+  $('#ai-btn').onclick = aiTranslate;
+  $('#prompt-input').addEventListener('keydown', e => { if (e.key === 'Enter') aiTranslate(); });
+  $('#exec-btn').onclick = doExecute;
 
   // 初始化：有 token 则验证进入，否则显示登录页（login-view 默认可见）
   if (localStorage.getItem(TOKEN_KEY)) {

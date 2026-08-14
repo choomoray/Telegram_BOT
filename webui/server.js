@@ -1,17 +1,17 @@
 // webui/server.js
 /**
- * Web UI 管理面板（零第三方依赖，Node 内置 http）
+ * Web UI 数据库控制台（零第三方依赖，Node 内置 http）
  *
  * 启动方式：node index.js webui
  * 默认地址：http://127.0.0.1:9700
  *
- * 功能：左侧实时数据浏览（集合切换 / MongoDB filter 查询 / AI 查询翻译），
- *       右侧数据库操作（新增 / 修改 / 删除，删除需二次确认）
+ * 布局：
+ *   左栏上 2/3 — 后端实时运行日志（SSE 推送）
+ *   左栏下 1/3 — 数据库操作（选择集合/选中态 + 自然语言输入 + AI 翻译 + 执行 + 执行结果）
+ *   右栏       — 数据库数据浏览（可滚动、点击选中高亮）
  *
- * AI 辅助：调用 DeepSeek 将自然语言翻译为 MongoDB 查询条件（filter），
- *          结果显示在查询栏供用户编辑后手动执行，AI 不直接操作数据库。
- *
- * 鉴权：登录密码（WEBUI_PASSWORD 环境变量，未设置则启动时随机生成并打印）
+ * AI 辅助：DeepSeek 将自然语言翻译为完整数据库操作（增删改查），
+ *          翻译结果由用户确认后手动执行（删除需二次确认），AI 不直接操作数据库。
  */
 const http = require('http');
 const fs = require('fs');
@@ -25,11 +25,15 @@ const { callDeepSeek } = require('./ai');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const SESSION_TTL = 12 * 60 * 60 * 1000; // 会话有效期 12 小时
+const ALL_COLLECTIONS_KEY = '__all__';   // "全部集合" 模式
+const ALL_COLLECTIONS_LIMIT = 100;       // 全部模式下每个集合最多取 100 条
 
 // 登录会话：token -> { createdAt }
 const sessions = new Map();
 // 实际生效的密码（未配置时随机生成）
 let effectivePassword = config.WEBUI_PASSWORD || null;
+// SSE 日志流客户端
+const sseClients = new Set();
 
 // 允许操作的集合白名单
 const ALLOWED_COLLECTIONS = new Set(Object.values(COLLECTIONS));
@@ -159,72 +163,109 @@ async function handleCollections() {
     return { status: 200, data: { collections: [...ALLOWED_COLLECTIONS].sort() } };
 }
 
+/**
+ * 查询：collection 为 '__all__' 时跨集合浏览（每集合取前 100 条），
+ *        否则为指定集合的分页查询
+ */
 async function handleDbQuery(D, url, body) {
-    assertCollection(body.collection);
     const filter = isPlainObject(body.filter) ? sanitizeFilter(body.filter) : {};
-    const sort = isPlainObject(body.sort) ? body.sort : { _id: -1 };
     const page = Math.max(1, parseInt(body.page, 10) || 1);
     const pageSize = Math.min(100, Math.max(1, parseInt(body.pageSize, 10) || 20));
 
+    if (body.collection === ALL_COLLECTIONS_KEY || !body.collection) {
+        const groups = await Promise.all([...ALLOWED_COLLECTIONS].sort().map(async (name) => {
+            const col = D.getCollection(name);
+            try {
+                const [total, items] = await Promise.all([
+                    col.countDocuments(filter),
+                    col.find(filter).sort({ _id: -1 }).limit(ALL_COLLECTIONS_LIMIT).toArray()
+                ]);
+                return { collection: name, total, items };
+            } catch (err) {
+                logger.error(`WebUI 查询集合 ${name} 失败: ${err.message}`);
+                return { collection: name, total: 0, items: [], error: err.message };
+            }
+        }));
+        return { status: 200, data: { all: true, limit: ALL_COLLECTIONS_LIMIT, groups } };
+    }
+
+    assertCollection(body.collection);
     const col = D.getCollection(body.collection);
     const total = await col.countDocuments(filter);
     const items = await col.find(filter)
-        .sort(sort)
+        .sort({ _id: -1 })
         .skip((page - 1) * pageSize)
         .limit(pageSize)
         .toArray();
-
-    return { status: 200, data: { total, page, pageSize, items } };
+    return { status: 200, data: { all: false, collection: body.collection, total, page, pageSize, items } };
 }
 
-async function handleDbInsert(D, url, body) {
-    assertCollection(body.collection);
-    const data = body.data;
-    if (!isPlainObject(data)) return { status: 400, data: { error: 'data 必须是 JSON 对象' } };
-    delete data._id; // 不允许手动指定 _id
+/**
+ * 执行数据库操作（AI 翻译或手动构造的操作计划）
+ * body: { operation: { action, collection, filter, data, sort, limit }, confirm }
+ */
+async function handleDbExecute(D, url, body) {
+    const op = body.operation;
+    if (!isPlainObject(op) || !op.action || !op.collection) {
+        return { status: 400, data: { error: '操作格式无效（需要 action 和 collection）' } };
+    }
+    assertCollection(op.collection);
 
-    const result = await D.getCollection(body.collection).insertOne(data);
-    logger.info(`WebUI 新增文档: ${body.collection} -> ${result.insertedId}`);
-    return { status: 200, data: { ok: true, insertedId: result.insertedId } };
+    const ACTIONS = ['query', 'insert', 'update', 'delete'];
+    if (!ACTIONS.includes(op.action)) {
+        return { status: 400, data: { error: `不支持的操作: ${op.action}` } };
+    }
+
+    const filter = isPlainObject(op.filter) ? sanitizeFilter(op.filter) : {};
+    const data = isPlainObject(op.data) ? { ...op.data } : {};
+
+    switch (op.action) {
+        case 'query': {
+            const sort = isPlainObject(op.sort) ? op.sort : { _id: -1 };
+            const limit = Math.min(parseInt(op.limit, 10) || 50, 200);
+            const col = D.getCollection(op.collection);
+            const [total, items] = await Promise.all([
+                col.countDocuments(filter),
+                col.find(filter).sort(sort).limit(limit).toArray()
+            ]);
+            logger.info(`WebUI 执行查询: ${op.collection} filter=${JSON.stringify(filter)} -> ${total} 条`);
+            return { status: 200, data: { type: 'query', total, limit, items } };
+        }
+        case 'insert': {
+            if (Object.keys(data).length === 0) return { status: 400, data: { error: '新增操作缺少 data' } };
+            delete data._id;
+            const result = await D.getCollection(op.collection).insertOne(data);
+            logger.info(`WebUI 执行新增: ${op.collection} -> ${result.insertedId}`);
+            return { status: 200, data: { type: 'insert', insertedId: result.insertedId } };
+        }
+        case 'update': {
+            if (Object.keys(filter).length === 0) return { status: 400, data: { error: '修改操作 filter 不能为空（需精确定位）' } };
+            if (Object.keys(data).length === 0) return { status: 400, data: { error: '修改操作缺少 data' } };
+            delete data._id;
+            const result = await D.getCollection(op.collection).updateOne(filter, { $set: data });
+            logger.info(`WebUI 执行修改: ${op.collection} matched=${result.matchedCount} modified=${result.modifiedCount}`);
+            return { status: 200, data: { type: 'update', matchedCount: result.matchedCount, modifiedCount: result.modifiedCount } };
+        }
+        case 'delete': {
+            if (body.confirm !== true) return { status: 400, data: { error: '删除操作需要二次确认（confirm: true）' } };
+            if (Object.keys(filter).length === 0) return { status: 400, data: { error: '删除操作 filter 不能为空（禁止全表删除）' } };
+            const result = await D.getCollection(op.collection).deleteOne(filter);
+            logger.info(`WebUI 执行删除: ${op.collection} deleted=${result.deletedCount}`);
+            return { status: 200, data: { type: 'delete', deletedCount: result.deletedCount } };
+        }
+        default:
+            return { status: 400, data: { error: '未知操作' } };
+    }
 }
 
-async function handleDbUpdate(D, url, body) {
-    assertCollection(body.collection);
-    const filter = body.filter;
-    const data = body.data;
-    if (!isPlainObject(filter) || Object.keys(filter).length === 0) {
-        return { status: 400, data: { error: 'filter 不能为空（需精确定位文档）' } };
-    }
-    if (!isPlainObject(data)) return { status: 400, data: { error: 'data 必须是 JSON 对象' } };
-    delete data._id; // 不允许修改 _id
-
-    const result = await D.getCollection(body.collection).updateOne(sanitizeFilter(filter), { $set: data });
-    logger.info(`WebUI 更新文档: ${body.collection} matched=${result.matchedCount} modified=${result.modifiedCount}`);
-    return { status: 200, data: { ok: true, matchedCount: result.matchedCount, modifiedCount: result.modifiedCount } };
-}
-
-async function handleDbDelete(D, url, body) {
-    assertCollection(body.collection);
-    if (body.confirm !== true) {
-        return { status: 400, data: { error: '删除操作需要二次确认（confirm: true）' } };
-    }
-    const filter = body.filter;
-    if (!isPlainObject(filter) || Object.keys(filter).length === 0) {
-        return { status: 400, data: { error: 'filter 不能为空（禁止无条件下删除）' } };
-    }
-
-    const result = await D.getCollection(body.collection).deleteOne(sanitizeFilter(filter));
-    logger.info(`WebUI 删除文档: ${body.collection} deleted=${result.deletedCount}`);
-    return { status: 200, data: { ok: true, deletedCount: result.deletedCount } };
-}
-
-async function handleAiQuery(D, url, body) {
-    const { collection, prompt } = body;
-    if (!ALLOWED_COLLECTIONS.has(collection)) {
-        return { status: 400, data: { error: `不允许的集合: ${collection}` } };
-    }
+/**
+ * AI 翻译：自然语言 -> 完整数据库操作（不执行）
+ * body: { prompt, selected?: { collection, doc } }
+ */
+async function handleAiPlan(D, url, body) {
+    const { prompt } = body;
     if (typeof prompt !== 'string' || !prompt.trim()) {
-        return { status: 400, data: { error: '缺少 prompt（自然语言查询描述）' } };
+        return { status: 400, data: { error: '缺少 prompt（自然语言操作描述）' } };
     }
 
     let guide = '';
@@ -234,20 +275,71 @@ async function handleAiQuery(D, url, body) {
         logger.error(`读取 db-guide.md 失败: ${err.message}`);
     }
 
-    const system = `${guide}\n\n用户当前查看的集合是：${collection}。请根据用户需求生成针对该集合的查询条件（filter）。`;
+    let system = guide;
+    if (body.selected && body.selected.collection && body.selected.doc) {
+        system += `\n\n用户当前已选中文档：集合=${body.selected.collection}\n文档内容：\n${JSON.stringify(body.selected.doc, null, 2)}\n如果用户说"这条/这个/它"等，通常指代该文档，请用其 _id 或业务唯一字段作为 filter 精确定位。`;
+    }
+
     const content = await D.callAI([
         { role: 'system', content: system },
         { role: 'user', content: prompt }
     ]);
 
     const parsed = extractJson(content);
-    if (!parsed || !isPlainObject(parsed.filter)) {
+    if (!parsed || !isPlainObject(parsed.operation)) {
         logger.error(`AI 返回无法解析: ${String(content).slice(0, 300)}`);
         return { status: 502, data: { error: 'AI 返回格式无效，请重试' } };
     }
 
-    logger.info(`WebUI AI 查询翻译: collection=${collection}, prompt="${prompt}", filter=${JSON.stringify(parsed.filter)}`);
-    return { status: 200, data: { explain: parsed.explain || '', filter: parsed.filter } };
+    logger.info(`WebUI AI 翻译: prompt="${prompt}" -> ${JSON.stringify(parsed.operation)}`);
+    return { status: 200, data: { explain: parsed.explain || '', operation: parsed.operation } };
+}
+
+/**
+ * SSE 日志流：GET /api/logs/stream?token=xxx
+ */
+function handleLogStream(req, res, url) {
+    const token = url.searchParams.get('token');
+    if (!isTokenValid(token)) {
+        json(res, 401, { error: '未授权' });
+        return;
+    }
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+    });
+    res.write('retry: 3000\n\n');
+
+    const client = { res };
+    sseClients.add(client);
+
+    const heartbeat = setInterval(() => {
+        try { res.write(': ping\n\n'); } catch { /* ignore */ }
+    }, 30000);
+
+    req.on('close', () => {
+        clearInterval(heartbeat);
+        sseClients.delete(client);
+    });
+    res.on('error', () => {
+        clearInterval(heartbeat);
+        sseClients.delete(client);
+    });
+}
+
+// 注册 logger 订阅（全局只注册一次，广播给所有 SSE 客户端）
+let loggerSubscribed = false;
+function ensureLoggerSubscription() {
+    if (loggerSubscribed) return;
+    loggerSubscribed = true;
+    logger.onLog((entry) => {
+        const payload = `data: ${JSON.stringify(entry)}\n\n`;
+        for (const client of sseClients) {
+            try { client.res.write(payload); } catch { /* ignore */ }
+        }
+    });
 }
 
 // 路由表：method + path 前缀
@@ -255,10 +347,8 @@ const ROUTES = [
     ['POST', /^\/api\/login$/, handleLogin],
     ['GET', /^\/api\/db\/collections$/, handleCollections],
     ['POST', /^\/api\/db\/query$/, handleDbQuery],
-    ['POST', /^\/api\/db\/insert$/, handleDbInsert],
-    ['POST', /^\/api\/db\/update$/, handleDbUpdate],
-    ['POST', /^\/api\/db\/delete$/, handleDbDelete],
-    ['POST', /^\/api\/ai\/query$/, handleAiQuery]
+    ['POST', /^\/api\/db\/execute$/, handleDbExecute],
+    ['POST', /^\/api\/ai\/plan$/, handleAiPlan]
 ];
 
 async function handleApi(D, req, res, url) {
@@ -330,10 +420,17 @@ function serveStatic(res, pathname) {
 function createWebUI(deps = {}) {
     const D = { ...defaultDeps, ...deps };
     if (deps.password) effectivePassword = deps.password;
+    ensureLoggerSubscription();
 
     return http.createServer(async (req, res) => {
         const url = parseUrl(req);
         try {
+            // SSE 日志流：独立鉴权（token 通过 query 传递，EventSource 无法带 header）
+            if (url.pathname === '/api/logs/stream') {
+                handleLogStream(req, res, url);
+                return;
+            }
+
             if (!requireAuth(req, res, url)) return;
 
             if (url.pathname.startsWith('/api/')) {
@@ -366,5 +463,6 @@ module.exports = {
     createWebUI,
     sessions,
     getPassword,
-    ALLOWED_COLLECTIONS
+    ALLOWED_COLLECTIONS,
+    ALL_COLLECTIONS_KEY
 };
