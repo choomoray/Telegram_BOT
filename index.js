@@ -9,6 +9,27 @@ const { addUserToGroup, removeUserFromGroup, updateLastSeen, banUserFully, userO
 const { upsertChannelGroup, getChannelGroupById } = require('./db/channelGroup');
 const { startHealthServer } = require('./healthServer');
 
+// 全局异常兜底：防止单个事件处理器的漏网错误导致整个进程崩溃
+process.on('unhandledRejection', (reason) => {
+    logger.error('未处理的 Promise 拒绝:', reason instanceof Error ? (reason.stack || reason.message) : reason);
+});
+process.on('uncaughtException', (err) => {
+    logger.error('未捕获异常（进程继续运行）:', err.stack || err.message);
+});
+
+/**
+ * 包装事件处理器，确保异步监听器中的异常不会成为未处理拒绝
+ */
+function safeHandler(fn) {
+    return async (...args) => {
+        try {
+            await fn(...args);
+        } catch (err) {
+            logger.error(`事件处理异常: ${err.stack || err.message}`);
+        }
+    };
+}
+
 async function start() {
     try {
         // 1. 连接数据库
@@ -29,26 +50,26 @@ async function start() {
         const { handleCallbackQuery } = require('./handlers/callbackHandler');
 
         // 消息事件（合并为一个监听器）
-        bot.on('message', async (msg) => {
+        bot.on('message', safeHandler(async (msg) => {
             if (msg.chat.type === 'private') {
                 await handlePrivateMessage(msg);
             } else if (['group', 'supergroup', 'channel'].includes(msg.chat.type)) {
                 await handleGroupMessage(msg);
             }
-        });
+        }));
 
-        bot.on('edited_message', async (msg) => {
+        bot.on('edited_message', safeHandler(async (msg) => {
             if (['group', 'supergroup', 'channel'].includes(msg.chat.type)) {
                 await handleGroupEditedMessage(msg);
             }
-        });
+        }));
 
-        bot.on('callback_query', async (query) => {
+        bot.on('callback_query', safeHandler(async (query) => {
             await handleCallbackQuery(query);
-        });
+        }));
 
         // 成员变动事件
-        bot.on('chat_member', async (update) => {
+        bot.on('chat_member', safeHandler(async (update) => {
             const { chat, new_chat_member } = update;
             if (!new_chat_member || !new_chat_member.user) return;
             const userId = new_chat_member.user.id;
@@ -79,10 +100,10 @@ async function start() {
                 await removeUserFromGroup(userId, chat.id);
                 logger.info(`用户 ${userId} 离开群组 ${chat.id} (状态: ${newStatus})`);
             }
-        });
+        }));
 
         // 机器人管理员状态变更
-        bot.on('my_chat_member', async (update) => {
+        bot.on('my_chat_member', safeHandler(async (update) => {
             const { chat, new_chat_member } = update;
             if (new_chat_member.status === 'administrator') {
                 const exists = await getChannelGroupById(chat.id);
@@ -97,10 +118,10 @@ async function start() {
                     logger.info(`机器人成为管理员，自动添加群组: ${chat.id} (${chat.title})`);
                 }
             }
-        });
+        }));
 
         // 加入请求审批
-        bot.on('chat_join_request', async (update) => {
+        bot.on('chat_join_request', safeHandler(async (update) => {
             const { chat, from } = update;
             const userId = from.id;
             const chatId = chat.id;
@@ -127,7 +148,7 @@ async function start() {
             } catch (err) {
                 logger.error(`处理加入请求失败: ${err.message}`);
             }
-        });
+        }));
 
         // 记录启动日志
         await insertLog(0);
@@ -151,11 +172,27 @@ async function start() {
 
 start();
 
-process.on('SIGINT', async () => {
+// 优雅关闭：停止轮询 → 关闭数据库连接 → 退出
+async function gracefulShutdown(signal) {
+    logger.info(`收到 ${signal}，正在优雅关闭...`);
+    try {
+        const bot = require('./bot');
+        await bot.stopPolling();
+        logger.info('Telegram 轮询已停止');
+    } catch (err) {
+        logger.warn(`停止轮询失败: ${err.message}`);
+    }
     const client = getClient();
     if (client) {
-        await client.close();
-        logger.info('MongoDB 连接已关闭');
+        try {
+            await client.close();
+            logger.info('MongoDB 连接已关闭');
+        } catch (err) {
+            logger.warn(`关闭 MongoDB 失败: ${err.message}`);
+        }
     }
     process.exit(0);
-});
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

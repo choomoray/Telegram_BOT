@@ -45,6 +45,8 @@ async function connectDB(retries = 6, delay = 5000) {
             return client;
         } catch (err) {
             logger.error(`MongoDB 连接尝试 ${i + 1}/${retries} 失败:`, err.message);
+            // 关闭失败的客户端，避免连接句柄泄漏
+            await attemptClient.close().catch(() => { });
             if (i < retries - 1) {
                 await new Promise(resolve => setTimeout(resolve, delay));
             }
