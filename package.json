@@ -1,21 +1,28 @@
 {
   "name": "telegrambot-v0.4",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "test": "node --test \"tests/*.test.js\""
   },
-  "keywords": [],
+  "keywords": [
+    "telegram",
+    "bot",
+    "media",
+    "mongodb"
+  ],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Telegram 媒体管理机器人：群组/频道媒体自动收录、检索、回复与管理，集成 AI 聊天智能体与群组权限管理",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "async": "^3.2.6",
     "axios": "^1.13.5",
     "chalk": "^4.1.2",
-    "dotenv": "^17.2.4",
     "mongodb": "^6.21.0",
-    "node-telegram-bot-api": "^0.67.0",
-    "telegraf": "^4.16.3"
+    "node-telegram-bot-api": "^0.67.0"
   }
 }
