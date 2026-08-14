@@ -182,39 +182,58 @@ async function start() {
 start();
 
 // 优雅关闭：停止轮询 → 关闭 Web UI → 关闭数据库连接 → 退出
+// 每一步都带超时兜底，另有 12 秒总超时强制退出，保证任何环节卡住进程都能结束
 async function gracefulShutdown(signal) {
     logger.info(`收到 ${signal}，正在优雅关闭...`);
+
+    // 总超时兜底：优雅关闭超过 12 秒仍未完成则强制退出
+    const forceExitTimer = setTimeout(() => {
+        logger.error('优雅关闭超时（12s），强制退出');
+        process.exit(1);
+    }, 12000);
+
+    const withTimeout = (promise, ms) => Promise.race([
+        promise,
+        new Promise(resolve => setTimeout(resolve, ms))
+    ]);
+
     try {
-        const bot = require('./bot');
-        await bot.stopPolling();
-        logger.info('Telegram 轮询已停止');
-    } catch (err) {
-        logger.warn(`停止轮询失败: ${err.message}`);
-    }
-    if (webServer) {
+        // 1. 停止 Telegram 轮询（最多等待 5 秒）
         try {
-            // 先断开所有 SSE 长连接，否则 server.close() 会永久等待
-            const { closeAllSseClients } = require('./webui/server');
-            closeAllSseClients();
+            const bot = require('./bot');
+            await withTimeout(bot.stopPolling(), 5000);
+            logger.info('Telegram 轮询已停止');
         } catch (err) {
-            logger.warn(`关闭 SSE 连接失败: ${err.message}`);
+            logger.warn(`停止轮询失败: ${err.message}`);
         }
-        // 关闭 HTTP 服务（加 3 秒超时兜底，避免异常连接挂起进程）
-        await Promise.race([
-            new Promise(resolve => webServer.close(resolve)),
-            new Promise(resolve => setTimeout(resolve, 3000))
-        ]);
-        logger.info('Web UI 服务已关闭');
-    }
-    const client = getClient();
-    if (client) {
-        try {
-            await client.close();
-            logger.info('MongoDB 连接已关闭');
-        } catch (err) {
-            logger.warn(`关闭 MongoDB 失败: ${err.message}`);
+
+        // 2. 关闭 Web UI（先断开 SSE 长连接，再关 HTTP 服务，最多等待 3 秒）
+        if (webServer) {
+            try {
+                // 先断开所有 SSE 长连接，否则 server.close() 会永久等待
+                const { closeAllSseClients } = require('./webui/server');
+                closeAllSseClients();
+            } catch (err) {
+                logger.warn(`关闭 SSE 连接失败: ${err.message}`);
+            }
+            await withTimeout(new Promise(resolve => webServer.close(resolve)), 3000);
+            logger.info('Web UI 服务已关闭');
         }
+
+        // 3. 关闭 MongoDB 连接（最多等待 3 秒）
+        const client = getClient();
+        if (client) {
+            try {
+                await withTimeout(client.close(), 3000);
+                logger.info('MongoDB 连接已关闭');
+            } catch (err) {
+                logger.warn(`关闭 MongoDB 失败: ${err.message}`);
+            }
+        }
+    } finally {
+        clearTimeout(forceExitTimer);
     }
+
     process.exit(0);
 }
 
