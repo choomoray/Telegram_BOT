@@ -47,7 +47,6 @@
           </div>
           <textarea id="op-json" class="op-json" placeholder="AI 翻译的操作 JSON（可编辑），点【执行】按此执行" spellcheck="false"></textarea>
         </div>
-        <div id="result-line" class="result-line">📤 执行结果</div>
         <div class="op-row">
           <select id="collection-select-op" class="coll-select" title="选择数据库（与顶部同步，默认全部）">
             <option value="__all__">全部数据库</option>
@@ -57,6 +56,7 @@
           <button id="ai-btn" class="btn btn-ai btn-sm">AI 翻译</button>
           <button id="exec-btn" class="btn btn-sm">执行</button>
         </div>
+        <div id="result-line" class="result-line">📤 执行结果</div>
       </div>
     </section>
 
@@ -65,6 +65,10 @@
       <div class="data-toolbar">
         <div class="data-toolbar-row">
           <span id="data-meta" class="data-meta">加载中...</span>
+          <select id="sort-select" class="coll-select" title="排序方式">
+            <option value="desc">最新在前</option>
+            <option value="asc">最早在前</option>
+          </select>
           <div id="pagination" class="pagination"></div>
         </div>
       </div>

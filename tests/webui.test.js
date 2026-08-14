@@ -8,14 +8,14 @@ const TEST_PASSWORD = 'test-password';
 // ---------------- 假数据库依赖 ----------------
 
 function makeFakeCol() {
-    const calls = { insert: [], update: [], delete: [], find: [] };
+    const calls = { insert: [], update: [], delete: [], find: [], sorts: null };
     const col = {
         calls,
         countDocuments: async () => 42,
         find: (filter) => {
             calls.find.push(filter);
             const chain = () => ({
-                sort: chain,
+                sort: (s) => { calls.sorts = s; return chain(); },
                 skip: chain,
                 limit: chain,
                 toArray: async () => [{ _id: 'abc123', name: '示例文档' }]
@@ -136,6 +136,17 @@ test('查询指定集合返回分页结构', async () => {
     assert.strictEqual(r.body.collection, 'users');
     assert.strictEqual(r.body.total, 42);
     assert.strictEqual(r.body.items[0].name, '示例文档');
+});
+
+test('查询支持自定义排序（sort 参数传递给数据库）', async () => {
+    await withServer(makeStubDeps(), async (b, auth, deps) => {
+        const r = await fetch(b + '/api/db/query', {
+            method: 'POST', headers: auth,
+            body: JSON.stringify({ collection: 'users', filter: {}, sort: { _id: 1 }, page: 1, pageSize: 20 })
+        });
+        assert.strictEqual(r.status, 200);
+        assert.deepStrictEqual(deps.fakeCol.calls.sorts, { _id: 1 });
+    });
 });
 
 test('查询全部集合返回分组数据', async () => {

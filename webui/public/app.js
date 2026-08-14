@@ -11,6 +11,7 @@
   const state = {
     collections: [],
     collection: ALL_KEY,
+    sort: { _id: -1 },        // 排序：默认最新在前（_id 倒序）
     page: 1,
     pageSize: 50,
     totalPages: 1,
@@ -140,7 +141,7 @@
   async function runQuery(page = state.page) {
     state.page = page;
     try {
-      const data = await api('/db/query', { collection: state.collection, page: state.page, pageSize: state.pageSize });
+      const data = await api('/db/query', { collection: state.collection, sort: state.sort, page: state.page, pageSize: state.pageSize });
       renderData(data);
     } catch (err) {
       toast(err.message, true);
@@ -154,6 +155,7 @@
     if (data.all) {
       // 全部数据库模式：仅显示集合名 + 条数，点击切换
       meta.textContent = '跨集合浏览（每集合最多显示 50 条，点击文档可选中）';
+      $('#sort-select').style.display = 'none';
       list.innerHTML = '';
       $('#pagination').innerHTML = '';
       const groups = data.groups.filter(g => g.total > 0);
@@ -177,6 +179,7 @@
 
     // 指定集合模式：文档卡片 + 分页（顶部靠右）
     state.totalPages = Math.max(1, Math.ceil(data.total / data.pageSize));
+    $('#sort-select').style.display = '';
     meta.textContent = `集合 ${data.collection}：共 ${data.total} 条`;
     if (!data.items.length) {
       list.innerHTML = '<div class="text-dim" style="padding:20px;text-align:center">未找到数据</div>';
@@ -198,13 +201,13 @@
             <button class="btn btn-sm" data-action="edit" title="修改数据">✏️ 修改数据</button>
             <button class="btn btn-danger btn-sm" data-action="del" title="删除数据">🗑️ 删除数据</button>
           </div>
-          <div class="doc-edit">
-            <textarea class="doc-edit-input" spellcheck="false"></textarea>
-            <div class="doc-edit-actions">
-              <button class="btn btn-sm" data-action="edit-confirm">✓ 确认</button>
-              <button class="btn btn-ghost btn-sm" data-action="edit-cancel">✕ 取消</button>
-            </div>
-          </div>
+        </div>
+      </div>
+      <div class="doc-edit">
+        <textarea class="doc-edit-input" spellcheck="false"></textarea>
+        <div class="doc-edit-actions">
+          <button class="btn btn-success btn-sm" data-action="edit-confirm">✓ 确认</button>
+          <button class="btn btn-ghost btn-sm" data-action="edit-cancel">✕ 取消</button>
         </div>
       </div>
     </div>`;
@@ -230,7 +233,9 @@
 
   async function handleCardAction(card, action) {
     const collection = card.dataset.collection;
-    const doc = JSON.parse(card.dataset.json);
+    // 插入卡片没有 data-json，容错处理
+    let doc = {};
+    try { doc = JSON.parse(card.dataset.json); } catch { /* ignore */ }
     const jsonEl = card.querySelector('.doc-json');
     const editBox = card.querySelector('.doc-edit');
     const actionsEl = card.querySelector('.doc-actions');
@@ -478,7 +483,7 @@
             <textarea class="doc-edit-input" spellcheck="false">${esc(JSON.stringify(template, null, 2))}</textarea>
           </div>
           <div class="doc-actions">
-            <button class="btn btn-sm" data-action="insert-confirm" title="确认插入">✅ 确认</button>
+            <button class="btn btn-success btn-sm" data-action="insert-confirm" title="确认插入">✅ 确认</button>
             <button class="btn btn-ghost btn-sm" data-action="insert-cancel" title="取消">✕ 取消</button>
           </div>
         </div>
@@ -600,6 +605,10 @@
 
   $('#collection-select-top').onchange = () => { syncCollectionSelect('top'); runQuery(1); };
   $('#collection-select-op').onchange = () => { syncCollectionSelect('op'); runQuery(1); };
+  $('#sort-select').onchange = () => {
+    state.sort = $('#sort-select').value === 'asc' ? { _id: 1 } : { _id: -1 };
+    runQuery(1);
+  };
 
   $('#insert-btn').onclick = insertData;
   $('#selected-btn').onclick = () => {

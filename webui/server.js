@@ -169,6 +169,7 @@ async function handleCollections() {
  */
 async function handleDbQuery(D, url, body) {
     const filter = isPlainObject(body.filter) ? sanitizeFilter(body.filter) : {};
+    const sort = isPlainObject(body.sort) ? body.sort : { _id: -1 };
     const page = Math.max(1, parseInt(body.page, 10) || 1);
     const pageSize = Math.min(100, Math.max(1, parseInt(body.pageSize, 10) || 20));
 
@@ -193,7 +194,7 @@ async function handleDbQuery(D, url, body) {
     const col = D.getCollection(body.collection);
     const total = await col.countDocuments(filter);
     const items = await col.find(filter)
-        .sort({ _id: -1 })
+        .sort(sort)
         .skip((page - 1) * pageSize)
         .limit(pageSize)
         .toArray();
