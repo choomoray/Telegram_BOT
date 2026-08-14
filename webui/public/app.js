@@ -193,16 +193,18 @@
     return `<div class="doc-card" data-key="${esc(key)}" data-collection="${esc(collection)}" data-json="${esc(JSON.stringify(doc))}">
       <div class="doc-main">
         <div class="doc-json">${esc(JSON.stringify(doc, null, 2))}</div>
-        <div class="doc-actions">
-          <button class="btn btn-sm" data-action="edit" title="修改数据">✏️ 修改数据</button>
-          <button class="btn btn-danger btn-sm" data-action="del" title="删除数据">🗑️ 删除数据</button>
-        </div>
-      </div>
-      <div class="doc-edit hidden">
-        <textarea class="doc-edit-input" spellcheck="false"></textarea>
-        <div class="doc-edit-actions">
-          <button class="btn btn-sm" data-action="edit-confirm">✓ 确认</button>
-          <button class="btn btn-ghost btn-sm" data-action="edit-cancel">✕ 取消</button>
+        <div class="doc-side">
+          <div class="doc-actions">
+            <button class="btn btn-sm" data-action="edit" title="修改数据">✏️ 修改数据</button>
+            <button class="btn btn-danger btn-sm" data-action="del" title="删除数据">🗑️ 删除数据</button>
+          </div>
+          <div class="doc-edit">
+            <textarea class="doc-edit-input" spellcheck="false"></textarea>
+            <div class="doc-edit-actions">
+              <button class="btn btn-sm" data-action="edit-confirm">✓ 确认</button>
+              <button class="btn btn-ghost btn-sm" data-action="edit-cancel">✕ 取消</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>`;
@@ -238,7 +240,9 @@
         card.classList.add('editing');
         const clean = { ...doc };
         delete clean._id;
-        card.querySelector('.doc-edit-input').value = JSON.stringify(clean, null, 2);
+        const ta = card.querySelector('.doc-edit-input');
+        ta.value = JSON.stringify(clean, null, 2);
+        autoResizeTextarea(ta);
         break;
       }
       case 'edit-cancel': {
@@ -351,24 +355,29 @@
   async function aiTranslate() {
     const prompt = $('#prompt-input').value.trim();
     if (!prompt) { toast('请输入自然语言操作描述', true); return; }
+    // 立即弹出 AI 翻译面板，显示等待状态
+    openAiPanel();
+    $('#ai-explain').textContent = '⏳ 正在 AI 翻译，请稍等...';
+    $('#op-json').value = '';
     try {
       const payload = { prompt };
       if (state.selected) {
         payload.selected = { collection: state.selected.collection, doc: state.selected.doc };
       }
       const data = await api('/ai/plan', payload);
-      openAiPanel(data.explain || '', data.operation);
+      $('#ai-explain').textContent = data.explain || '';
+      $('#op-json').value = JSON.stringify(data.operation, null, 2);
+      autoResizeTextarea($('#op-json'));
       showResult(`✅ AI 已翻译，确认后点【执行】`, false);
       toast('✅ 已翻译，确认后点【执行】');
     } catch (err) {
+      $('#ai-explain').textContent = '❌ 翻译失败';
       showResult(`❌ AI 翻译失败：${err.message}`, true);
       toast(err.message, true);
     }
   }
 
-  function openAiPanel(explain, operation) {
-    $('#ai-explain').textContent = explain || '';
-    $('#op-json').value = JSON.stringify(operation, null, 2);
+  function openAiPanel() {
     $('#ai-panel').classList.remove('hidden');
     document.querySelector('.panel-left').classList.add('ai-open');
   }
@@ -376,6 +385,14 @@
   function closeAiPanel() {
     $('#ai-panel').classList.add('hidden');
     document.querySelector('.panel-left').classList.remove('ai-open');
+  }
+
+  // textarea 高度自适应：按内容行数，最大 10 行
+  function autoResizeTextarea(el) {
+    el.style.height = 'auto';
+    const lineHeight = 18;
+    const maxH = lineHeight * 10 + 14; // 最多 10 行
+    el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
   }
 
   async function doExecute() {
@@ -397,18 +414,35 @@
         if (!confirm) { showResult('已取消删除', true); return; }
       }
       const data = await api('/db/execute', { operation, confirm });
-      const brief = {
-        query: `查询 ${data.total} 条`,
-        insert: `插入成功 ${data.insertedId}`,
-        update: `修改 ${data.modifiedCount} 条（匹配 ${data.matchedCount}）`,
-        delete: `删除 ${data.deletedCount} 条`
-      }[data.type] || JSON.stringify(data);
-      showResult(`✅ 执行成功：${brief}`, false);
+      if (data.type === 'query') {
+        // 查询结果渲染到右侧数据区（支持修改/删除）
+        renderExecResult(data.items, operation.collection);
+        showResult(`✅ 执行成功：查询 ${data.total} 条`, false);
+      } else {
+        const brief = {
+          insert: `插入成功 ${data.insertedId}`,
+          update: `修改 ${data.modifiedCount} 条（匹配 ${data.matchedCount}）`,
+          delete: `删除 ${data.deletedCount} 条`
+        }[data.type] || JSON.stringify(data);
+        showResult(`✅ 执行成功：${brief}`, false);
+        await runQuery(1);
+      }
       toast('✅ 执行完成');
-      await runQuery(1);
     } catch (err) {
       showResult(`❌ 执行失败：${err.message}`, true);
     }
+  }
+
+  // 执行查询后：结果渲染到右侧数据区（复用卡片，支持修改/删除）
+  function renderExecResult(items, collection) {
+    state.totalPages = 1;
+    $('#pagination').innerHTML = '';
+    $('#data-meta').textContent = `执行结果：查询 ${items.length} 条（集合 ${collection}）`;
+    $('#data-list').innerHTML = items.length
+      ? items.map(doc => docCard(collection, doc)).join('')
+      : '<div class="text-dim" style="padding:20px;text-align:center">未找到数据</div>';
+    bindDocEvents();
+    updateSelectedUI();
   }
 
   function showResult(text, isError) {
@@ -438,12 +472,15 @@
     card.dataset.collection = state.collection;
     card.innerHTML = `
       <div class="doc-main">
-        <div class="doc-edit">
-          <textarea class="doc-edit-input" spellcheck="false">${esc(JSON.stringify(template, null, 2))}</textarea>
-        </div>
-        <div class="doc-actions">
-          <button class="btn btn-sm" data-action="insert-confirm" title="确认插入">✅ 确认</button>
-          <button class="btn btn-ghost btn-sm" data-action="insert-cancel" title="取消">✕ 取消</button>
+        <div class="doc-json"></div>
+        <div class="doc-side">
+          <div class="doc-edit">
+            <textarea class="doc-edit-input" spellcheck="false">${esc(JSON.stringify(template, null, 2))}</textarea>
+          </div>
+          <div class="doc-actions">
+            <button class="btn btn-sm" data-action="insert-confirm" title="确认插入">✅ 确认</button>
+            <button class="btn btn-ghost btn-sm" data-action="insert-cancel" title="取消">✕ 取消</button>
+          </div>
         </div>
       </div>`;
     card.addEventListener('click', async (e) => {
@@ -451,6 +488,7 @@
       if (btn) await handleCardAction(card, btn.dataset.action);
     });
     list.prepend(card);
+    autoResizeTextarea(card.querySelector('.doc-edit-input'));
     toast('请填写数据后点【确认】插入，或点【取消】放弃');
   }
 
@@ -576,6 +614,13 @@
   $('#prompt-input').addEventListener('keydown', e => { if (e.key === 'Enter') aiTranslate(); });
   $('#exec-btn').onclick = doExecute;
   $('#ai-close-btn').onclick = closeAiPanel;
+
+  // 全局 textarea 高度自适应（AI 编辑框 / 卡片编辑框，最多 10 行）
+  document.addEventListener('input', (e) => {
+    if (e.target && (e.target.classList.contains('op-json') || e.target.classList.contains('doc-edit-input'))) {
+      autoResizeTextarea(e.target);
+    }
+  });
 
   // 初始化：有 token 则验证进入，否则显示登录页（login-view 默认可见）
   if (localStorage.getItem(TOKEN_KEY)) {

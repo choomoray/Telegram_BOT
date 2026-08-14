@@ -129,6 +129,7 @@ body {
   border-top: 1px solid var(--border);
   padding: 10px 12px;
   display: flex; flex-direction: column; gap: 8px;
+  justify-content: flex-end;   /* 内容贴底：输入栏固定在底部 */
   overflow: hidden;
   transition: flex-basis .2s;
 }
@@ -144,9 +145,9 @@ body {
 .coll-select { flex-shrink: 0; max-width: 150px; }
 .prompt-input { flex: 1; min-width: 0; }
 
-/* AI 翻译面板 */
+/* AI 翻译面板：占据剩余空间（把输入栏推到最底） */
 .ai-panel {
-  flex: 1; min-height: 0;
+  flex: 1 1 0; min-height: 0;
   display: flex; flex-direction: column; gap: 6px;
   border: 1px solid var(--ai); border-radius: 8px;
   padding: 8px;
@@ -156,10 +157,10 @@ body {
 .ai-panel-title { color: var(--ai); font-weight: 600; font-size: 13px; white-space: nowrap; }
 .ai-explain { flex: 1; color: var(--text-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .op-json {
-  flex: 1; min-height: 0; resize: none;
+  min-height: 40px; height: auto; resize: none;
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
   color: var(--text); font-size: 12px; font-family: Consolas, monospace;
-  padding: 8px; white-space: pre; overflow: auto;
+  padding: 8px; white-space: pre; overflow-y: auto;
 }
 .op-json:focus { outline: none; border-color: var(--ai); }
 
@@ -213,27 +214,32 @@ body {
   font-family: Consolas, monospace; font-size: 12px;
   white-space: pre-wrap; word-break: break-all; color: var(--text);
 }
-/* 操作按钮：默认隐藏，选中卡片时显示 */
-.doc-actions { display: none; flex-direction: column; gap: 6px; flex-shrink: 0; }
+/* 卡片右侧：操作按钮区 / 编辑区（统一竖排） */
+.doc-side {
+  flex-shrink: 0; min-width: 96px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.doc-actions { display: none; flex-direction: column; gap: 6px; }
 .doc-card.selected .doc-actions { display: flex; }
 
-/* 卡片编辑模式 */
-.doc-edit { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
-.doc-card.editing .doc-json { display: none; }
-.doc-card.editing .doc-actions { display: none; }
-.doc-card.editing .doc-edit { display: flex !important; }
+/* 编辑区：仅编辑/插入时显示在右侧 */
+.doc-edit { display: none; flex-direction: column; gap: 8px; }
+.doc-card.editing .doc-side .doc-actions { display: none; }
+.doc-card.editing .doc-side .doc-edit { display: flex; }
+.doc-card.editing .doc-json { opacity: .7; }
 .doc-edit-input {
   width: 100%; min-height: 120px; resize: vertical;
   background: var(--bg); border: 1px solid var(--ai); border-radius: 8px;
   color: var(--text); font-size: 12px; font-family: Consolas, monospace;
   padding: 8px;
 }
-.doc-edit-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.doc-edit-actions { display: flex; flex-direction: column; gap: 6px; }
 
-/* 插入数据的临时卡片（上确认 / 下取消），始终显示按钮 */
+/* 插入数据的临时卡片：右侧显示编辑区 + 确认/取消（上确认下取消） */
 .insert-card { border: 1px dashed var(--accent); background: rgba(79,140,255,.05); }
-.insert-card .doc-actions { display: flex; flex-direction: column; }
-.insert-card .doc-edit { display: flex !important; margin-top: 0; }
+.insert-card .doc-edit { display: flex; }
+.insert-card .doc-actions { display: flex; }
+.insert-card .doc-json { display: none; }
 
 /* 分页：靠右 */
 .pagination {
@@ -262,6 +268,8 @@ body {
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn-ai { background: var(--ai); }
 .btn-ai:hover { filter: brightness(1.1); }
+.btn-danger { background: var(--danger); }
+.btn-danger:hover { background: #e04848; }
 .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text-dim); cursor: pointer; }
 .btn-ghost:hover { color: var(--text); border-color: var(--text-dim); }
 .btn-sm { padding: 6px 12px; font-size: 12px; }
