@@ -2,7 +2,7 @@
 
 一个功能丰富的 Telegram Bot，基于 Node.js 开发，用于群组/频道媒体消息的自动收录、检索、回复与管理，并集成 AI 聊天智能体、群组管理和用户权限控制。
 
-**版本:** 0.4.2 | **运行环境:** Node.js | **数据库:** MongoDB Atlas | **AI 接口:** DeepSeek API / LM Studio
+**版本:** 0.4.3 | **运行环境:** Node.js | **数据库:** MongoDB Atlas | **AI 接口:** DeepSeek API / LM Studio
 
 ---
 
@@ -35,6 +35,12 @@
    ```bash
    node index.js          # 正常模式
    node index.js --test   # 测试模式（使用测试数据库）
+   ```
+
+4. **运行单元测试：**
+
+   ```bash
+   npm test               # 使用 node:test 内置框架，覆盖工具函数层
    ```
 
 ---
