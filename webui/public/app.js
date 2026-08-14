@@ -203,13 +203,6 @@
           </div>
         </div>
       </div>
-      <div class="doc-edit">
-        <textarea class="doc-edit-input" spellcheck="false"></textarea>
-        <div class="doc-edit-actions">
-          <button class="btn btn-success btn-sm" data-action="edit-confirm">✓ 确认</button>
-          <button class="btn btn-ghost btn-sm" data-action="edit-cancel">✕ 取消</button>
-        </div>
-      </div>
     </div>`;
   }
 
@@ -237,26 +230,35 @@
     let doc = {};
     try { doc = JSON.parse(card.dataset.json); } catch { /* ignore */ }
     const jsonEl = card.querySelector('.doc-json');
-    const editBox = card.querySelector('.doc-edit');
     const actionsEl = card.querySelector('.doc-actions');
+
+    const restoreActions = () => {
+      actionsEl.innerHTML = `
+        <button class="btn btn-sm" data-action="edit">✏️ 修改数据</button>
+        <button class="btn btn-danger btn-sm" data-action="del">🗑️ 删除数据</button>`;
+    };
 
     switch (action) {
       case 'edit': {
+        // 直接在文档文本上修改
         card.classList.add('editing');
-        const clean = { ...doc };
-        delete clean._id;
-        const ta = card.querySelector('.doc-edit-input');
-        ta.value = JSON.stringify(clean, null, 2);
-        autoResizeTextarea(ta);
+        jsonEl.contentEditable = 'true';
+        jsonEl.focus();
+        actionsEl.innerHTML = `
+          <button class="btn btn-success btn-sm" data-action="edit-confirm">✓ 确认</button>
+          <button class="btn btn-soft-danger btn-sm" data-action="edit-cancel">✕ 取消</button>`;
         break;
       }
       case 'edit-cancel': {
         card.classList.remove('editing');
+        jsonEl.contentEditable = 'false';
+        jsonEl.textContent = JSON.stringify(doc, null, 2); // 还原原内容
+        restoreActions();
         break;
       }
       case 'edit-confirm': {
         try {
-          const data = parseJson(card.querySelector('.doc-edit-input').value, '数据');
+          const data = parseJson(jsonEl.textContent, '数据');
           delete data._id;
           const r = await api('/db/execute', {
             operation: { action: 'update', collection, filter: { _id: doc._id }, data }
@@ -268,25 +270,21 @@
         break;
       }
       case 'del': {
-        // 进入删除确认态：按钮变为 确认删除 / 取消
+        // 进入删除确认态：确认删除（红）/ 取消（淡绿）
         actionsEl.innerHTML = `
           <button class="btn btn-danger btn-sm" data-action="del-confirm">⚠️ 确认删除</button>
-          <button class="btn btn-ghost btn-sm" data-action="del-cancel">✕ 取消</button>`;
+          <button class="btn btn-soft-success btn-sm" data-action="del-cancel">✕ 取消</button>`;
         card.classList.add('del-confirming');
         break;
       }
       case 'del-cancel': {
-        actionsEl.innerHTML = `
-          <button class="btn btn-sm" data-action="edit">✏️ 修改数据</button>
-          <button class="btn btn-danger btn-sm" data-action="del">🗑️ 删除数据</button>`;
+        restoreActions();
         card.classList.remove('del-confirming');
         break;
       }
       case 'del-confirm': {
         if (!window.confirm(`⚠️ 二次确认：确定删除 ${collection} 中的该文档吗？\n\n${JSON.stringify(doc, null, 2)}`)) {
-          actionsEl.innerHTML = `
-            <button class="btn btn-sm" data-action="edit">✏️ 修改数据</button>
-            <button class="btn btn-danger btn-sm" data-action="del">🗑️ 删除数据</button>`;
+          restoreActions();
           card.classList.remove('del-confirming');
           return;
         }
@@ -304,7 +302,7 @@
       }
       case 'insert-confirm': {
         try {
-          const data = parseJson(card.querySelector('.doc-edit-input').value, '数据');
+          const data = parseJson(jsonEl.textContent, '数据');
           const r = await api('/db/execute', { operation: { action: 'insert', collection, data } });
           showResult(`✅ 插入成功（${r.insertedId}）`, false);
           toast('✅ 插入成功');
@@ -315,7 +313,7 @@
       }
       case 'insert-cancel': {
         card.remove();
-        showResult('—', false);
+        showResult('📤 执行结果', false);
         break;
       }
       default:
@@ -477,14 +475,11 @@
     card.dataset.collection = state.collection;
     card.innerHTML = `
       <div class="doc-main">
-        <div class="doc-json"></div>
+        <div class="doc-json" contenteditable="true">${esc(JSON.stringify(template, null, 2))}</div>
         <div class="doc-side">
-          <div class="doc-edit">
-            <textarea class="doc-edit-input" spellcheck="false">${esc(JSON.stringify(template, null, 2))}</textarea>
-          </div>
           <div class="doc-actions">
             <button class="btn btn-success btn-sm" data-action="insert-confirm" title="确认插入">✅ 确认</button>
-            <button class="btn btn-ghost btn-sm" data-action="insert-cancel" title="取消">✕ 取消</button>
+            <button class="btn btn-soft-danger btn-sm" data-action="insert-cancel" title="取消">✕ 取消</button>
           </div>
         </div>
       </div>`;
@@ -493,8 +488,7 @@
       if (btn) await handleCardAction(card, btn.dataset.action);
     });
     list.prepend(card);
-    autoResizeTextarea(card.querySelector('.doc-edit-input'));
-    toast('请填写数据后点【确认】插入，或点【取消】放弃');
+    toast('请直接编辑文档内容后点【确认】插入，或点【取消】放弃');
   }
 
   // ---------- 分页 ----------
@@ -606,7 +600,9 @@
   $('#collection-select-top').onchange = () => { syncCollectionSelect('top'); runQuery(1); };
   $('#collection-select-op').onchange = () => { syncCollectionSelect('op'); runQuery(1); };
   $('#sort-select').onchange = () => {
-    state.sort = $('#sort-select').value === 'asc' ? { _id: 1 } : { _id: -1 };
+    const asc = $('#sort-select').value === 'asc';
+    state.sort = asc ? { _id: 1 } : { _id: -1 };
+    toast(asc ? '已切换：最早在前，正在刷新...' : '已切换：最新在前，正在刷新...');
     runQuery(1);
   };
 
@@ -624,9 +620,9 @@
   $('#exec-btn').onclick = doExecute;
   $('#ai-close-btn').onclick = closeAiPanel;
 
-  // 全局 textarea 高度自适应（AI 编辑框 / 卡片编辑框，最多 10 行）
+  // 全局 textarea 高度自适应（AI 编辑框，最多 10 行）
   document.addEventListener('input', (e) => {
-    if (e.target && (e.target.classList.contains('op-json') || e.target.classList.contains('doc-edit-input'))) {
+    if (e.target && e.target.classList && e.target.classList.contains('op-json')) {
       autoResizeTextarea(e.target);
     }
   });

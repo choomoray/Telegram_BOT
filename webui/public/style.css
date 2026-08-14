@@ -136,7 +136,18 @@ body {
   padding: 8px 10px; background: var(--bg);
   border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px;
 }
-.coll-select { flex-shrink: 0; max-width: 150px; }
+/* 所有集合/排序下拉统一样式（与顶部数据库选择一致） */
+.coll-select {
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  flex-shrink: 0;
+  max-width: 150px;
+}
+.coll-select:focus { outline: none; border-color: var(--accent); }
 .prompt-input { flex: 1; min-width: 0; }
 
 /* AI 翻译面板：高度由内容决定（textarea 最多 10 行），不撑满 */
@@ -208,6 +219,13 @@ body {
   font-family: Consolas, monospace; font-size: 12px;
   white-space: pre-wrap; word-break: break-all; color: var(--text);
 }
+/* 编辑模式：直接在文档文本上修改 */
+.doc-card.editing .doc-json {
+  outline: 1px dashed var(--ai);
+  background: rgba(157,123,255,.05);
+  cursor: text;
+  max-height: 180px; overflow-y: auto;
+}
 /* 卡片右侧操作按钮：右对齐（右边留点空间）、垂直居中、按钮间距 */
 .doc-side {
   flex-shrink: 0; min-width: 96px;
@@ -218,26 +236,18 @@ body {
   display: none; flex-direction: column; gap: 8px;
   align-items: flex-end; padding-right: 4px; justify-content: center;
 }
-.doc-card.selected .doc-actions { display: flex; }
+.doc-card.selected .doc-actions,
+.doc-card.editing .doc-actions { display: flex; }
 
-/* 编辑区：整行显示在卡片下方（撤回为上一次的效果） */
-.doc-edit { display: none; flex-direction: column; gap: 8px; margin-top: 8px; }
-.doc-card.editing .doc-actions { display: none; }
-.doc-card.editing .doc-edit { display: flex; }
-.doc-edit-input {
-  width: 100%; min-height: 100px; resize: vertical;
-  background: var(--bg); border: 1px solid var(--ai); border-radius: 8px;
-  color: var(--text); font-size: 12px; font-family: Consolas, monospace;
-  padding: 8px;
-}
-.doc-edit-actions { display: flex; gap: 8px; justify-content: flex-end; }
-
-/* 插入数据的临时卡片：右侧编辑区 + 确认/取消（上确认下取消） */
+/* 插入数据的临时卡片：直接在文本上编辑 + 确认/取消（上确认下取消） */
 .insert-card { border: 1px dashed var(--accent); background: rgba(79,140,255,.05); }
-.insert-card .doc-side { min-width: 140px; }
-.insert-card .doc-edit { display: flex; margin-top: 0; flex: 1; }
+.insert-card .doc-json {
+  outline: 1px dashed var(--ai);
+  background: rgba(157,123,255,.05);
+  cursor: text;
+  max-height: 180px; overflow-y: auto;
+}
 .insert-card .doc-actions { display: flex; }
-.insert-card .doc-json { display: none; }
 
 /* 分页：靠右 */
 .pagination {
@@ -270,6 +280,17 @@ body {
 .btn-danger:hover { background: #e04848; }
 .btn-success { background: var(--success); }
 .btn-success:hover { background: #2cbb6f; }
+/* 淡色取消按钮：淡红（修改/插入取消）、淡绿（删除取消） */
+.btn-soft-danger {
+  background: rgba(255,92,92,.14); color: var(--danger);
+  border: 1px solid rgba(255,92,92,.4);
+}
+.btn-soft-danger:hover { background: rgba(255,92,92,.24); }
+.btn-soft-success {
+  background: rgba(61,220,132,.12); color: var(--success);
+  border: 1px solid rgba(61,220,132,.4);
+}
+.btn-soft-success:hover { background: rgba(61,220,132,.22); }
 .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text-dim); cursor: pointer; }
 .btn-ghost:hover { color: var(--text); border-color: var(--text-dim); }
 .btn-sm { padding: 6px 12px; font-size: 12px; }
