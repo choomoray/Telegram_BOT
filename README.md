@@ -769,24 +769,34 @@ node index.js webui       # 或 npm run start:webui
 - 除 `/api/login` 外的所有 API 均需携带 `Authorization: Bearer <token>`
 - 登录成功返回 token，前端存储在 localStorage，会话有效期 12 小时
 
-**功能列表：**
+**布局：左右两栏（窄屏自动上下排列）**
 
-| 页面 | 功能 |
+- **左栏 — 实时数据**：集合切换、MongoDB 查询条件（filter）输入、文档列表分页、自动刷新（5 秒）
+- **右栏 — 数据库操作**：新增 / 修改 / 删除（删除需二次确认，修改与删除使用左侧查询条件定位）
+
+**AI 查询翻译（DeepSeek）：**
+- 查询栏提供【查询】与【AI 查询】两个按钮
+- 点击【AI 查询】输入自然语言（如"标记次数超过 5 的媒体组"），DeepSeek 将其翻译为 MongoDB 查询条件（filter）
+- **AI 只翻译、不直接操作数据库**：生成的 filter 填入查询栏，用户可再编辑后点【查询】执行，或用于右栏的修改/删除
+- 数据库表结构与 AI 提示词位于 `webui/db-guide.md`
+
+**API 一览：**
+
+| 接口 | 说明 |
 |------|------|
-| 仪表盘 | 群组/用户/媒体/日志等统计卡片、媒体类型分布、今日收录 |
-| 媒体库 | 关键字/类型/等级筛选、分页浏览、原文链接跳转、删除媒体（同步清理 group_list 计数） |
-| 用户 | ID/名称搜索、状态与白名单展示、封禁/解封（含全群组踢出） |
-| 标记记录 | 按标记次数/最后标记时间排序展示 |
-| 群组 | 已管理群组/频道列表与绑定关系 |
-| 操作日志 | 按类型筛选、分页浏览 |
-| 设置 | 全局设置可视化编辑（开关/数字/文本） |
-| 搬运源 | 搬运链接列表 |
+| `POST /api/login` | 登录，返回 token |
+| `GET /api/db/collections` | 可操作集合白名单 |
+| `POST /api/db/query` | 查询（filter/page/pageSize，支持 `_id` 自动转 ObjectId） |
+| `POST /api/db/insert` | 新增文档（自动移除 `_id`） |
+| `POST /api/db/update` | 修改文档（filter 非空 + `$set` data） |
+| `POST /api/db/delete` | 删除文档（必须 `confirm: true` 且 filter 非空，禁止全表删除） |
+| `POST /api/ai/query` | AI 将自然语言翻译为 filter（不执行） |
 
 **实现要点：**
-- 使用 Node 内置 `http` 模块，无新增 npm 依赖
+- 使用 Node 内置 `http` 模块，无新增 npm 依赖（DeepSeek 调用使用 Node 内置 fetch）
 - `createWebUI(deps)` 支持依赖注入，API 层可独立单元测试
+- 集合白名单校验（仅允许 `db/collections.js` 中的集合），拒绝 `$where`/`$function` 等危险操作由 AI 提示词约束
 - 静态文件与 API 同源提供，无 CORS 问题
-- 删除媒体复用 Telegram 模式的组计数一致性逻辑（`is_group===1` 删除整组，否则减计数并在归零时清理）
 
 ---
 

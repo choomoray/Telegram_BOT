@@ -48,5 +48,10 @@ module.exports = {
     // Web UI 配置
     WEBUI_PORT: parseInt(process.env.WEBUI_PORT) || 9700,
     // 未设置时由 webui/server.js 生成随机密码并打印在启动日志
-    WEBUI_PASSWORD: process.env.WEBUI_PASSWORD || null
+    WEBUI_PASSWORD: process.env.WEBUI_PASSWORD || null,
+    // Web UI AI 辅助（DeepSeek，用于数据库增删改查）
+    DEEPSEEK_API_URL: process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions',
+    DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
+    DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+    DEEPSEEK_API_TIMEOUT: parseInt(process.env.DEEPSEEK_API_TIMEOUT) || 60000
 };

@@ -3,13 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Telegram Bot 管理面板</title>
+<title>Telegram Bot 数据库控制台</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div id="login-view" class="login-view hidden">
+
+<div id="login-view" class="login-view">
   <div class="login-card">
-    <h1>🔐 Telegram Bot 管理面板</h1>
+    <h1>🔐 Telegram Bot 数据库控制台</h1>
     <p class="login-hint">请输入登录密码</p>
     <input type="password" id="login-password" placeholder="密码" autocomplete="current-password">
     <button id="login-btn">登 录</button>
@@ -18,32 +19,68 @@
 </div>
 
 <div id="app-view" class="app-view hidden">
-  <aside class="sidebar">
-    <div class="sidebar-title">📊 管理面板</div>
-    <nav class="nav">
-      <a data-view="dashboard" class="nav-item active">仪表盘</a>
-      <a data-view="media" class="nav-item">媒体库</a>
-      <a data-view="users" class="nav-item">用户</a>
-      <a data-view="marks" class="nav-item">标记记录</a>
-      <a data-view="groups" class="nav-item">群组</a>
-      <a data-view="logs" class="nav-item">操作日志</a>
-      <a data-view="settings" class="nav-item">设置</a>
-      <a data-view="transports" class="nav-item">搬运源</a>
-    </nav>
-    <div class="sidebar-footer">
-      <button id="logout-btn" class="btn-ghost">退出登录</button>
+  <header class="topbar">
+    <div class="topbar-title">🗄️ 数据库控制台</div>
+    <div class="topbar-right">
+      <select id="collection-select"></select>
+      <button id="refresh-btn" class="btn btn-sm">🔄 刷新</button>
+      <label class="auto-refresh"><input type="checkbox" id="auto-refresh"> 自动刷新</label>
+      <button id="logout-btn" class="btn-ghost btn-sm">退出</button>
     </div>
-  </aside>
-  <main class="content">
-    <div id="view-dashboard" class="view"></div>
-    <div id="view-media" class="view hidden"></div>
-    <div id="view-users" class="view hidden"></div>
-    <div id="view-marks" class="view hidden"></div>
-    <div id="view-groups" class="view hidden"></div>
-    <div id="view-logs" class="view hidden"></div>
-    <div id="view-settings" class="view hidden"></div>
-    <div id="view-transports" class="view hidden"></div>
-  </main>
+  </header>
+
+  <div class="panels">
+    <!-- 左：实时数据 -->
+    <section class="panel panel-left">
+      <div class="query-bar">
+        <input id="filter-input" class="filter-input" placeholder='查询条件 filter（JSON），如 {"mark":{"$gt":5}}；留空查全部'>
+        <button id="query-btn" class="btn">查询</button>
+        <button id="ai-query-btn" class="btn btn-ai">AI 查询</button>
+      </div>
+      <div id="ai-input-area" class="ai-input-area hidden">
+        <input id="ai-prompt" class="filter-input" placeholder="用自然语言描述查询，如：标记次数超过5的组">
+        <button id="ai-generate-btn" class="btn btn-ai btn-sm">生成查询条件</button>
+        <span id="ai-status" class="text-dim"></span>
+      </div>
+      <div id="data-meta" class="data-meta"></div>
+      <div class="table-wrap">
+        <table id="data-table">
+          <thead><tr><th>#</th><th>文档内容</th></tr></thead>
+          <tbody id="data-tbody"></tbody>
+        </table>
+        <div id="data-empty" class="empty hidden">暂无数据</div>
+      </div>
+      <div id="pagination" class="pagination"></div>
+    </section>
+
+    <!-- 右：数据库操作 -->
+    <section class="panel panel-right">
+      <h3>⚙️ 数据库操作 <span id="op-collection" class="badge badge-blue"></span></h3>
+      <p class="hint">修改 / 删除 使用左侧查询栏当前条件（filter）定位文档。</p>
+
+      <div class="op-group">
+        <div class="op-title">➕ 新增文档</div>
+        <textarea id="insert-data" class="json-input" placeholder='{"字段": 值, ...}'></textarea>
+        <button id="insert-btn" class="btn btn-sm">插入</button>
+      </div>
+
+      <div class="op-group">
+        <div class="op-title">✏️ 修改文档</div>
+        <textarea id="update-data" class="json-input" placeholder='要更新的字段 {"字段": 新值, ...}'></textarea>
+        <button id="update-btn" class="btn btn-sm">更新</button>
+      </div>
+
+      <div class="op-group">
+        <div class="op-title">🗑️ 删除文档</div>
+        <button id="delete-btn" class="btn btn-danger btn-sm">删除（二次确认）</button>
+      </div>
+
+      <div class="op-group">
+        <div class="op-title">📤 执行结果</div>
+        <pre id="result-box" class="result-box">—</pre>
+      </div>
+    </section>
+  </div>
 </div>
 
 <div id="toast" class="toast hidden"></div>

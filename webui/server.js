@@ -5,8 +5,11 @@
  * 启动方式：node index.js webui
  * 默认地址：http://127.0.0.1:9700
  *
- * 功能：仪表盘统计、媒体库浏览/搜索/删除、用户查看/封禁/解封、
- *       标记记录、群组列表、操作日志、全局设置、搬运源列表
+ * 功能：左侧实时数据浏览（集合切换 / MongoDB filter 查询 / AI 查询翻译），
+ *       右侧数据库操作（新增 / 修改 / 删除，删除需二次确认）
+ *
+ * AI 辅助：调用 DeepSeek 将自然语言翻译为 MongoDB 查询条件（filter），
+ *          结果显示在查询栏供用户编辑后手动执行，AI 不直接操作数据库。
  *
  * 鉴权：登录密码（WEBUI_PASSWORD 环境变量，未设置则启动时随机生成并打印）
  */
@@ -14,15 +17,11 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { ObjectId } = require('mongodb');
 const config = require('../config');
 const logger = require('../logger');
 const { getCollection, COLLECTIONS } = require('../db/getCollection');
-const usersDb = require('../db/users');
-const settingsDb = require('../db/settings');
-const { findMediaByFileUniqueId, deleteMediaByFileUniqueId } = require('../db/media');
-const { findMessageByFileUniqueId, deleteMessageByFileUniqueId } = require('../db/message');
-const { findGroupList, deleteGroupList, setGroupDelete } = require('../db/groupList');
-const { getMarkRecords } = require('../handlers/callbacks/markCallback');
+const { callDeepSeek } = require('./ai');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const SESSION_TTL = 12 * 60 * 60 * 1000; // 会话有效期 12 小时
@@ -32,29 +31,17 @@ const sessions = new Map();
 // 实际生效的密码（未配置时随机生成）
 let effectivePassword = config.WEBUI_PASSWORD || null;
 
+// 允许操作的集合白名单
+const ALLOWED_COLLECTIONS = new Set(Object.values(COLLECTIONS));
+
 // 默认依赖（测试时可注入 stub 覆盖）
 const defaultDeps = {
     getCollection,
-    banUser: usersDb.banUserFully,
-    unbanUser: usersDb.unbanUserFully,
-    getSettings: settingsDb.getSettings,
-    updateSetting: settingsDb.updateSetting,
-    findMediaByFileUniqueId,
-    deleteMediaByFileUniqueId,
-    findMessageByFileUniqueId,
-    deleteMessageByFileUniqueId,
-    findGroupList,
-    deleteGroupList,
-    setGroupDelete,
-    getMarkRecords,
+    callAI: callDeepSeek,
     password: null // 测试时可用固定密码
 };
 
 // ---------------- 工具 ----------------
-
-function escapeRegExp(str) {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 function getPassword() {
     if (effectivePassword) return effectivePassword;
@@ -108,10 +95,9 @@ function parseUrl(req) {
     return new URL(req.url, 'http://localhost');
 }
 
-// 校验会话中间件：除 /api/login 外的所有 /api/* 需要 Bearer token
 function requireAuth(req, res, url) {
     if (url.pathname === '/api/login') return true;
-    if (!url.pathname.startsWith('/api/')) return true; // 非 API 不校验
+    if (!url.pathname.startsWith('/api/')) return true;
     const auth = req.headers.authorization || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
     if (!isTokenValid(token)) {
@@ -119,6 +105,42 @@ function requireAuth(req, res, url) {
         return false;
     }
     return true;
+}
+
+function assertCollection(name) {
+    if (!ALLOWED_COLLECTIONS.has(name)) {
+        throw new Error(`不允许的集合: ${name}`);
+    }
+}
+
+function isPlainObject(v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * filter 中的 _id 若是 24 位 hex 字符串则转换为 ObjectId
+ */
+function sanitizeFilter(filter) {
+    const out = { ...filter };
+    if (typeof out._id === 'string' && /^[0-9a-fA-F]{24}$/.test(out._id)) {
+        out._id = new ObjectId(out._id);
+    }
+    return out;
+}
+
+/**
+ * 从 AI 回复中提取 JSON（容忍 ```json 代码块等包装）
+ */
+function extractJson(text) {
+    const cleaned = String(text).replace(/```(?:json)?/gi, '').trim();
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
+    try {
+        return JSON.parse(cleaned.slice(start, end + 1));
+    } catch {
+        return null;
+    }
 }
 
 // ---------------- API 处理 ----------------
@@ -133,227 +155,110 @@ async function handleLogin(D, url, body) {
     return { status: 200, data: { token } };
 }
 
-async function handleDashboard(D, url) {
-    const col = D.getCollection;
-    const [
-        groupCount, userCount, mediaCount, messageCount,
-        markedGroups, bannedUsers, whiteUsers, logCount, transportCount
-    ] = await Promise.all([
-        col(COLLECTIONS.CHANNEL_GROUP).countDocuments(),
-        col(COLLECTIONS.USERS).countDocuments(),
-        col(COLLECTIONS.MEDIA).countDocuments(),
-        col(COLLECTIONS.MESSAGE).countDocuments(),
-        col(COLLECTIONS.GROUP_LIST).countDocuments({ mark: { $gt: 0 } }),
-        col(COLLECTIONS.USERS).countDocuments({ state: 0 }),
-        col(COLLECTIONS.USERS).countDocuments({ white: 1 }),
-        col(COLLECTIONS.LOG).countDocuments(),
-        col(COLLECTIONS.TRANSPORT).countDocuments()
+async function handleCollections() {
+    return { status: 200, data: { collections: [...ALLOWED_COLLECTIONS].sort() } };
+}
+
+async function handleDbQuery(D, url, body) {
+    assertCollection(body.collection);
+    const filter = isPlainObject(body.filter) ? sanitizeFilter(body.filter) : {};
+    const sort = isPlainObject(body.sort) ? body.sort : { _id: -1 };
+    const page = Math.max(1, parseInt(body.page, 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(body.pageSize, 10) || 20));
+
+    const col = D.getCollection(body.collection);
+    const total = await col.countDocuments(filter);
+    const items = await col.find(filter)
+        .sort(sort)
+        .skip((page - 1) * pageSize)
+        .limit(pageSize)
+        .toArray();
+
+    return { status: 200, data: { total, page, pageSize, items } };
+}
+
+async function handleDbInsert(D, url, body) {
+    assertCollection(body.collection);
+    const data = body.data;
+    if (!isPlainObject(data)) return { status: 400, data: { error: 'data 必须是 JSON 对象' } };
+    delete data._id; // 不允许手动指定 _id
+
+    const result = await D.getCollection(body.collection).insertOne(data);
+    logger.info(`WebUI 新增文档: ${body.collection} -> ${result.insertedId}`);
+    return { status: 200, data: { ok: true, insertedId: result.insertedId } };
+}
+
+async function handleDbUpdate(D, url, body) {
+    assertCollection(body.collection);
+    const filter = body.filter;
+    const data = body.data;
+    if (!isPlainObject(filter) || Object.keys(filter).length === 0) {
+        return { status: 400, data: { error: 'filter 不能为空（需精确定位文档）' } };
+    }
+    if (!isPlainObject(data)) return { status: 400, data: { error: 'data 必须是 JSON 对象' } };
+    delete data._id; // 不允许修改 _id
+
+    const result = await D.getCollection(body.collection).updateOne(sanitizeFilter(filter), { $set: data });
+    logger.info(`WebUI 更新文档: ${body.collection} matched=${result.matchedCount} modified=${result.modifiedCount}`);
+    return { status: 200, data: { ok: true, matchedCount: result.matchedCount, modifiedCount: result.modifiedCount } };
+}
+
+async function handleDbDelete(D, url, body) {
+    assertCollection(body.collection);
+    if (body.confirm !== true) {
+        return { status: 400, data: { error: '删除操作需要二次确认（confirm: true）' } };
+    }
+    const filter = body.filter;
+    if (!isPlainObject(filter) || Object.keys(filter).length === 0) {
+        return { status: 400, data: { error: 'filter 不能为空（禁止无条件下删除）' } };
+    }
+
+    const result = await D.getCollection(body.collection).deleteOne(sanitizeFilter(filter));
+    logger.info(`WebUI 删除文档: ${body.collection} deleted=${result.deletedCount}`);
+    return { status: 200, data: { ok: true, deletedCount: result.deletedCount } };
+}
+
+async function handleAiQuery(D, url, body) {
+    const { collection, prompt } = body;
+    if (!ALLOWED_COLLECTIONS.has(collection)) {
+        return { status: 400, data: { error: `不允许的集合: ${collection}` } };
+    }
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+        return { status: 400, data: { error: '缺少 prompt（自然语言查询描述）' } };
+    }
+
+    let guide = '';
+    try {
+        guide = await fs.promises.readFile(path.join(__dirname, 'db-guide.md'), 'utf8');
+    } catch (err) {
+        logger.error(`读取 db-guide.md 失败: ${err.message}`);
+    }
+
+    const system = `${guide}\n\n用户当前查看的集合是：${collection}。请根据用户需求生成针对该集合的查询条件（filter）。`;
+    const content = await D.callAI([
+        { role: 'system', content: system },
+        { role: 'user', content: prompt }
     ]);
 
-    // 媒体类型分布
-    let typeDist = [];
-    try {
-        typeDist = await col(COLLECTIONS.MEDIA).aggregate([
-            { $group: { _id: '$media_type', count: { $sum: 1 } } }
-        ]).toArray();
-    } catch (err) {
-        logger.warn(`WebUI 媒体类型聚合失败: ${err.message}`);
+    const parsed = extractJson(content);
+    if (!parsed || !isPlainObject(parsed.filter)) {
+        logger.error(`AI 返回无法解析: ${String(content).slice(0, 300)}`);
+        return { status: 502, data: { error: 'AI 返回格式无效，请重试' } };
     }
 
-    // 今日收录（log 集合 MEDIA_SAVE 类型）
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayMedia = await col(COLLECTIONS.LOG).countDocuments({ type: 1, time: { $gte: todayStart.getTime() } });
-
-    return {
-        status: 200,
-        data: {
-            groups: groupCount,
-            users: userCount,
-            media: mediaCount,
-            messages: messageCount,
-            markedGroups,
-            bannedUsers,
-            whiteUsers,
-            logs: logCount,
-            transports: transportCount,
-            todayMedia,
-            typeDist
-        }
-    };
-}
-
-async function handleMediaList(D, url) {
-    const page = Math.max(1, parseInt(url.searchParams.get('page'), 10) || 1);
-    const pageSize = Math.min(50, Math.max(1, parseInt(url.searchParams.get('pageSize'), 10) || 20));
-    const keyword = (url.searchParams.get('keyword') || '').trim();
-    const type = url.searchParams.get('type') || '';
-    const level = url.searchParams.get('level') || '';
-
-    const filter = {};
-    if (keyword) filter.text = { $regex: escapeRegExp(keyword), $options: 'i' };
-    if (type) filter.media_type = type;
-    if (level) filter.level = level;
-
-    const col = D.getCollection(COLLECTIONS.MESSAGE);
-    const total = await col.countDocuments(filter);
-    const items = await col.find(filter)
-        .sort({ _id: -1 })
-        .skip((page - 1) * pageSize)
-        .limit(pageSize)
-        .toArray();
-
-    return { status: 200, data: { total, page, pageSize, items } };
-}
-
-async function handleMediaDelete(D, url, body, params) {
-    const fileUniqueId = params.fileUniqueId;
-    if (!fileUniqueId) return { status: 400, data: { error: '缺少 fileUniqueId' } };
-
-    const mediaDoc = await D.findMediaByFileUniqueId(fileUniqueId);
-    if (!mediaDoc) return { status: 404, data: { error: '媒体不存在' } };
-
-    const groupId = mediaDoc.group_id;
-    const groupDoc = await D.findGroupList(groupId);
-    const messageDoc = await D.findMessageByFileUniqueId(fileUniqueId);
-    const hadText = !!messageDoc;
-    const col = D.getCollection;
-
-    if (!groupDoc) {
-        await D.deleteMediaByFileUniqueId(fileUniqueId);
-        if (hadText) await D.deleteMessageByFileUniqueId(fileUniqueId);
-    } else if (groupDoc.is_group === 1) {
-        // 唯一媒体，删除整个组
-        await D.deleteMediaByFileUniqueId(fileUniqueId);
-        if (hadText) await D.deleteMessageByFileUniqueId(fileUniqueId);
-        await D.deleteGroupList(groupId);
-    } else {
-        // 组内还有其他媒体，仅删除当前媒体并减少计数
-        await D.deleteMediaByFileUniqueId(fileUniqueId);
-        if (hadText) await D.deleteMessageByFileUniqueId(fileUniqueId);
-        await col(COLLECTIONS.GROUP_LIST).updateOne({ group_id: groupId }, { $inc: { is_group: -1 } });
-        const updatedGroup = await D.findGroupList(groupId);
-        if (updatedGroup && updatedGroup.is_group === 0) {
-            await D.deleteGroupList(groupId);
-        } else if (hadText) {
-            const other = await col(COLLECTIONS.MESSAGE).countDocuments({ group_id: groupId });
-            if (other === 0) await D.setGroupDelete(groupId, Date.now());
-        }
-    }
-
-    logger.info(`WebUI 删除媒体: file_unique_id=${fileUniqueId}, group_id=${groupId}`);
-    return { status: 200, data: { ok: true } };
-}
-
-async function handleUserList(D, url) {
-    const page = Math.max(1, parseInt(url.searchParams.get('page'), 10) || 1);
-    const pageSize = Math.min(50, Math.max(1, parseInt(url.searchParams.get('pageSize'), 10) || 20));
-    const keyword = (url.searchParams.get('keyword') || '').trim();
-
-    const filter = {};
-    if (keyword) {
-        if (/^\d+$/.test(keyword)) {
-            filter.id = Number(keyword);
-        } else {
-            filter.name = { $regex: escapeRegExp(keyword), $options: 'i' };
-        }
-    }
-
-    const col = D.getCollection(COLLECTIONS.USERS);
-    const total = await col.countDocuments(filter);
-    const items = await col.find(filter)
-        .sort({ last_seen: -1 })
-        .skip((page - 1) * pageSize)
-        .limit(pageSize)
-        .toArray();
-
-    return { status: 200, data: { total, page, pageSize, items } };
-}
-
-async function handleUserBan(D, url, body) {
-    const userId = parseInt(body.userId, 10);
-    if (!userId) return { status: 400, data: { error: '缺少 userId' } };
-    const result = await D.banUser(userId, 'webui');
-    logger.info(`WebUI 封禁用户: ${userId}`);
-    return { status: 200, data: result };
-}
-
-async function handleUserUnban(D, url, body) {
-    const userId = parseInt(body.userId, 10);
-    if (!userId) return { status: 400, data: { error: '缺少 userId' } };
-    const result = await D.unbanUser(userId);
-    logger.info(`WebUI 解封用户: ${userId}`);
-    return { status: 200, data: result };
-}
-
-async function handleGroupList(D, url) {
-    const col = D.getCollection(COLLECTIONS.CHANNEL_GROUP);
-    const items = await col.find({}).sort({ id: 1 }).toArray();
-    return { status: 200, data: { total: items.length, items } };
-}
-
-async function handleMarkRecords(D, url) {
-    const records = await D.getMarkRecords();
-    return { status: 200, data: { total: records.length, items: records } };
-}
-
-async function handleLogList(D, url) {
-    const page = Math.max(1, parseInt(url.searchParams.get('page'), 10) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(url.searchParams.get('pageSize'), 10) || 30));
-    const type = url.searchParams.get('type') || '';
-    const filter = {};
-    if (type && /^\d+$/.test(type)) filter.type = parseInt(type, 10);
-
-    const col = D.getCollection(COLLECTIONS.LOG);
-    const total = await col.countDocuments(filter);
-    const items = await col.find(filter)
-        .sort({ time: -1 })
-        .skip((page - 1) * pageSize)
-        .limit(pageSize)
-        .toArray();
-
-    return { status: 200, data: { total, page, pageSize, items } };
-}
-
-async function handleSettingsGet(D) {
-    const settings = await D.getSettings();
-    return { status: 200, data: settings };
-}
-
-async function handleSettingsUpdate(D, url, body) {
-    const { key, value } = body;
-    if (!key) return { status: 400, data: { error: '缺少 key' } };
-    try {
-        const ok = await D.updateSetting({}, key, value);
-        if (!ok) return { status: 400, data: { error: `更新设置失败（不允许的键: ${key}）` } };
-        logger.info(`WebUI 更新设置: ${key}=${JSON.stringify(value)}`);
-        return { status: 200, data: { ok: true } };
-    } catch (err) {
-        return { status: 400, data: { error: err.message } };
-    }
-}
-
-async function handleTransportList(D) {
-    const col = D.getCollection(COLLECTIONS.TRANSPORT);
-    const items = await col.find({}).sort({ _id: -1 }).toArray();
-    return { status: 200, data: { total: items.length, items } };
+    logger.info(`WebUI AI 查询翻译: collection=${collection}, prompt="${prompt}", filter=${JSON.stringify(parsed.filter)}`);
+    return { status: 200, data: { explain: parsed.explain || '', filter: parsed.filter } };
 }
 
 // 路由表：method + path 前缀
 const ROUTES = [
     ['POST', /^\/api\/login$/, handleLogin],
-    ['GET', /^\/api\/dashboard$/, handleDashboard],
-    ['GET', /^\/api\/media$/, handleMediaList],
-    ['DELETE', /^\/api\/media\/([^/]+)$/, handleMediaDelete],
-    ['GET', /^\/api\/users$/, handleUserList],
-    ['POST', /^\/api\/users\/ban$/, handleUserBan],
-    ['POST', /^\/api\/users\/unban$/, handleUserUnban],
-    ['GET', /^\/api\/groups$/, handleGroupList],
-    ['GET', /^\/api\/mark-records$/, handleMarkRecords],
-    ['GET', /^\/api\/logs$/, handleLogList],
-    ['GET', /^\/api\/settings$/, handleSettingsGet],
-    ['POST', /^\/api\/settings$/, handleSettingsUpdate],
-    ['GET', /^\/api\/transports$/, handleTransportList]
+    ['GET', /^\/api\/db\/collections$/, handleCollections],
+    ['POST', /^\/api\/db\/query$/, handleDbQuery],
+    ['POST', /^\/api\/db\/insert$/, handleDbInsert],
+    ['POST', /^\/api\/db\/update$/, handleDbUpdate],
+    ['POST', /^\/api\/db\/delete$/, handleDbDelete],
+    ['POST', /^\/api\/ai\/query$/, handleAiQuery]
 ];
 
 async function handleApi(D, req, res, url) {
@@ -372,11 +277,11 @@ async function handleApi(D, req, res, url) {
         const match = url.pathname.match(routeRegex);
         if (routeMethod === method && match) {
             try {
-                const result = await handler(D, url, body, { fileUniqueId: match[1] ? decodeURIComponent(match[1]) : null });
+                const result = await handler(D, url, body, {});
                 return json(res, result.status, result.data);
             } catch (err) {
                 logger.error(`WebUI API 错误 [${method} ${url.pathname}]: ${err.stack || err.message}`);
-                return json(res, 500, { error: '服务器内部错误' });
+                return json(res, 500, { error: err.message || '服务器内部错误' });
             }
         }
     }
@@ -419,7 +324,7 @@ function serveStatic(res, pathname) {
 
 /**
  * 创建 Web UI HTTP 服务（依赖可注入，便于单元测试）
- * @param {Object} deps - 覆盖默认依赖（getCollection/banUser/...）
+ * @param {Object} deps - 覆盖默认依赖（getCollection/callAI/password）
  * @returns {http.Server}
  */
 function createWebUI(deps = {}) {
@@ -460,5 +365,6 @@ module.exports = {
     startWebUI,
     createWebUI,
     sessions,
-    getPassword
+    getPassword,
+    ALLOWED_COLLECTIONS
 };
