@@ -192,7 +192,18 @@ async function gracefulShutdown(signal) {
         logger.warn(`停止轮询失败: ${err.message}`);
     }
     if (webServer) {
-        await new Promise(resolve => webServer.close(resolve));
+        try {
+            // 先断开所有 SSE 长连接，否则 server.close() 会永久等待
+            const { closeAllSseClients } = require('./webui/server');
+            closeAllSseClients();
+        } catch (err) {
+            logger.warn(`关闭 SSE 连接失败: ${err.message}`);
+        }
+        // 关闭 HTTP 服务（加 3 秒超时兜底，避免异常连接挂起进程）
+        await Promise.race([
+            new Promise(resolve => webServer.close(resolve)),
+            new Promise(resolve => setTimeout(resolve, 3000))
+        ]);
         logger.info('Web UI 服务已关闭');
     }
     const client = getClient();

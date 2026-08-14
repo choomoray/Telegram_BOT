@@ -342,6 +342,17 @@ function ensureLoggerSubscription() {
     });
 }
 
+/**
+ * 关闭所有 SSE 日志流连接
+ * 优雅关闭时必须先调用，否则 server.close() 会因长连接挂起
+ */
+function closeAllSseClients() {
+    for (const client of sseClients) {
+        try { client.res.end(); } catch { /* ignore */ }
+    }
+    sseClients.clear();
+}
+
 // 路由表：method + path 前缀
 const ROUTES = [
     ['POST', /^\/api\/login$/, handleLogin],
@@ -461,6 +472,7 @@ function startWebUI(port = config.WEBUI_PORT) {
 module.exports = {
     startWebUI,
     createWebUI,
+    closeAllSseClients,
     sessions,
     getPassword,
     ALLOWED_COLLECTIONS,

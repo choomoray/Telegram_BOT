@@ -322,6 +322,36 @@ test('SSE 无 token 返回 401', async () => {
     assert.strictEqual(res.status, 401);
 });
 
+test('优雅关闭：SSE 长连接存在时 closeAllSseClients 后 server.close 正常回调', async () => {
+    const deps = makeStubDeps();
+    const s = createWebUI(deps);
+    await new Promise(resolve => s.listen(0, resolve));
+    const b = `http://127.0.0.1:${s.address().port}`;
+    const { closeAllSseClients } = require('../webui/server');
+    try {
+        const login = await fetch(b + '/api/login', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: TEST_PASSWORD })
+        }).then(r => r.json());
+
+        // 建立 SSE 长连接（保持打开）
+        const ctrl = new AbortController();
+        const sse = await fetch(b + `/api/logs/stream?token=${encodeURIComponent(login.token)}`, { signal: ctrl.signal });
+        assert.strictEqual(sse.status, 200);
+
+        // 模拟优雅关闭：先断开 SSE，再关闭 server
+        closeAllSseClients();
+        const closed = await Promise.race([
+            new Promise(resolve => s.close(resolve)),
+            new Promise(resolve => setTimeout(() => resolve('TIMEOUT'), 2000))
+        ]);
+        assert.notStrictEqual(closed, 'TIMEOUT', '断开 SSE 后 server.close 应立即回调，否则进程无法退出');
+        ctrl.abort();
+    } finally {
+        try { await new Promise(resolve => s.close(resolve)); } catch { /* ignore */ }
+    }
+});
+
 // ---------------- 静态页面 / 404 ----------------
 
 test('首页返回 HTML（登录页默认可见）', async () => {
