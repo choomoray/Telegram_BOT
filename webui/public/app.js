@@ -180,7 +180,8 @@
     // 指定集合模式：文档卡片 + 分页（顶部靠右）
     state.totalPages = Math.max(1, Math.ceil(data.total / data.pageSize));
     $('#sort-select').style.display = '';
-    meta.textContent = `集合 ${data.collection}：共 ${data.total} 条`;
+    const sortLabel = state.sort._id === 1 ? '最早在前' : '最新在前';
+    meta.textContent = `集合 ${data.collection}：共 ${data.total} 条（${sortLabel}）`;
     if (!data.items.length) {
       list.innerHTML = '<div class="text-dim" style="padding:20px;text-align:center">未找到数据</div>';
     } else {

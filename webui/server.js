@@ -192,6 +192,7 @@ async function handleDbQuery(D, url, body) {
 
     assertCollection(body.collection);
     const col = D.getCollection(body.collection);
+    logger.info(`WebUI 查询: collection=${body.collection}, sort=${JSON.stringify(sort)}, page=${page}, pageSize=${pageSize}`);
     const total = await col.countDocuments(filter);
     const items = await col.find(filter)
         .sort(sort)

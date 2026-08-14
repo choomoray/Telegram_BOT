@@ -234,10 +234,12 @@ body {
 }
 .doc-actions {
   display: none; flex-direction: column; gap: 8px;
-  align-items: flex-end; padding-right: 4px; justify-content: center;
+  min-width: 112px; padding-right: 4px; justify-content: center;
 }
 .doc-card.selected .doc-actions,
 .doc-card.editing .doc-actions { display: flex; }
+/* 按钮等宽（修改/删除/确认/取消/确认删除） */
+.doc-actions .btn { width: 100%; text-align: center; }
 
 /* 插入数据的临时卡片：直接在文本上编辑 + 确认/取消（上确认下取消） */
 .insert-card { border: 1px dashed var(--accent); background: rgba(79,140,255,.05); }
