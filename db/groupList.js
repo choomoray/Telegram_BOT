@@ -16,7 +16,8 @@ async function upsertGroupList(groupId) {
                 $setOnInsert: {
                     group_id: groupId,
                     is_delete: null,      // 🔁 默认 null，表示“未确定状态”
-                    mark: 0
+                    mark: 0,
+                    last_mark_time: null // ⏱ 最后标记时间（毫秒时间戳）
                 }
             },
             { upsert: true }
@@ -83,9 +84,49 @@ async function deleteGroupList(groupId) {
     }
 }
 
+/**
+ * 标记次数 +1，并记录最后标记时间
+ * @param {string} groupId - 媒体组ID
+ * @returns {Promise<number|null>} 更新后的 mark 值（未匹配到则返回 null）
+ */
+async function incrementMark(groupId) {
+    try {
+        const col = getCollection(COLLECTIONS.GROUP_LIST);
+        const result = await col.updateOne(
+            { group_id: groupId },
+            { $inc: { mark: 1 }, $set: { last_mark_time: Date.now() } }
+        );
+        if (result.matchedCount === 0) {
+            logger.error(`incrementMark: group_list 未找到 group_id=${groupId}`);
+            return null;
+        }
+        const updated = await col.findOne({ group_id: groupId }, { projection: { mark: 1 } });
+        return updated ? updated.mark : null;
+    } catch (err) {
+        logger.error(`incrementMark 失败: ${err.message}`);
+        throw err;
+    }
+}
+
+/**
+ * 获取所有标记次数大于 0 的媒体组（按标记次数降序）
+ * @returns {Promise<Array>} group_list 文档数组
+ */
+async function getMarkedGroups() {
+    try {
+        const col = getCollection(COLLECTIONS.GROUP_LIST);
+        return await col.find({ mark: { $gt: 0 } }).sort({ mark: -1 }).toArray();
+    } catch (err) {
+        logger.error(`查询已标记媒体组失败: ${err.message}`);
+        return [];
+    }
+}
+
 module.exports = {
     upsertGroupList,
     setGroupDelete,
     findGroupList,
-    deleteGroupList
+    deleteGroupList,
+    incrementMark,
+    getMarkedGroups
 };

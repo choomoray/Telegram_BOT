@@ -658,7 +658,7 @@ for (const file of commandFiles) {
 | `/help` | help.js | 显示命令按钮 | 发送带所有命令的内联键盘 |
 | `/log` | log.js | 操作统计 | 从 log 集合聚合统计并展示 |
 | `/manage` | manage.js | 管理面板 | 进入 manage 模式，显示管理主菜单 |
-| `/mark` | mark.js | 标记模式 | 增加 group_list 的 mark 计数 |
+| `/mark` | mark.js | 标记模式 | 进入标记菜单（开始标记/标记记录/退出），标记记录支持按次数或时间排序分页展示 |
 | `/media_group` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group |
 | `/media_hide` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide |
 | `/media_unhide` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide |
@@ -861,7 +861,7 @@ handleGroupEditedMessage()
 | `/clean` | 数据库清理模式 | modes/cleanMode.js |
 | `/random_videos` | 随机获取视频 | commands/randomVideos.js |
 | `/random_pictures` | 随机获取图片 | commands/randomPictures.js |
-| `/mark` | 标记模式（增加 mark 计数） | modes/markMode.js |
+| `/mark` | 标记模式（开始标记/标记记录/退出） | modes/markMode.js |
 | `/edit` | 编辑消息文本或清空 | modes/editMode.js |
 | `/log` | 查看操作统计 | commands/log.js |
 | `/help` | 显示命令列表按钮 | commands/help.js |

@@ -1,8 +1,8 @@
 // handlers/modes/markMode.js
 const bot = require('../../bot');
 const logger = require('../../logger');
-const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { findMediaByFileUniqueId } = require('../../db/media');
+const { incrementMark } = require('../../db/groupList');
 const { extractMediaFromMessage } = require('../../media');
 
 // 用于防止同一媒体组被多次处理的锁集合
@@ -60,15 +60,11 @@ async function handleMarkMode(msg, state) {
         }
 
         const groupId = mediaDoc.group_id;
-        const groupListCol = getCollection(COLLECTIONS.GROUP_LIST);
 
-        // 更新 group_list 的 mark 字段 +1
-        const result = await groupListCol.updateOne(
-            { group_id: groupId },
-            { $inc: { mark: 1 } }
-        );
+        // 更新 group_list：mark +1，并记录最后标记时间
+        const newMark = await incrementMark(groupId);
 
-        if (result.matchedCount === 0) {
+        if (newMark === null) {
             // 理论上应该存在，但以防万一
             logger.error(`group_list 未找到 group_id=${groupId}，但 media 中存在`);
             await bot.editMessageText('❌ 数据异常', {
@@ -77,10 +73,6 @@ async function handleMarkMode(msg, state) {
             });
             return true;
         }
-
-        // 获取更新后的 mark 值（可选，用于日志）
-        const updatedGroup = await groupListCol.findOne({ group_id: groupId });
-        const newMark = updatedGroup ? updatedGroup.mark : '?';
 
         await bot.editMessageText('✅ 标记成功', {
             chat_id: userId,

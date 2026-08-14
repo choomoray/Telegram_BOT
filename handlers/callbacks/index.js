@@ -12,6 +12,7 @@ const cleanContinueCallback = require('./cleanContinueCallback');
 const batchContinueCallback = require('./batchContinueCallback');
 const editConfirmDbOnly = require('./editConfirmDbOnly');
 const execCmdCallback = require('./execCmd');
+const { handleMarkMenuCallback, handleMarkRecordCallback, handleMarkRecordSwitchCallback } = require('./markCallback');
 const transportMode = require('../modes/transportMode');
 const settingMode = require('../modes/settingMode');
 const passwordMode = require('../modes/passwordMode');
@@ -27,6 +28,9 @@ const callbackHandlers = {
     clean: cleanCallback,
     clean_continue: cleanContinueCallback,
     exec_cmd: execCmdCallback,
+    mark_menu: handleMarkMenuCallback,
+    markrec: handleMarkRecordCallback,
+    markrec_switch: handleMarkRecordSwitchCallback,
     edit_dbonly: editConfirmDbOnly,
     edit_dbonly_cancel: async (query) => {
         const userId = query.from.id;
