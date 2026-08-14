@@ -14,7 +14,7 @@
     page: 1,
     pageSize: 50,
     totalPages: 1,
-    selected: null,       // { collection, doc }
+    selected: null,       // { collection, doc, key }
     autoRefresh: false,
     timer: null
   };
@@ -111,6 +111,11 @@
     if (top.value !== val) top.value = val;
     if (op.value !== val) op.value = val;
     state.collection = val;
+    updateInsertBtn();
+  }
+
+  function updateInsertBtn() {
+    $('#insert-btn').disabled = state.collection === ALL_KEY;
   }
 
   // ---------- 定时刷新 ----------
@@ -134,8 +139,12 @@
 
   async function runQuery(page = state.page) {
     state.page = page;
-    const data = await api('/db/query', { collection: state.collection, page: state.page, pageSize: state.pageSize });
-    renderData(data);
+    try {
+      const data = await api('/db/query', { collection: state.collection, page: state.page, pageSize: state.pageSize });
+      renderData(data);
+    } catch (err) {
+      toast(err.message, true);
+    }
   }
 
   function renderData(data) {
@@ -143,117 +152,176 @@
     const meta = $('#data-meta');
 
     if (data.all) {
-      meta.textContent = `跨集合浏览（每集合最多显示 ${data.limit} 条，点击文档可选中）`;      const groups = data.groups.filter(g => g.items.length > 0 || g.total > 0);
+      // 全部数据库模式：仅显示集合名 + 条数，点击切换
+      meta.textContent = '跨集合浏览（每集合最多显示 50 条，点击文档可选中）';
+      list.innerHTML = '';
+      $('#pagination').innerHTML = '';
+      const groups = data.groups.filter(g => g.total > 0);
       if (!groups.length) {
         list.innerHTML = '<div class="text-dim" style="padding:20px;text-align:center">未找到数据</div>';
-        state.totalPages = 1;
-        renderPagination();
         return;
       }
+      groups.forEach(g => {
+        const row = document.createElement('div');
+        row.className = 'col-summary';
+        row.innerHTML = `📁 <b>${esc(g.collection)}</b> <span class="count">共 ${g.total} 条</span>`;
+        row.onclick = () => {
+          syncCollectionSelectTo(g.collection);
+          runQuery(1);
+        };
+        list.appendChild(row);
+      });
       state.totalPages = 1;
-      list.innerHTML = groups.map(g => `
-        <div class="col-group">
-          <div class="col-group-title">📁 ${g.collection} <span class="count">共 ${g.total} 条${g.items.length < g.total ? `，显示前 ${g.items.length} 条` : ''}</span></div>
-          ${g.items.map(doc => docCard(g.collection, doc)).join('')}
-        </div>`).join('');
-    } else {
-      state.totalPages = Math.max(1, Math.ceil(data.total / data.pageSize));
-      meta.textContent = `集合 ${data.collection}：共 ${data.total} 条，第 ${data.page}/${state.totalPages} 页（每页 ${data.pageSize} 条）`;
-      list.innerHTML = data.items.length
-        ? data.items.map(doc => docCard(data.collection, doc)).join('')
-        : '<div class="text-dim" style="padding:20px;text-align:center">未找到数据</div>';
-      renderPagination();
+      return;
     }
 
-    bindDocCards();
+    // 指定集合模式：文档卡片 + 分页（顶部靠右）
+    state.totalPages = Math.max(1, Math.ceil(data.total / data.pageSize));
+    meta.textContent = `集合 ${data.collection}：共 ${data.total} 条`;
+    if (!data.items.length) {
+      list.innerHTML = '<div class="text-dim" style="padding:20px;text-align:center">未找到数据</div>';
+    } else {
+      list.innerHTML = data.items.map(doc => docCard(data.collection, doc)).join('');
+    }
+    renderPagination();
+    bindDocEvents();
     updateSelectedUI();
   }
 
   function docCard(collection, doc) {
     const key = collection + ':' + (doc._id || JSON.stringify(doc).slice(0, 20));
     return `<div class="doc-card" data-key="${esc(key)}" data-collection="${esc(collection)}" data-json="${esc(JSON.stringify(doc))}">
-      <div class="doc-json">${esc(JSON.stringify(doc, null, 2))}</div>
+      <div class="doc-main">
+        <div class="doc-json">${esc(JSON.stringify(doc, null, 2))}</div>
+        <div class="doc-actions">
+          <button class="btn btn-sm" data-action="edit" title="修改数据">✏️ 修改数据</button>
+          <button class="btn btn-danger btn-sm" data-action="del" title="删除数据">🗑️ 删除数据</button>
+        </div>
+      </div>
+      <div class="doc-edit hidden">
+        <textarea class="doc-edit-input" spellcheck="false"></textarea>
+        <div class="doc-edit-actions">
+          <button class="btn btn-sm" data-action="edit-confirm">✓ 确认</button>
+          <button class="btn btn-ghost btn-sm" data-action="edit-cancel">✕ 取消</button>
+        </div>
+      </div>
     </div>`;
   }
 
-  function bindDocCards() {
-    document.querySelectorAll('.doc-card').forEach(card => {
-      card.onclick = () => {
+  // 数据区事件委托：选中 / 修改 / 删除 / 插入
+  function bindDocEvents() {
+    const list = $('#data-list');
+    list.querySelectorAll('.doc-card').forEach(card => {
+      card.addEventListener('click', async (e) => {
+        const btn = e.target.closest('button');
+        if (btn) {
+          await handleCardAction(card, btn.dataset.action);
+          return;
+        }
+        // 点击卡片本体（非按钮）：选中 / 取消选中
         const collection = card.dataset.collection;
         const doc = JSON.parse(card.dataset.json);
         toggleSelect(collection, doc);
-      };
+      });
     });
   }
 
-  function renderPagination() {
-    const wrap = $('#pagination');
-    wrap.innerHTML = '';
-    const N = state.totalPages;
-    if (N <= 1) return;
+  async function handleCardAction(card, action) {
+    const collection = card.dataset.collection;
+    const doc = JSON.parse(card.dataset.json);
+    const jsonEl = card.querySelector('.doc-json');
+    const editBox = card.querySelector('.doc-edit');
+    const actionsEl = card.querySelector('.doc-actions');
 
-    const addBtn = (label, page, disabled) => {
-      const b = document.createElement('button');
-      b.className = 'btn btn-sm';
-      b.textContent = label;
-      b.disabled = disabled;
-      b.onclick = () => runQuery(page);
-      wrap.appendChild(b);
-    };
-    const addEllipsis = () => {
-      const el = document.createElement('span');
-      el.className = 'page-ellipsis';
-      el.textContent = '···';
-      wrap.appendChild(el);
-    };
-
-    // << 首页
-    addBtn('<<', 1, state.page <= 1);
-    if (state.page > 3) addEllipsis();
-
-    // 当前页前后两页页码
-    for (let i = Math.max(1, state.page - 2); i <= Math.min(N, state.page + 2); i++) {
-      if (i === state.page) {
-        const cur = document.createElement('span');
-        cur.className = 'page-current';
-        cur.textContent = String(i);
-        wrap.appendChild(cur);
-      } else {
-        addBtn(String(i), i, false);
+    switch (action) {
+      case 'edit': {
+        card.classList.add('editing');
+        const clean = { ...doc };
+        delete clean._id;
+        card.querySelector('.doc-edit-input').value = JSON.stringify(clean, null, 2);
+        break;
       }
+      case 'edit-cancel': {
+        card.classList.remove('editing');
+        break;
+      }
+      case 'edit-confirm': {
+        try {
+          const data = parseJson(card.querySelector('.doc-edit-input').value, '数据');
+          delete data._id;
+          const r = await api('/db/execute', {
+            operation: { action: 'update', collection, filter: { _id: doc._id }, data }
+          });
+          showResult(r.matchedCount ? `✅ 修改成功（匹配 ${r.matchedCount} 条）` : '⚠️ 未匹配到文档', !r.matchedCount);
+          toast(r.matchedCount ? '✅ 修改成功' : '⚠️ 未匹配到文档', !r.matchedCount);
+          await runQuery(state.page);
+        } catch (err) { showResult(`❌ 修改失败：${err.message}`, true); }
+        break;
+      }
+      case 'del': {
+        // 进入删除确认态：按钮变为 确认删除 / 取消
+        actionsEl.innerHTML = `
+          <button class="btn btn-danger btn-sm" data-action="del-confirm">⚠️ 确认删除</button>
+          <button class="btn btn-ghost btn-sm" data-action="del-cancel">✕ 取消</button>`;
+        card.classList.add('del-confirming');
+        break;
+      }
+      case 'del-cancel': {
+        actionsEl.innerHTML = `
+          <button class="btn btn-sm" data-action="edit">✏️ 修改数据</button>
+          <button class="btn btn-danger btn-sm" data-action="del">🗑️ 删除数据</button>`;
+        card.classList.remove('del-confirming');
+        break;
+      }
+      case 'del-confirm': {
+        if (!window.confirm(`⚠️ 二次确认：确定删除 ${collection} 中的该文档吗？\n\n${JSON.stringify(doc, null, 2)}`)) {
+          actionsEl.innerHTML = `
+            <button class="btn btn-sm" data-action="edit">✏️ 修改数据</button>
+            <button class="btn btn-danger btn-sm" data-action="del">🗑️ 删除数据</button>`;
+          card.classList.remove('del-confirming');
+          return;
+        }
+        try {
+          const r = await api('/db/execute', {
+            operation: { action: 'delete', collection, filter: { _id: doc._id } },
+            confirm: true
+          });
+          showResult(r.deletedCount ? `🗑️ 删除成功（${r.deletedCount} 条）` : '⚠️ 未匹配到文档', !r.deletedCount);
+          toast(r.deletedCount ? '🗑️ 删除成功' : '⚠️ 未匹配到文档', !r.deletedCount);
+          if (state.selected && state.selected.key === card.dataset.key) state.selected = null;
+          await runQuery(1);
+        } catch (err) { showResult(`❌ 删除失败：${err.message}`, true); }
+        break;
+      }
+      case 'insert-confirm': {
+        try {
+          const data = parseJson(card.querySelector('.doc-edit-input').value, '数据');
+          const r = await api('/db/execute', { operation: { action: 'insert', collection, data } });
+          showResult(`✅ 插入成功（${r.insertedId}）`, false);
+          toast('✅ 插入成功');
+          card.remove();
+          await runQuery(1);
+        } catch (err) { showResult(`❌ 插入失败：${err.message}`, true); }
+        break;
+      }
+      case 'insert-cancel': {
+        card.remove();
+        showResult('—', false);
+        break;
+      }
+      default:
+        break;
     }
-
-    if (state.page < N - 2) addEllipsis();
-
-    // >> 末页
-    addBtn('>>', N, state.page >= N);
-
-    // 手动输入跳转（回车）
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.min = 1;
-    input.max = N;
-    input.placeholder = '页码';
-    input.className = 'page-input';
-    input.title = '输入页码后回车跳转';
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        const v = parseInt(input.value, 10);
-        if (v >= 1 && v <= N) runQuery(v);
-      }
-    });
-    wrap.appendChild(input);
   }
 
   // ---------- 选中 ----------
 
   function toggleSelect(collection, doc) {
     const key = collection + ':' + (doc._id || JSON.stringify(doc).slice(0, 20));
-    if (state.selected && state.selected.collection === collection &&
-        (state.selected.doc._id || 'x') === (doc._id || 'y') && state.selected._key === key) {
+    if (state.selected && state.selected.key === key) {
       state.selected = null; // 再次点击取消选中
     } else {
-      state.selected = { collection, doc, _key: key };
+      state.selected = { collection, doc, key };
     }
     updateSelectedUI();
   }
@@ -261,18 +329,20 @@
   function updateSelectedUI() {
     const btn = $('#selected-btn');
     if (state.selected) {
+      btn.disabled = false;
       btn.classList.remove('selected-off');
       btn.classList.add('selected-on');
       btn.textContent = '✅ 已选中';
-      btn.title = `已选中 ${state.selected.collection} 中的文档`;
+      btn.title = `已选中 ${state.selected.collection} 中的文档，点击取消`;
     } else {
+      btn.disabled = true;
       btn.classList.remove('selected-on');
       btn.classList.add('selected-off');
       btn.textContent = '未选中';
       btn.title = '点击右侧数据可选中';
     }
     document.querySelectorAll('.doc-card').forEach(el => {
-      el.classList.toggle('selected', el.dataset.key === (state.selected ? state.selected._key : ''));
+      el.classList.toggle('selected', el.dataset.key === (state.selected ? state.selected.key : ''));
     });
   }
 
@@ -287,12 +357,25 @@
         payload.selected = { collection: state.selected.collection, doc: state.selected.doc };
       }
       const data = await api('/ai/plan', payload);
-      $('#op-json').value = JSON.stringify(data.operation, null, 2);
-      showResult(`🔍 AI 翻译：${data.explain}\n\n（可编辑上方 JSON，点【执行】执行）`, false);
+      openAiPanel(data.explain || '', data.operation);
+      showResult(`✅ AI 已翻译，确认后点【执行】`, false);
       toast('✅ 已翻译，确认后点【执行】');
     } catch (err) {
+      showResult(`❌ AI 翻译失败：${err.message}`, true);
       toast(err.message, true);
     }
+  }
+
+  function openAiPanel(explain, operation) {
+    $('#ai-explain').textContent = explain || '';
+    $('#op-json').value = JSON.stringify(operation, null, 2);
+    $('#ai-panel').classList.remove('hidden');
+    document.querySelector('.panel-left').classList.add('ai-open');
+  }
+
+  function closeAiPanel() {
+    $('#ai-panel').classList.add('hidden');
+    document.querySelector('.panel-left').classList.remove('ai-open');
   }
 
   async function doExecute() {
@@ -300,7 +383,7 @@
     try {
       operation = parseJson($('#op-json').value.trim(), '操作');
     } catch (e) {
-      showResult(e.message, true);
+      showResult(`❌ ${e.message}`, true);
       return;
     }
     if (!operation || !operation.action || !operation.collection) {
@@ -311,21 +394,113 @@
       let confirm = false;
       if (operation.action === 'delete') {
         confirm = window.confirm(`⚠️ 二次确认：确定执行删除操作吗？\n\n${JSON.stringify(operation, null, 2)}`);
-        if (!confirm) { toast('已取消删除', true); return; }
+        if (!confirm) { showResult('已取消删除', true); return; }
       }
       const data = await api('/db/execute', { operation, confirm });
-      showResult(`✅ 执行成功：\n${JSON.stringify(data, null, 2)}`, false);
+      const brief = {
+        query: `查询 ${data.total} 条`,
+        insert: `插入成功 ${data.insertedId}`,
+        update: `修改 ${data.modifiedCount} 条（匹配 ${data.matchedCount}）`,
+        delete: `删除 ${data.deletedCount} 条`
+      }[data.type] || JSON.stringify(data);
+      showResult(`✅ 执行成功：${brief}`, false);
       toast('✅ 执行完成');
-      await runQuery(1); // 执行后刷新数据
+      await runQuery(1);
     } catch (err) {
       showResult(`❌ 执行失败：${err.message}`, true);
     }
   }
 
   function showResult(text, isError) {
-    const box = $('#result-box');
+    const box = $('#result-line');
     box.classList.toggle('error', isError);
     box.textContent = text;
+  }
+
+  // ---------- 插入数据 ----------
+
+  function insertData() {
+    if (state.collection === ALL_KEY) return;
+    // 生成字段模板：取当前列表第一条文档的字段（值置空）
+    let template = {};
+    const firstJson = document.querySelector('.doc-card .doc-json');
+    if (firstJson) {
+      try {
+        const doc = JSON.parse(firstJson.textContent);
+        for (const k of Object.keys(doc)) {
+          if (k !== '_id') template[k] = '';
+        }
+      } catch { /* ignore */ }
+    }
+    const list = $('#data-list');
+    const card = document.createElement('div');
+    card.className = 'doc-card insert-card';
+    card.dataset.collection = state.collection;
+    card.innerHTML = `
+      <div class="doc-main">
+        <div class="doc-edit">
+          <textarea class="doc-edit-input" spellcheck="false">${esc(JSON.stringify(template, null, 2))}</textarea>
+        </div>
+        <div class="doc-actions">
+          <button class="btn btn-sm" data-action="insert-confirm" title="确认插入">✅ 确认</button>
+          <button class="btn btn-ghost btn-sm" data-action="insert-cancel" title="取消">✕ 取消</button>
+        </div>
+      </div>`;
+    card.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button');
+      if (btn) await handleCardAction(card, btn.dataset.action);
+    });
+    list.prepend(card);
+    toast('请填写数据后点【确认】插入，或点【取消】放弃');
+  }
+
+  // ---------- 分页 ----------
+
+  function renderPagination() {
+    const wrap = $('#pagination');
+    wrap.innerHTML = '';
+    const N = state.totalPages;
+    if (N <= 1) return;
+
+    const addBtn = (label, page, cls) => {
+      const b = document.createElement('button');
+      b.className = 'btn btn-sm' + (cls ? ' ' + cls : '');
+      b.textContent = label;
+      if (!cls) b.onclick = () => runQuery(page);
+      wrap.appendChild(b);
+    };
+    const addEllipsis = () => {
+      const el = document.createElement('span');
+      el.className = 'page-ellipsis';
+      el.textContent = '···';
+      wrap.appendChild(el);
+    };
+
+    // 格式：1 ··· 12 13 14 ··· 123 [输入][跳转]
+    addBtn('1', 1, state.page === 1 ? 'page-current' : '');
+    if (state.page > 3) addEllipsis();
+    for (let i = Math.max(2, state.page - 1); i <= Math.min(N - 1, state.page + 1); i++) {
+      addBtn(String(i), i, i === state.page ? 'page-current' : '');
+    }
+    if (state.page < N - 2) addEllipsis();
+    if (N > 1) addBtn(String(N), N, state.page === N ? 'page-current' : '');
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = 1;
+    input.max = N;
+    input.placeholder = '页码';
+    input.className = 'page-input';
+    const jump = () => {
+      const v = parseInt(input.value, 10);
+      if (v >= 1 && v <= N) runQuery(v);
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') jump(); });
+    const go = document.createElement('button');
+    go.className = 'btn btn-sm';
+    go.textContent = '跳转';
+    go.onclick = jump;
+    wrap.append(input, go);
   }
 
   // ---------- SSE 日志流 ----------
@@ -352,20 +527,29 @@
     const list = $('#log-list');
     const levelClass = { info: 'log-info', success: 'log-success', warn: 'log-warn', error: 'log-error' }[entry.level] || 'log-info';
     const time = (entry.timestamp || '').slice(0, 19) || '';
+    const level = String(entry.level || 'info').toUpperCase().slice(0, 4);
     const div = document.createElement('div');
-    div.className = `log-line ${levelClass}`;
-    div.innerHTML = `<span class="log-time">[${esc(time)}]</span> [${esc((entry.level || 'info').toUpperCase())}] ${esc(entry.message || '')}`;
+    div.className = 'log-line';
+    // 与后端 chalk 一致：时间戳灰、[级别] 标签着色、消息正文默认色
+    div.innerHTML = `<span class="log-time">[${esc(time)}]</span> <span class="log-level ${levelClass}">[${esc(level)}]</span> ${esc(entry.message || '')}`;
     list.appendChild(div);
-    // 限制最多 600 条
     while (list.children.length > 600) list.removeChild(list.firstChild);
     list.scrollTop = list.scrollHeight;
-    state.logCount++;
   }
 
   // ---------- 工具 ----------
 
   function esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function syncCollectionSelectTo(name) {
+    const top = $('#collection-select-top');
+    const op = $('#collection-select-op');
+    top.value = name;
+    op.value = name;
+    state.collection = name;
+    updateInsertBtn();
   }
 
   // ---------- 事件绑定 ----------
@@ -376,12 +560,11 @@
   $('#refresh-btn').onclick = () => runQuery(state.page);
   $('#auto-refresh').onchange = toggleAutoRefresh;
 
-  // 两个数据库选择（顶部 + 操作区）同步
   $('#collection-select-top').onchange = () => { syncCollectionSelect('top'); runQuery(1); };
   $('#collection-select-op').onchange = () => { syncCollectionSelect('op'); runQuery(1); };
 
+  $('#insert-btn').onclick = insertData;
   $('#selected-btn').onclick = () => {
-    // 点击选中按钮：取消选中（若有）
     if (state.selected) {
       state.selected = null;
       updateSelectedUI();
@@ -392,6 +575,7 @@
   $('#ai-btn').onclick = aiTranslate;
   $('#prompt-input').addEventListener('keydown', e => { if (e.key === 'Enter') aiTranslate(); });
   $('#exec-btn').onclick = doExecute;
+  $('#ai-close-btn').onclick = closeAiPanel;
 
   // 初始化：有 token 则验证进入，否则显示登录页（login-view 默认可见）
   if (localStorage.getItem(TOKEN_KEY)) {
