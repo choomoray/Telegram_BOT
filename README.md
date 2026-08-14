@@ -43,6 +43,14 @@
    npm test               # 使用 node:test 内置框架，覆盖工具函数层
    ```
 
+5. **（可选）启动 Web UI 管理面板：**
+
+   ```bash
+   npm run start:webui    # 或 node index.js webui
+   ```
+
+   浏览器访问 `http://127.0.0.1:9700`，登录密码见启动日志（或在 `.env` 中配置 `WEBUI_PASSWORD`）。
+
 ---
 
 ## 目录
@@ -60,6 +68,7 @@
   - [工具函数层 — utils/](#9-工具函数层--utils)
   - [数据库操作层 — db/](#10-数据库操作层--db)
   - [业务处理层 — handlers/](#11-业务处理层--handlers)
+  - [Web UI 管理面板 — webui/](#12-web-ui-管理面板--webui)
 - [数据流详解](#数据流详解)
 - [环境变量](#环境变量)
 - [指令列表](#指令列表)
@@ -741,6 +750,46 @@ const dynamicPrefixes = ['manage_', 'set_', 'pwd_'];
 
 ---
 
+### 12. Web UI 管理面板 — webui/
+
+**路径:** `webui/` **职责:** 提供浏览器端数据查看与管理界面（零第三方依赖）
+
+**启动方式：**
+
+```bash
+node index.js webui       # 或 npm run start:webui
+```
+
+浏览器访问 `http://127.0.0.1:9700`（端口可通过 `WEBUI_PORT` 配置）。登录密码：
+
+- 在 `.env` 中配置 `WEBUI_PASSWORD`，或
+- 未配置时启动日志会打印随机生成的密码
+
+**鉴权机制：**
+- 除 `/api/login` 外的所有 API 均需携带 `Authorization: Bearer <token>`
+- 登录成功返回 token，前端存储在 localStorage，会话有效期 12 小时
+
+**功能列表：**
+
+| 页面 | 功能 |
+|------|------|
+| 仪表盘 | 群组/用户/媒体/日志等统计卡片、媒体类型分布、今日收录 |
+| 媒体库 | 关键字/类型/等级筛选、分页浏览、原文链接跳转、删除媒体（同步清理 group_list 计数） |
+| 用户 | ID/名称搜索、状态与白名单展示、封禁/解封（含全群组踢出） |
+| 标记记录 | 按标记次数/最后标记时间排序展示 |
+| 群组 | 已管理群组/频道列表与绑定关系 |
+| 操作日志 | 按类型筛选、分页浏览 |
+| 设置 | 全局设置可视化编辑（开关/数字/文本） |
+| 搬运源 | 搬运链接列表 |
+
+**实现要点：**
+- 使用 Node 内置 `http` 模块，无新增 npm 依赖
+- `createWebUI(deps)` 支持依赖注入，API 层可独立单元测试
+- 静态文件与 API 同源提供，无 CORS 问题
+- 删除媒体复用 Telegram 模式的组计数一致性逻辑（`is_group===1` 删除整组，否则减计数并在归零时清理）
+
+---
+
 ## 数据流详解
 
 ### 场景一：媒体入库（群组消息 → 数据库）
@@ -842,6 +891,8 @@ handleGroupEditedMessage()
 | `MONGODB_URI` | 是 | MongoDB Atlas 连接串 |
 | `TEST_MONGODB_URI` | 否 | 测试数据库连接串 |
 | `ADMIN_CHAT_ID` | 是 | 管理员 Telegram 用户 ID，多个用逗号分隔 |
+| `WEBUI_PORT` | 否 | Web UI 端口（默认 9700） |
+| `WEBUI_PASSWORD` | 否 | Web UI 登录密码（未设置时启动随机生成并打印） |
 
 ---
 

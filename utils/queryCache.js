@@ -5,6 +5,7 @@ const sessionStore = new Map();
 const SESSION_TTL = 10 * 60 * 1000;
 const MAX_SESSIONS = 1000;
 
+// 定期清理过期会话（unref：不阻止进程退出，便于测试与工具脚本）
 setInterval(() => {
     const now = Date.now();
     for (const [sessionId, session] of sessionStore.entries()) {
@@ -20,7 +21,7 @@ setInterval(() => {
             sessionStore.delete(entries[i][0]);
         }
     }
-}, 60 * 1000);
+}, 60 * 1000).unref();
 
 function generateSessionId() {
     return crypto.randomBytes(4).toString('hex');

@@ -30,6 +30,9 @@ function safeHandler(fn) {
     };
 }
 
+// Web UI 服务引用（node index.js webui 时启用）
+let webServer = null;
+
 async function start() {
     try {
         // 1. 连接数据库
@@ -164,6 +167,12 @@ async function start() {
         });
 
         logger.success('系统就绪，Telegram Bot 已启动并等待消息...');
+
+        // 可选：启动 Web UI 管理面板（node index.js webui）
+        if (process.argv.includes('webui')) {
+            const { startWebUI } = require('./webui/server');
+            webServer = startWebUI();
+        }
     } catch (err) {
         logger.error(`启动失败: ${err.message}`);
         process.exit(1);
@@ -172,7 +181,7 @@ async function start() {
 
 start();
 
-// 优雅关闭：停止轮询 → 关闭数据库连接 → 退出
+// 优雅关闭：停止轮询 → 关闭 Web UI → 关闭数据库连接 → 退出
 async function gracefulShutdown(signal) {
     logger.info(`收到 ${signal}，正在优雅关闭...`);
     try {
@@ -181,6 +190,10 @@ async function gracefulShutdown(signal) {
         logger.info('Telegram 轮询已停止');
     } catch (err) {
         logger.warn(`停止轮询失败: ${err.message}`);
+    }
+    if (webServer) {
+        await new Promise(resolve => webServer.close(resolve));
+        logger.info('Web UI 服务已关闭');
     }
     const client = getClient();
     if (client) {

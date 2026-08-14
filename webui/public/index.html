@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Telegram Bot 管理面板</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="login-view" class="login-view hidden">
+  <div class="login-card">
+    <h1>🔐 Telegram Bot 管理面板</h1>
+    <p class="login-hint">请输入登录密码</p>
+    <input type="password" id="login-password" placeholder="密码" autocomplete="current-password">
+    <button id="login-btn">登 录</button>
+    <p id="login-error" class="login-error hidden"></p>
+  </div>
+</div>
+
+<div id="app-view" class="app-view hidden">
+  <aside class="sidebar">
+    <div class="sidebar-title">📊 管理面板</div>
+    <nav class="nav">
+      <a data-view="dashboard" class="nav-item active">仪表盘</a>
+      <a data-view="media" class="nav-item">媒体库</a>
+      <a data-view="users" class="nav-item">用户</a>
+      <a data-view="marks" class="nav-item">标记记录</a>
+      <a data-view="groups" class="nav-item">群组</a>
+      <a data-view="logs" class="nav-item">操作日志</a>
+      <a data-view="settings" class="nav-item">设置</a>
+      <a data-view="transports" class="nav-item">搬运源</a>
+    </nav>
+    <div class="sidebar-footer">
+      <button id="logout-btn" class="btn-ghost">退出登录</button>
+    </div>
+  </aside>
+  <main class="content">
+    <div id="view-dashboard" class="view"></div>
+    <div id="view-media" class="view hidden"></div>
+    <div id="view-users" class="view hidden"></div>
+    <div id="view-marks" class="view hidden"></div>
+    <div id="view-groups" class="view hidden"></div>
+    <div id="view-logs" class="view hidden"></div>
+    <div id="view-settings" class="view hidden"></div>
+    <div id="view-transports" class="view hidden"></div>
+  </main>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/app.js"></script>
+</body>
+</html>

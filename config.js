@@ -44,5 +44,9 @@ module.exports = {
     missingEnvVars: missingVars,
     envFileExists: fs.existsSync(path.join(__dirname, '.env')),
     isTestMode,
-    TEST_MONGODB_URI: process.env.TEST_MONGODB_URI || null
+    TEST_MONGODB_URI: process.env.TEST_MONGODB_URI || null,
+    // Web UI 配置
+    WEBUI_PORT: parseInt(process.env.WEBUI_PORT) || 9700,
+    // 未设置时由 webui/server.js 生成随机密码并打印在启动日志
+    WEBUI_PASSWORD: process.env.WEBUI_PASSWORD || null
 };
