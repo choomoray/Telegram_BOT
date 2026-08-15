@@ -1,0 +1,37 @@
+# ============================================================
+# Telegram 媒体管理机器人 - Docker Compose 部署
+#
+# 前置条件：本目录存在 .env（复制 .env.example 并填写：
+#   cp .env.example .env
+#   填入 TELEGRAM_BOT_TOKEN / MONGODB_URI / ADMIN_CHAT_ID 等）
+#
+# 启动（带 Web UI）：  docker compose up -d --build
+# 纯后端启动：         docker compose up -d --build 后修改 command 去掉 "webui"
+# 查看日志：           docker compose logs -f bot
+# 停止：               docker compose down
+# ============================================================
+services:
+  bot:
+    build: .
+    image: telegram-bot:0.5.0
+    container_name: telegram-bot
+    restart: unless-stopped
+    # 从本地 .env 注入配置（token/数据库/AI 密钥等，不写入镜像）
+    env_file:
+      - .env
+    # 带 Web UI 启动；纯后端请移除 "webui" 参数
+    command: ["node", "index.js", "webui"]
+    ports:
+      - "9699:9699"   # 健康检查 HTTP 服务
+      - "9700:9700"   # Web UI 数据库控制台
+    volumes:
+      - bot-logs:/app/logs   # 日志持久化（named volume，重启不丢）
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9699/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  bot-logs:

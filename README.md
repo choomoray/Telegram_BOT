@@ -53,6 +53,54 @@
 
 ---
 
+## Docker 部署
+
+代码在本地 git 仓库迭代，运行环境容器化（敏感配置通过环境变量注入，**不写入镜像**）。
+
+**1. 前置：** 本目录存在 `.env`（复制 `.env.example` 并填写）：
+
+```bash
+cp .env.example .env   # 填入 TELEGRAM_BOT_TOKEN / MONGODB_URI / ADMIN_CHAT_ID 等
+```
+
+**2. 构建并启动（带 Web UI）：**
+
+```bash
+docker compose up -d --build
+```
+
+**3. 常用命令：**
+
+| 命令 | 说明 |
+|------|------|
+| `docker compose up -d --build` | 构建并后台启动 |
+| `docker compose logs -f bot` | 实时查看日志 |
+| `docker compose down` | 停止并移除容器 |
+| `docker compose restart bot` | 重启 |
+
+**端口：**
+
+- `9699` — 健康检查 `http://127.0.0.1:9699/health`
+- `9700` — Web UI 数据库控制台
+
+**配置说明：**
+
+- `docker-compose.yml` 默认以 `node index.js webui` 启动（带 Web UI）；纯后端请把 `command` 里的 `"webui"` 去掉
+- `.env` 由 `env_file` 注入容器，`.dockerignore` 已确保其**不会被打包进镜像**
+- 日志写入 named volume `bot-logs`（`docker compose down` 不删除，`docker compose down -v` 才清空）
+- 停止容器时发送 SIGTERM，程序会优雅关闭（停轮询 → 关 Web UI → 关 MongoDB）
+- 镜像基于 `node:22-alpine`（约 200MB）；若个别原生依赖在 Alpine 上异常，可改 `node:22-slim`
+
+**本地 git 迭代流程不受影响：**
+
+```bash
+git add -A && git commit -m "..."   # 本地提交
+git push origin main                # 推送到 GitHub
+docker compose up -d --build        # 重新构建部署
+```
+
+---
+
 ## 目录
 
 - [整体架构](#整体架构)

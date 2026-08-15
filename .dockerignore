@@ -1,0 +1,14 @@
+# 构建上下文排除项（.env 等敏感文件绝不进入镜像）
+node_modules
+logs
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+tests
+*.md
+.claude
+.dockerignore
+Dockerfile
+docker-compose.yml

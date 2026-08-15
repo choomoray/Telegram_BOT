@@ -2,4 +2,6 @@ node_modules/
 .env
 logs/
 .claude/
+desktop.ini
+Thumbs.db
 
