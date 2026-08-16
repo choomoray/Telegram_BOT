@@ -43,10 +43,12 @@
         <div id="ai-panel" class="ai-panel hidden">
           <div class="ai-panel-header">
             <span class="ai-panel-title">🤖 AI 翻译</span>
-            <span id="ai-explain" class="ai-explain"></span>
             <button id="ai-close-btn" class="btn btn-ghost btn-sm">✕ 关闭</button>
           </div>
-          <textarea id="op-json" class="op-json" placeholder="AI 翻译的操作 JSON（可编辑），点【执行】按此执行" spellcheck="false"></textarea>
+          <div class="ai-panel-body">
+            <div id="ai-explain" class="ai-explain"></div>
+            <textarea id="op-json" class="op-json" placeholder="AI 翻译的操作 JSON（可编辑），点【执行】按此执行" spellcheck="false"></textarea>
+          </div>
         </div>
         <div class="op-row">
           <select id="collection-select-op" class="coll-select" title="选择数据库（与顶部同步，默认全部）">

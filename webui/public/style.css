@@ -192,9 +192,33 @@ body {
 }
 .ai-panel-header { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .ai-panel-title { color: var(--ai); font-weight: 600; font-size: 13px; white-space: nowrap; }
-.ai-explain { flex: 1; color: var(--text-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.op-json {
-  min-height: 40px; height: auto; resize: none;
+/* AI 回答（左）与文本框（右）同级并排，各自可滚动 */
+.ai-panel-body {
+  flex: 1 1 auto;
+  display: flex;
+  gap: 8px;
+  min-height: 60px;
+}
+.ai-explain {
+  flex: 1 1 40%;
+  min-width: 0;
+  overflow-y: auto;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+}
+.ai-panel-body .op-json {
+  flex: 1 1 60%;
+  min-width: 0;
+  min-height: 60px;
+  height: auto;
+  resize: none;
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
   color: var(--text); font-size: 12px; font-family: Consolas, monospace;
   padding: 8px; white-space: pre; overflow-y: auto;
