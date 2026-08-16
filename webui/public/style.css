@@ -312,6 +312,17 @@ body {
 @media (max-width: 900px) {
   body { overflow: auto; }
   .app-view { display: block; overflow: visible; min-height: auto; }
+  /* 顶栏换行显示，避免元素被压缩成竖排文字 */
+  .topbar { flex-wrap: wrap; gap: 8px; }
+  .topbar-title {
+    flex-shrink: 0;
+    white-space: nowrap;
+    font-size: 15px;
+  }
+  .topbar-right { flex-wrap: wrap; }
+  .topbar-right .coll-select { max-width: 140px; }
+  .op-row { flex-wrap: wrap; }
+  .data-toolbar-row { flex-wrap: wrap; }
   .panels { flex-direction: column; }
   .panel-left {
     height: 70vh; min-height: 420px;
