@@ -621,6 +621,18 @@
   $('#exec-btn').onclick = doExecute;
   $('#ai-close-btn').onclick = closeAiPanel;
 
+  // 输入栏清除符号：有内容时显示，点击清空
+  const promptInput = $('#prompt-input');
+  const updatePromptClear = () => {
+    promptInput.parentElement.classList.toggle('has-text', promptInput.value.length > 0);
+  };
+  promptInput.addEventListener('input', updatePromptClear);
+  $('#prompt-clear').addEventListener('click', () => {
+    promptInput.value = '';
+    updatePromptClear();
+    promptInput.focus();
+  });
+
   // 全局 textarea 高度自适应（AI 编辑框，最多 10 行）
   document.addEventListener('input', (e) => {
     if (e.target && e.target.classList && e.target.classList.contains('op-json')) {
