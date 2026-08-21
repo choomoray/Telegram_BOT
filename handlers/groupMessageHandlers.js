@@ -84,14 +84,33 @@ async function updateProcessingMessage(msg, processingMessageId, finalText, auto
 }
 
 /**
- * 判断是否为「频道 → 讨论群组」的自动转发重复媒体
+ * 判断当前群组消息是否为「频道转发」的媒体（关联频道自动转发或手动转发）
+ * 通过 Telegram 转发来源标记识别：forward_origin.type==='channel'（新版 API）
+ * 或 forward_from_chat（旧版 API）。识别为频道转发则完全跳过（不收录、不提示）。
+ * @param {Object} msg - 当前收到的群组消息
+ * @returns {Promise<boolean>}
+ */
+async function isChannelForwardMessage(msg) {
+    try {
+        if (!['group', 'supergroup'].includes(msg.chat.type)) return false;
+        let originType = null;
+        if (msg.forward_origin && msg.forward_origin.type) {
+            originType = msg.forward_origin.type;
+        } else if (msg.forward_from_chat) {
+            originType = msg.forward_from_chat.type;
+        }
+        // 转发来源为频道（channel 或超级频道）
+        return originType === 'channel';
+    } catch (err) {
+        logger.error(`判断频道转发来源失败: ${err.message}`);
+        return false;
+    }
+}
+
+/**
+ * 判断是否为「频道 → 讨论群组」的自动转发重复媒体（去重分支兜底）
  * Telegram 机制：频道发布媒体会自动转发一份到绑定的讨论群组，
  * 此时群组收到的媒体在媒体库中已存在（已从频道收录），应静默忽略而非提示重复。
- *
- * 判断方式（两层，均不依赖 bind_id 配置）：
- *   1. 消息带转发来源且来源为频道（forward_origin.type === 'channel' 或 forward_from_chat），
- *      且转发来源的频道 ID 与已收录消息的 chat_id 一致 —— 最可靠
- *   2. 后备：已收录媒体来自被管理频道，且当前群组绑定了该频道（bind_id）
  * @param {Object} msg - 当前收到的群组消息
  * @param {Object} existingMessage - 媒体库中已存在的 message 记录
  * @returns {Promise<boolean>}
@@ -101,7 +120,7 @@ async function isChannelAutoForward(msg, existingMessage) {
         if (!['group', 'supergroup'].includes(msg.chat.type)) return false;
         if (!existingMessage || !existingMessage.chat_id) return false;
 
-        // 方式一（最可靠）：Telegram 转发来源标记
+        // 方式一：转发来源为频道且与已收录消息同源
         let originChatId = null;
         if (msg.forward_origin && msg.forward_origin.type === 'channel' && msg.forward_origin.chat) {
             originChatId = msg.forward_origin.chat.id;
@@ -109,17 +128,16 @@ async function isChannelAutoForward(msg, existingMessage) {
             originChatId = msg.forward_from_chat.id;
         }
         if (originChatId && existingMessage.chat_id === originChatId) {
-            logger.info(`频道转发识别(forward_origin): 频道=${originChatId}`);
             return true;
         }
 
-        // 方式二（后备）：绑定关系判断
+        // 方式二（放宽）：已收录媒体来自一个被管理的频道，且当前消息来自被管理的群组
+        // （不再要求 bind_id 相等，用户已在 channel 管理中互相绑定）
         const channelGroupCol = getCollection(COLLECTIONS.CHANNEL_GROUP);
         const channel = await channelGroupCol.findOne({ id: existingMessage.chat_id, type: 'channel' });
         if (!channel) return false;
         const group = await channelGroupCol.findOne({ id: msg.chat.id, type: 'group' });
-        if (!group) return false;
-        return group.bind_id === channel.id;
+        return !!group;
     } catch (err) {
         logger.error(`判断频道转发失败: ${err.message}`);
         return false;
@@ -132,6 +150,12 @@ async function isChannelAutoForward(msg, existingMessage) {
 async function handleNewMediaMessage(msg) {
     const mediaInfo = extractMediaFromMessage(msg); // 统一函数
     if (!mediaInfo) return;
+
+    // 频道→讨论群组自动转发（或手动转发）的频道媒体：不收录、不提示，直接跳过
+    if (await isChannelForwardMessage(msg)) {
+        logger.info(`频道转发媒体跳过处理: chatId=${msg.chat.id}, messageId=${msg.message_id}`);
+        return;
+    }
 
     const { fileUniqueId, type, fileId, caption, videoTime } = mediaInfo;
     const chatId = msg.chat.id;
