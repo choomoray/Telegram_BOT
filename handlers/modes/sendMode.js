@@ -15,7 +15,7 @@ const { upsertGroupList, setGroupDelete } = require('../../db/groupList');
 const { addTagToGroup, removeTagFromGroup, getGroupTags } = require('../../db/message');
 const { getTags } = require('../../db/tags');
 const { extractMediaFromMessage } = require('../../media');
-const { extractLevel, removeLevelSuffix } = require('../../utils/levelExtractor');
+const { removeLevelSuffix } = require('../../utils/levelExtractor');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
 
 const PAGE_SIZE = 6;        // 每页群组按钮数
@@ -219,7 +219,6 @@ async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo) {
 
     // 只有带文本（caption）的媒体才收录至 message
     if (caption) {
-        const level = extractLevel(caption);
         const cleanText = removeLevelSuffix(caption);
         await upsertMessage({
             message_id: sentMsg.message_id,
@@ -227,7 +226,6 @@ async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo) {
             text: cleanText,
             file_unique_id: fileUniqueId,
             media_type: type,
-            level: level,
             group_id: groupId
         });
         logger.info(`发送模式收录 message: group_id=${groupId}, file_unique_id=${fileUniqueId}`);

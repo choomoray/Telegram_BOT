@@ -11,7 +11,7 @@ async function initCollections() {
         const messageCol = db.collection(COLLECTIONS.MESSAGE);
         await messageCol.createIndex({ file_unique_id: 1 }, { unique: true });
         await messageCol.createIndex({ group_id: 1 });
-        await messageCol.createIndex({ media_type: 1, level: 1, text: 1 });
+        await messageCol.createIndex({ media_type: 1, text: 1 });
 
         // media 集合索引
         const mediaCol = db.collection(COLLECTIONS.MEDIA);

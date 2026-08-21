@@ -21,7 +21,7 @@ async function handleEditConfirmDbOnly(query) {
     }
 
     const { targetChatId, targetMessageId, targetGroupId, targetFileUniqueId, targetMediaType } = state;
-    const { isClearing, cleanText, level } = state.pendingEdit;
+    const { isClearing, cleanText } = state.pendingEdit;
     const messageCol = getCollection(COLLECTIONS.MESSAGE);
 
     try {
@@ -41,7 +41,7 @@ async function handleEditConfirmDbOnly(query) {
             if (existing) {
                 await messageCol.updateOne(
                     { chat_id: targetChatId, message_id: targetMessageId },
-                    { $set: { text: cleanText, level } }
+                    { $set: { text: cleanText } }
                 );
             } else {
                 await messageCol.insertOne({
@@ -50,7 +50,6 @@ async function handleEditConfirmDbOnly(query) {
                     text: cleanText,
                     file_unique_id: targetFileUniqueId,
                     media_type: targetMediaType,
-                    level,
                     group_id: targetGroupId
                 });
             }

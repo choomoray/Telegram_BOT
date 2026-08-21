@@ -2,7 +2,7 @@
 const bot = require('../bot');
 const logger = require('../logger');
 const { generateMessageLink } = require('../utils/chatIdConverter');
-const { extractLevel, removeLevelSuffix } = require('../utils/levelExtractor');
+const { removeLevelSuffix } = require('../utils/levelExtractor');
 const { generateGroupIdFromMessage } = require('../utils/groupGenerator');
 const {
     upsertMessage,
@@ -279,7 +279,6 @@ async function handleNewMediaMessage(msg) {
         operations.push({ type: 'media', fileUniqueId, groupId });
 
         if (caption) {
-            const level = extractLevel(caption);
             const cleanText = removeLevelSuffix(caption);
             await upsertMessage({
                 message_id: messageId,
@@ -287,7 +286,6 @@ async function handleNewMediaMessage(msg) {
                 text: cleanText,
                 file_unique_id: fileUniqueId,
                 media_type: type,
-                level: level,
                 group_id: groupId
             });
             operations.push({ type: 'message', fileUniqueId, groupId });
@@ -390,13 +388,11 @@ async function handleEditedMessage(msg) {
     try {
         const existingMessage = await findMessageByFileUniqueId(fileUniqueId);
         if (caption) {
-            const level = extractLevel(caption);
             const cleanText = removeLevelSuffix(caption);
             if (existingMessage) {
                 await upsertMessage({
                     ...existingMessage,
-                    text: cleanText,
-                    level: level
+                    text: cleanText
                 });
             } else {
                 await upsertMessage({
@@ -405,7 +401,6 @@ async function handleEditedMessage(msg) {
                     text: cleanText,
                     file_unique_id: fileUniqueId,
                     media_type: type,
-                    level: level,
                     group_id: groupId
                 });
             }

@@ -19,11 +19,7 @@ function formatResultLine(item, index, total) {
 
     const link = generateMessageLink(item.chat_id, item.message_id);
 
-    if (item.level && ['S', 'A'].includes(item.level)) {
-        text = `<b>${escapeHTML(text)}</b>`;
-    } else {
-        text = escapeHTML(text);
-    }
+    text = escapeHTML(text);
 
     return `${icon} ${number} <a href="${link}">${text}</a>`;
 }

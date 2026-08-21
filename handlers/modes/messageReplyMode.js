@@ -10,7 +10,7 @@ const {
 const { upsertMessage } = require('../../db/message');
 const { upsertGroupList, setGroupDelete } = require('../../db/groupList');
 const { extractMediaFromMessage, sendMediaAsReply, sendMediaGroupAsReply } = require('../../media');
-const { extractLevel, removeLevelSuffix } = require('../../utils/levelExtractor');
+const { removeLevelSuffix } = require('../../utils/levelExtractor');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
 
 // ---------- 用户隔离上下文 ----------
@@ -96,7 +96,6 @@ async function recordReplyMessage(sentMsg, targetGroupId) {
         const chatId = sentMsg.chat.id;
         const messageId = sentMsg.message_id;
         const groupId = targetGroupId;
-        const level = extractLevel(caption);
         const cleanText = removeLevelSuffix(caption);
         await upsertMessage({
             message_id: messageId,
@@ -104,7 +103,6 @@ async function recordReplyMessage(sentMsg, targetGroupId) {
             text: cleanText,
             file_unique_id: fileUniqueId,
             media_type: type,
-            level: level,
             group_id: groupId
         });
         logger.info(`已收录消息回复模式产生的消息: chat_id=${chatId}, message_id=${messageId}, group_id=${groupId}`);

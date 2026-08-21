@@ -37,8 +37,7 @@ async function getMarkRecords() {
             text: msg ? (msg.text || '') : '',
             chat_id: msg ? msg.chat_id : null,
             message_id: msg ? msg.message_id : null,
-            media_type: msg ? msg.media_type : null,
-            level: msg ? msg.level : null
+            media_type: msg ? msg.media_type : null
         };
     });
 }

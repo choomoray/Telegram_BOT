@@ -7,7 +7,7 @@ const { setGroupDelete } = require('../../db/groupList');
 const { insertLog } = require('../../db/log');
 const { deleteUserState, setUserState } = require('../../states');
 const { extractMediaFromMessage } = require('../../media');
-const { extractLevel, removeLevelSuffix } = require('../../utils/levelExtractor');
+const { removeLevelSuffix } = require('../../utils/levelExtractor');
 
 /**
  * 从 group_id 中提取 chat_id
@@ -120,8 +120,6 @@ async function handleEditMode(msg, state) {
         const messageCol = getCollection(COLLECTIONS.MESSAGE);
         const isClearing = (messageText.trim() === 'null');
 
-        // 提取等级标记（如果文本末尾有 #S 等）
-        const level = extractLevel(messageText);
         const cleanText = removeLevelSuffix(messageText);
 
         try {
@@ -142,7 +140,7 @@ async function handleEditMode(msg, state) {
             // Telegram 编辑成功 → 更新数据库
             await updateMessageDb(messageCol, {
                 isClearing, targetChatId, targetMessageId, targetGroupId,
-                targetFileUniqueId, targetMediaType, cleanText, level
+                targetFileUniqueId, targetMediaType, cleanText
             });
 
             await bot.sendMessage(chatId, '✅ 修改完毕', {
@@ -162,7 +160,7 @@ async function handleEditMode(msg, state) {
                 setUserState(userId, {
                     ...state,
                     step: 'confirm_db_only',
-                    pendingEdit: { isClearing, cleanText, level },
+                    pendingEdit: { isClearing, cleanText },
                     lastActivity: Date.now()
                 });
 
@@ -210,7 +208,7 @@ async function handleEditMode(msg, state) {
  */
 async function updateMessageDb(messageCol, {
     isClearing, targetChatId, targetMessageId, targetGroupId,
-    targetFileUniqueId, targetMediaType, cleanText, level
+    targetFileUniqueId, targetMediaType, cleanText
 }) {
     if (isClearing) {
         const existing = await messageCol.findOne({
@@ -235,7 +233,7 @@ async function updateMessageDb(messageCol, {
         if (existing) {
             await messageCol.updateOne(
                 { chat_id: targetChatId, message_id: targetMessageId },
-                { $set: { text: cleanText, level: level } }
+                { $set: { text: cleanText } }
             );
             logger.info(`已更新消息文本: chat_id=${targetChatId}, message_id=${targetMessageId}`);
         } else {
@@ -245,7 +243,6 @@ async function updateMessageDb(messageCol, {
                 text: cleanText,
                 file_unique_id: targetFileUniqueId,
                 media_type: targetMediaType,
-                level: level,
                 group_id: targetGroupId
             });
             logger.info(`已插入新消息记录: chat_id=${targetChatId}, message_id=${targetMessageId}`);

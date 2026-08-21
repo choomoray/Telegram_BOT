@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { parseQuery } = require('../utils/queryParser');
 
-const EMPTY = { tags: [], keyword: '' };
+const EMPTY = { tags: [], tagsAll: [], keyword: '' };
 
 test('空/非法输入返回空结构', () => {
     assert.deepStrictEqual(parseQuery(''), EMPTY);
@@ -51,4 +51,30 @@ test('单独 - 也可作为标签标记', () => {
     const r = parseQuery('搜索 - 图片 教程');
     assert.deepStrictEqual(r.tags, ['图片', '教程']);
     assert.strictEqual(r.keyword, '搜索');
+});
+
+test('-- 严格标签：必须包含所有标签', () => {
+    const r = parseQuery('教程 --图片 高清');
+    assert.deepStrictEqual(r.tagsAll, ['图片', '高清']);
+    assert.deepStrictEqual(r.tags, []);
+    assert.strictEqual(r.keyword, '教程');
+});
+
+test('-- 严格标签仅标签无关键字', () => {
+    const r = parseQuery('--图片、高清');
+    assert.deepStrictEqual(r.tagsAll, ['图片', '高清']);
+    assert.strictEqual(r.keyword, '');
+});
+
+test('严格标签不区分大小写', () => {
+    const r = parseQuery('--HD 教程');
+    assert.deepStrictEqual(r.tagsAll, ['hd', '教程']);
+});
+
+test('句尾最后的标记决定模式（-- 优先于 -）', () => {
+    const r = parseQuery('搜索 -图片 --高清 教程');
+    // 最后出现的标记是 --高清 → 严格模式
+    assert.deepStrictEqual(r.tagsAll, ['高清', '教程']);
+    assert.deepStrictEqual(r.tags, []);
+    assert.strictEqual(r.keyword, '搜索 -图片');
 });

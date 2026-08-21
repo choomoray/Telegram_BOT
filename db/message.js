@@ -4,7 +4,7 @@ const logger = require('../logger');
 
 /**
  * 新增或更新 message 记录
- * @param {Object} data - { message_id, chat_id, text, file_unique_id, media_type, level, group_id }
+ * @param {Object} data - { message_id, chat_id, text, file_unique_id, media_type, group_id }
  */
 async function upsertMessage(data) {
     try {

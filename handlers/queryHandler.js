@@ -10,7 +10,7 @@ const { createSession } = require('../utils/queryCache');
 const { insertLog } = require('../db/log');
 
 function buildQuery(parsed) {
-    const { keyword, tags } = parsed;
+    const { keyword, tags, tagsAll } = parsed;
     const query = {};
 
     if (keyword) {
@@ -18,11 +18,18 @@ function buildQuery(parsed) {
         query.text = { $regex: escaped, $options: 'i' };
     }
 
-    // 标签筛选（大小写不敏感，匹配 message.tags 数组元素）
+    // 宽松标签：命中任一标签即可（大小写不敏感）
     if (tags && tags.length > 0) {
         query.tags = {
             $in: tags.map(t => new RegExp(`^${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))
         };
+    }
+
+    // 严格标签：必须同时包含 -- 后面的所有标签（大小写不敏感）
+    if (tagsAll && tagsAll.length > 0) {
+        query.$and = tagsAll.map(t => ({
+            tags: new RegExp(`^${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+        }));
     }
 
     return query;
@@ -94,7 +101,7 @@ async function handleQuery(msg) {
     const parsed = parseQuery(text);
     const { keyword } = parsed;
 
-    if (!keyword && parsed.tags.length === 0) {
+    if (!keyword && parsed.tags.length === 0 && parsed.tagsAll.length === 0) {
         logger.info(`用户 ${userId} 发送空查询，已忽略`);
         return;
     }
