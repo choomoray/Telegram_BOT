@@ -145,15 +145,55 @@ async function isChannelAutoForward(msg, existingMessage) {
 }
 
 /**
+ * 频道转发媒体归属转移：群组收到频道转发的媒体时，
+ * 将 message/media 记录归属更新为群组（chat_id/message_id 改为群组的），
+ * 使机器人能在群组中回复该媒体。
+ * 媒体本身（media 记录与 group_id）保持频道收录时的归属，不重复收录。
+ */
+async function transferRecordToGroup(msg, mediaInfo) {
+    try {
+        const { fileUniqueId, caption, type } = mediaInfo;
+        const messageCol = getCollection(COLLECTIONS.MESSAGE);
+        const mediaCol = getCollection(COLLECTIONS.MEDIA);
+
+        const existing = await messageCol.findOne({ file_unique_id: fileUniqueId });
+        if (existing) {
+            const update = { chat_id: msg.chat.id, message_id: msg.message_id };
+            if (caption) update.text = removeLevelSuffix(caption);
+            await messageCol.updateOne({ file_unique_id: fileUniqueId }, { $set: update });
+        } else if (caption) {
+            // 媒体存在但无 message 记录（频道侧未收录文本），群组转发带文本则创建
+            const mediaDoc = await mediaCol.findOne({ file_unique_id: fileUniqueId });
+            await upsertMessage({
+                message_id: msg.message_id,
+                chat_id: msg.chat.id,
+                text: removeLevelSuffix(caption),
+                file_unique_id: fileUniqueId,
+                media_type: type,
+                group_id: mediaDoc ? mediaDoc.group_id : null
+            });
+        }
+
+        // media 记录的 message_id 更新为群组消息（便于按群组消息定位）
+        await mediaCol.updateOne({ file_unique_id: fileUniqueId }, { $set: { message_id: msg.message_id } });
+
+        logger.info(`频道转发媒体归属转移至群组: file_unique_id=${fileUniqueId}, chat_id=${msg.chat.id}, message_id=${msg.message_id}`);
+    } catch (err) {
+        logger.error(`频道转发归属转移失败: ${err.message}`);
+    }
+}
+
+/**
  * 处理新消息（媒体收录）- 媒体组仅第一条回复，后续静默收录
  */
 async function handleNewMediaMessage(msg) {
     const mediaInfo = extractMediaFromMessage(msg); // 统一函数
     if (!mediaInfo) return;
 
-    // 频道→讨论群组自动转发（或手动转发）的频道媒体：不收录、不提示，直接跳过
+    // 频道→讨论群组自动转发（或手动转发）的频道媒体：不重复收录，
+    // 将记录归属转移为群组（chat_id/message_id 改为群组的），使机器人可在群组回复
     if (await isChannelForwardMessage(msg)) {
-        logger.info(`频道转发媒体跳过处理: chatId=${msg.chat.id}, messageId=${msg.message_id}`);
+        await transferRecordToGroup(msg, mediaInfo);
         return;
     }
 
@@ -213,9 +253,10 @@ async function handleNewMediaMessage(msg) {
             const existingMessage = await findMessageByFileUniqueId(fileUniqueId);
             if (existingMessage) {
                 // 频道→讨论群组自动转发（Telegram 机制）：媒体已在频道收录，
-                // 群组收到同一条转发媒体时静默忽略，不提示重复
+                // 群组收到同一条转发媒体时把记录归属转移为群组（不重复收录、不提示）
                 if (await isChannelAutoForward(msg, existingMessage)) {
-                    logger.info(`频道转发媒体静默忽略: chatId=${msg.chat.id}, file_unique_id=${fileUniqueId}, 原频道=${existingMessage.chat_id}`);
+                    await transferRecordToGroup(msg, mediaInfo);
+                    logger.info(`频道转发媒体归属转移(去重兜底): chatId=${msg.chat.id}, file_unique_id=${fileUniqueId}`);
                     if (hasMediaGroup && isFirstOfGroup) {
                         groupProcessed.set(groupId, Date.now());
                     }
