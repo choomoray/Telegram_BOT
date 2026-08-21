@@ -19,16 +19,6 @@ const TIME_OPTIONS = [
 
 const SETTINGS = [
     {
-        key: 'search_level', type: 'bool', label: '搜索等级排序',
-        getValue: async () => {
-            const s = await getSettings();
-            return s.search_level === 1 ? '开启' : '关闭';
-        },
-        update: async (val) => {
-            await updateSetting({}, 'search_level', val === '1' ? 1 : 0);
-        }
-    },
-    {
         key: 'search_random', type: 'bool', label: '搜索随机排序',
         getValue: async () => {
             const s = await getSettings();

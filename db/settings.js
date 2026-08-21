@@ -8,7 +8,6 @@ const SETTINGS_ID = 'app_settings';
 const DEFAULT_SETTINGS = {
     _id: SETTINGS_ID,
     // 全局
-    search_level: 0,
     search_random: 1,
     random_pictures: 0,
     random_pictures_num: 9,

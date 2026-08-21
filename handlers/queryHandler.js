@@ -37,15 +37,8 @@ function buildQuery(parsed) {
 
 function getSortRules(settings) {
     const sort = [];
-    if (settings.search_level === 1) {
-        sort.push(['level', -1]);
-        if (settings.search_random === 1) {
-            sort.push(['$sample', 1]);
-        }
-    } else {
-        if (settings.search_random === 1) {
-            sort.push(['$sample', 1]);
-        }
+    if (settings.search_random === 1) {
+        sort.push(['$sample', 1]);
     }
     return sort;
 }
@@ -61,10 +54,6 @@ async function executeQuery(query, sortRules) {
             { $match: query },
             { $sample: { size: 10000 } }
         ];
-        const hasLevelSort = sortRules.some(rule => rule[0] === 'level');
-        if (hasLevelSort) {
-            pipeline.push({ $sort: { level: -1 } });
-        }
         cursor = col.aggregate(pipeline);
     } else {
         cursor = col.find(query);

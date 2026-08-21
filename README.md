@@ -2,7 +2,7 @@
 
 一个功能丰富的 Telegram Bot，基于 Node.js 开发，用于群组/频道媒体消息的自动收录、检索、回复与管理，并集成群组管理和用户权限控制。
 
-**版本:** 0.4.4 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
+**版本:** 0.5.0 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
 
 ---
 
@@ -339,26 +339,31 @@ const states = new Map();  // key: userId (number), value: state object
 
 **语法支持：**
 ```
-关键字 -标签1 标签2      标签筛选（句尾最后出现的 - 即为标签标记，
-                          多个标签用空格或 、, 分隔，不区分大小写）
-关键字                   文本模糊搜索
+关键字 -标签1 标签2       宽松标签（句尾最后出现的 - 即为标签标记，
+                          命中任一标签即可，多个用空格或 、, 分隔，不区分大小写）
+关键字 --标签1 标签2      严格标签（必须同时包含 -- 后所有标签）
+关键字                    文本模糊搜索
 ```
 
 **实现：**
 ```javascript
 // 输出结构
 {
-  tags: ['图片', '教程'],   // 标签数组（小写去重）
+  tags: ['图片', '教程'],   // 宽松标签数组（小写去重，任一命中）
+  tagsAll: ['风光'],        // 严格标签数组（必须全部命中）
   keyword: '关键字'        // 移除标签部分后的纯文本
 }
 ```
+
+> 已移除媒体类型（-V/-P）与等级（+S 等）查询标记；等级字段不再写入 message。
+
 
 #### queryFormatter.js — 查询结果格式化
 
 将数据库查询结果格式化为分页显示的消息文本和内联键盘。
 
 **实现要点：**
-- 生成带编号的媒体列表文本（标题、类型、等级、日期）
+- 生成带编号的媒体列表文本（标题、类型、日期）
 - 构建翻页键盘（`buildFoldKeyboard`）：`◀ 1/5 ▶` 格式
 - 构建编号键盘（`buildNumberKeyboard`）：1-10 编号按钮，用于精确定位
 - 结果过多时自动截断并提示
@@ -385,12 +390,11 @@ const states = new Map();  // key: userId (number), value: state object
 function generateGroupIdFromMessage(msg) { ... }
 ```
 
-#### levelExtractor.js — 等级标记提取
+#### levelExtractor.js — 文本清理
 
-从消息文本中提取等级标签并移除：
-- 支持标签：`#S` `#A` `#B` `#C` `#D`
-- 提取后从文本中移除标签后缀
-- 无标签时默认 `#D`
+等级标记已废弃，仅保留历史 `#X` 后缀清理：
+- 移除文本末尾的等级后缀（兼容旧数据中的 `#S` `#A` 等）
+- 等级字段不再写入 message 集合
 
 #### sanitize.js — HTML 转义
 
@@ -446,7 +450,7 @@ module.exports = {
 |------|------|------|
 | `message` | `file_unique_id` (唯一) | 去重 |
 | `message` | `group_id` | 按组查询 |
-| `message` | `{media_type, level, text}` | 全文搜索 |
+| `message` | `{media_type, text}` | 全文搜索 |
 | `media` | `file_unique_id` (唯一) | 去重 |
 | `media` | `{group_id, message_id}` | 按组查询 |
 | `media` | `media_type` | 类型筛选 |
@@ -472,7 +476,6 @@ module.exports = {
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `search_level` | boolean | false | 搜索是否按等级显示 |
 | `search_random` | boolean | false | 是否随机搜索结果 |
 | `random_pictures` | boolean | false | 随机图片功能开关 |
 | `random_pictures_num` | number | 9 | 随机图片数量 |
@@ -481,7 +484,7 @@ module.exports = {
 | `random_videos_num_text` | number | 15 | 随机视频文字列表数 |
 | `random_videos_num_video` | number | 10 | 随机视频实际发送数 |
 | `media_group_num` | number | 10 | 媒体合并默认数量 |
-| `tags` | string[] | [] | 消息标签列表（/tag 管理，message 集合的 tags 字段引用） |
+| `tags` | object[] | [] | 消息标签列表（/tag 管理），元素 `{name, important, count}`：important=重要置顶、count=使用次数 |
 
 #### db/media.js — 媒体文件记录
 
@@ -591,7 +594,6 @@ module.exports = {
 收到群组媒体消息
     │
     ├── 提取媒体信息 (extractMediaFromMessage)
-    ├── 提取等级标记 (extractLevel)
     ├── 生成 group_id (generateGroupIdFromMessage)
     │
     ├── 去重检查
@@ -601,7 +603,7 @@ module.exports = {
     ├── 数据库操作（三步写入）
     │   ├── upsertGroupList (组汇总，$inc)
     │   ├── insertMedia (媒体记录)
-    │   └── upsertMessage (消息记录)
+    │   └── upsertMessage (消息记录，仅带文本媒体)
     │
     └── 失败时逆序回滚 (rollback)
 ```
@@ -625,8 +627,8 @@ module.exports = {
 ```
 用户输入查询文本
     │
-    ├── queryParser.parseQuery(text) → 结构化条件
-    ├── 数据库模糊查询 (按 media_type, level, text 筛选)
+    ├── queryParser.parseQuery(text) → 结构化条件（关键字 + 标签）
+    ├── 数据库模糊查询 (按 text / tags 筛选)
     ├── queryCache.createSession() → 缓存结果
     ├── queryFormatter.formatQueryResults() → 格式化为分页文本
     └── 发送带翻页键盘的消息
@@ -636,7 +638,7 @@ module.exports = {
 - 每页默认 10 条结果
 - 翻页通过 `pageCallback.js` 处理
 - 结果缓存 60 秒 TTL
-- 支持类型筛选、等级筛选、随机排序
+- 支持标签筛选（`-` 宽松 / `--` 严格）、随机排序
 
 #### handlers/commands/ — 命令处理
 
@@ -664,8 +666,8 @@ for (const file of commandFiles) {
 | `/log` | log.js | 操作统计 | 从 log 集合聚合统计并展示 |
 | `/manage` | manage.js | 管理面板 | 进入 manage 模式，显示管理主菜单 |
 | `/mark` | mark.js | 标记模式 | 进入标记菜单（开始标记/标记记录/退出），标记记录支持按次数或时间排序分页展示 |
-| `/send` | send.js | 发送模式 | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录，可附加标签 |
-| `/tag` | tag.js | 标签模式 | 修改消息标签（预览媒体组后添加/删除）、编辑标签（添加/改名/删除，同步 message） |
+| `/send` | send.js | 发送模式 | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录；成功后可打标签（按钮/手动输入，文本自动识别勾选） |
+| `/tag` | tag.js | 标签模式 | 修改消息标签（预览媒体组后添加/删除，按钮翻页+手动输入）；编辑标签（添加/改名/删除/固定置顶，同步 message） |
 | `/media_group` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group |
 | `/media_hide` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide |
 | `/media_unhide` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide |
@@ -818,7 +820,6 @@ handleGroupMessage()
     ├── 判断消息包含媒体 ──► handleNewMediaMessage()
     │   │
     │   ├── extractMediaFromMessage(msg)    → { file_id, file_unique_id, media_type }
-    │   ├── extractLevel(text)              → { level, cleanText }
     │   ├── generateGroupIdFromMessage(msg) → group_id
     │   │
     │   ├── 查重: findMediaByFileUniqueId(file_unique_id)
@@ -852,9 +853,9 @@ handlePrivateMessage()
 handleQuery()
     │
     ├── queryParser.parseQuery(text)
-    │   → { text: '关键词', excludeVideo: false, level: null }
+    │   → { tags: [], keyword: '关键词' }
     │
-    ├── 数据库查询（模糊匹配 text, media_type, level）
+    ├── 数据库查询（模糊匹配 text / tags）
     │
     ├── queryCache.createSession(userId, results)
     │   → sessionId
@@ -882,7 +883,7 @@ handleGroupEditedMessage()
     │
     ├── 提取 file_unique_id
     ├── 检测文本变化
-    │   ├── 文本更新 → extractLevel → upsertMessage (更新文本)
+    │   ├── 文本更新 → upsertMessage (更新文本)
     │   └── 文本清空 → upsertMessage (清空文本)
     │
     ├── 检测媒体变化
@@ -940,7 +941,7 @@ handleGroupEditedMessage()
 
 | 功能 | 说明 |
 |------|------|
-| 媒体自动收录 | 带等级标记的消息自动入库，支持去重 |
+| 媒体自动收录 | 群组/频道媒体自动入库（去重），带文本的媒体同步写入 message |
 | 编辑同步 | 消息编辑/删除后自动同步数据库 |
 | 关键字查询 | 管理员在群组中发送文本自动搜索 |
 | 成员记录 | 加入/退出自动记录，可配置封禁策略 |
@@ -954,7 +955,7 @@ handleGroupEditedMessage()
 
 | 集合 | 存储内容 | 文档数 |
 |------|----------|--------|
-| `message` | 消息元数据（文本、类型、等级） | 与媒体一一对应 |
+| `message` | 消息元数据（文本、类型、标签） | 与带文本媒体对应 |
 | `media` | 媒体文件记录（file_id、密码） | 每条媒体一条记录 |
 | `group_list` | 媒体组汇总信息 | 每组一条 |
 | `channel_group` | 管理的群组/频道 | 每个群组/频道一条 |
