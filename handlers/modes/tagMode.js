@@ -16,8 +16,8 @@ const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = r
 
 // ---------------- 键盘构建 ----------------
 
-/** 按行构建标签按钮（prefix 为回调前缀，标签名 URL 编码），每行固定 5 个 */
-function buildTagButtons(tags, prefix, rowSize = 5) {
+/** 按行构建标签按钮（prefix 为回调前缀，标签名 URL 编码），每行固定 4 个 */
+function buildTagButtons(tags, prefix, rowSize = 4) {
     const keyboard = [];
     for (let i = 0; i < tags.length; i += rowSize) {
         const row = [];

@@ -124,14 +124,14 @@ async function renderTagKeyboard(userId, messageId, groupId) {
     const tags = await getTags();
     const current = await getGroupTags(groupId);
     const keyboard = [];
-    const rowSize = 5; // 每行固定 5 个
+    const rowSize = 4; // 每行固定 4 个
     for (let i = 0; i < tags.length; i += rowSize) {
         const row = [];
         for (let j = i; j < i + rowSize && j < tags.length; j++) {
             const tag = tags[j];
             const has = current.includes(tag);
             row.push({
-                text: `${has ? '✅' : '➕'} ${tag}`,
+                text: `${has ? '✅' : '+'}${tag}`,
                 callback_data: `sendtag:${encodeURIComponent(tag)}`
             });
         }
@@ -217,19 +217,21 @@ async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo) {
     await upsertGroupList(groupId);
     await setGroupDelete(groupId, 0);
 
-    // 收录至 message（与回复模式不同：无文本也收录，text 为空字符串）
-    const level = extractLevel(caption || '');
-    const cleanText = removeLevelSuffix(caption || '');
-    await upsertMessage({
-        message_id: sentMsg.message_id,
-        chat_id: targetChatId,
-        text: cleanText,
-        file_unique_id: fileUniqueId,
-        media_type: type,
-        level: level,
-        group_id: groupId
-    });
-    logger.info(`发送模式收录: group_id=${groupId}, file_unique_id=${fileUniqueId}`);
+    // 只有带文本（caption）的媒体才收录至 message
+    if (caption) {
+        const level = extractLevel(caption);
+        const cleanText = removeLevelSuffix(caption);
+        await upsertMessage({
+            message_id: sentMsg.message_id,
+            chat_id: targetChatId,
+            text: cleanText,
+            file_unique_id: fileUniqueId,
+            media_type: type,
+            level: level,
+            group_id: groupId
+        });
+        logger.info(`发送模式收录 message: group_id=${groupId}, file_unique_id=${fileUniqueId}`);
+    }
 }
 
 /**

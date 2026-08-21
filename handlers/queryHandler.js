@@ -9,35 +9,9 @@ const { formatQueryResults, buildFoldKeyboard, buildNumberKeyboard } = require('
 const { createSession } = require('../utils/queryCache');
 const { insertLog } = require('../db/log');
 
-const LEVELS = ['S', 'A', 'B', 'C', 'D'];
-
 function buildQuery(parsed) {
-    const { types, specifiedLevels, levelGTE, levelLTE, keyword, tags } = parsed;
+    const { keyword, tags } = parsed;
     const query = {};
-
-    if (types.length > 0) {
-        query.media_type = { $in: types };
-    }
-
-    const levelConditions = [];
-
-    if (specifiedLevels.length > 0) {
-        levelConditions.push({ level: { $in: specifiedLevels } });
-    }
-
-    for (const level of levelGTE) {
-        const idx = LEVELS.indexOf(level);
-        levelConditions.push({ level: { $in: LEVELS.slice(0, idx + 1) } });
-    }
-
-    for (const level of levelLTE) {
-        const idx = LEVELS.indexOf(level);
-        levelConditions.push({ level: { $in: LEVELS.slice(idx) } });
-    }
-
-    if (levelConditions.length > 0) {
-        query.$or = levelConditions;
-    }
 
     if (keyword) {
         const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -120,8 +94,7 @@ async function handleQuery(msg) {
     const parsed = parseQuery(text);
     const { keyword } = parsed;
 
-    if (!keyword && parsed.types.length === 0 && parsed.specifiedLevels.length === 0 &&
-        parsed.levelGTE.length === 0 && parsed.levelLTE.length === 0 && parsed.tags.length === 0) {
+    if (!keyword && parsed.tags.length === 0) {
         logger.info(`用户 ${userId} 发送空查询，已忽略`);
         return;
     }

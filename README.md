@@ -339,22 +339,17 @@ const states = new Map();  // key: userId (number), value: state object
 
 **语法支持：**
 ```
--V         排除视频
--P         排除图片
-+S         仅搜索 #S 等级
-A+/B+/...  搜索指定等级及以上的内容
-关键字      文本模糊搜索
+关键字 -标签1 标签2      标签筛选（句尾最后出现的 - 即为标签标记，
+                          多个标签用空格或 、, 分隔，不区分大小写）
+关键字                   文本模糊搜索
 ```
 
 **实现：**
 ```javascript
 // 输出结构
 {
-  text: '关键字',
-  excludeVideo: true,
-  excludePhoto: false,
-  level: 'S',
-  levelDirection: 'up'  // 'exact' | 'up' | 'down'
+  tags: ['图片', '教程'],   // 标签数组（小写去重）
+  keyword: '关键字'        // 移除标签部分后的纯文本
 }
 ```
 
