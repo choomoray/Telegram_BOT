@@ -161,12 +161,8 @@ async function handleTagCallback(query) {
             await bot.answerCallbackQuery(query.id, { text: '❌ 缺少媒体组信息' });
             return;
         }
-        const keyboard = await renderTagKeyboard(userId, query.message.message_id, groupId, page);
-        await bot.editMessageReplyMarkup(keyboard, {
-            chat_id: userId,
-            message_id: query.message.message_id
-        });
         await bot.answerCallbackQuery(query.id);
+        await renderTagMessage(userId, query.message.message_id, groupId, page);
         return;
     }
 
@@ -185,13 +181,9 @@ async function handleTagCallback(query) {
             await addTagToGroup(groupId, tag);
             await tagUsed(tag, 1);
         }
-        const keyboard = await renderTagKeyboard(userId, query.message.message_id, groupId);
-        // editMessageReplyMarkup 签名：(reply_markup, options)
-        await bot.editMessageReplyMarkup(keyboard, {
-            chat_id: userId,
-            message_id: query.message.message_id
-        });
         await bot.answerCallbackQuery(query.id, { text: `标签「${tag}」已更新` });
+        // 刷新：文本中的已选标签 + 按钮状态
+        await renderTagMessage(userId, query.message.message_id, groupId);
         logger.info(`用户 ${userId} 发送模式切换标签: ${tag} -> group=${groupId}`);
         return;
     }
@@ -220,10 +212,9 @@ async function applyManualTags(userId, text, groupId, mode, tagMsgId) {
             await tagUsed(name, -1);
         }
     }
-    // 刷新标签按钮
+    // 刷新标签消息（文本已选列表 + 键盘）
     if (tagMsgId) {
-        const keyboard = await renderTagKeyboard(userId, null, groupId, 1);
-        await bot.editMessageReplyMarkup(keyboard, { chat_id: userId, message_id: tagMsgId }).catch(() => { });
+        await renderTagMessage(userId, tagMsgId, groupId, 1);
     }
     await bot.sendMessage(userId, `✅ 已${mode === 'add' ? '添加' : '移除'}标签：${names.join('、')}`);
     logger.info(`用户 ${userId} 手动${mode === 'add' ? '添加' : '移除'}标签: ${names.join('、')}`);
@@ -359,25 +350,51 @@ async function flushMediaGroup(userId, mediaGroupId, items) {
 // ---------------- 发送成功回复 + 标签按钮 ----------------
 
 async function sendSuccessWithTags(userId, text, groupId, caption) {
-    // 根据媒体文本自动识别其中出现的标签，输出给用户后再手动处理
+    // 自动识别媒体文本中出现的标签，并自动打上（勾选）
     const allTags = await getTags();
     const matched = matchTagsInText(caption, allTags);
-    let finalText = text;
-    if (matched.length) {
-        finalText += `\n\n📌 文本中识别到标签：${matched.join('、')}\n（可点击下方按钮或直接发送文本添加）`;
+    for (const tag of matched) {
+        await addTagToGroup(groupId, tag);
+        await tagUsed(tag, 1);
     }
 
+    // 已选标签展示在消息文本中
+    const current = await getGroupTags(groupId);
+    const finalText = text + (current.length ? `\n\n📌 已选标签：${current.join('、')}` : '');
+
     const keyboard = await renderTagKeyboard(userId, null, groupId);
-    // 更新用户状态记录 lastGroupId（标签按钮操作定位）与标签消息 ID
+    // 更新用户状态：记录 lastGroupId / 标签消息 ID / 基础文本
     const rawState = getRawUserState(userId);
     if (rawState && rawState.mode === 'send') {
-        setUserState(userId, { ...rawState, lastGroupId: groupId, step: 'tagging', lastActivity: Date.now() });
+        setUserState(userId, {
+            ...rawState,
+            lastGroupId: groupId,
+            step: 'tagging',
+            tagBaseText: text,
+            lastActivity: Date.now()
+        });
     }
     const sent = await bot.sendMessage(userId, finalText, { reply_markup: keyboard });
     const st = getRawUserState(userId);
     if (st && st.mode === 'send') {
         setUserState(userId, { ...st, tagMsgId: sent.message_id });
     }
+}
+
+/**
+ * 刷新标签消息（文本中展示已选标签 + 键盘），每次标签操作后调用
+ */
+async function renderTagMessage(userId, messageId, groupId, page = 1) {
+    const st = getRawUserState(userId);
+    const baseText = (st && st.tagBaseText) || '✅ 发送成功';
+    const current = await getGroupTags(groupId);
+    const keyboard = await renderTagKeyboard(userId, messageId, groupId, page);
+    const text = baseText + (current.length ? `\n\n📌 已选标签：${current.join('、')}` : '');
+    await bot.editMessageText(text, {
+        chat_id: userId,
+        message_id: messageId,
+        reply_markup: keyboard
+    }).catch(() => { });
 }
 
 // ---------------- 模式消息处理 ----------------
