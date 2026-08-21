@@ -13,7 +13,8 @@ const { findMediaByFileUniqueId, insertMedia } = require('../../db/media');
 const { upsertMessage } = require('../../db/message');
 const { upsertGroupList, setGroupDelete } = require('../../db/groupList');
 const { addTagToGroup, removeTagFromGroup, getGroupTags } = require('../../db/message');
-const { getTags } = require('../../db/tags');
+const { getTags, sortTags, tagUsed, addTag } = require('../../db/tags');
+const { buildTagKeyboard, splitTagInput, matchTagsInText } = require('../../utils/tagUi');
 const { extractMediaFromMessage } = require('../../media');
 const { removeLevelSuffix } = require('../../utils/levelExtractor');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
@@ -120,25 +121,18 @@ async function handleCallback(query) {
 
 // ---------------- 标签按钮（发送成功后的打标签操作） ----------------
 
-async function renderTagKeyboard(userId, messageId, groupId) {
-    const tags = await getTags();
+async function renderTagKeyboard(userId, messageId, groupId, page = 1) {
+    const tags = sortTags(await getTags());
     const current = await getGroupTags(groupId);
-    const keyboard = [];
-    const rowSize = 4; // 每行固定 4 个
-    for (let i = 0; i < tags.length; i += rowSize) {
-        const row = [];
-        for (let j = i; j < i + rowSize && j < tags.length; j++) {
-            const tag = tags[j];
-            const has = current.includes(tag);
-            row.push({
-                text: `${has ? '✅' : '+'}${tag}`,
-                callback_data: `sendtag:${encodeURIComponent(tag)}`
-            });
-        }
-        keyboard.push(row);
-    }
-    keyboard.push([{ text: '✅ 完成', callback_data: 'sendtag_done' }]);
-    return { inline_keyboard: keyboard };
+    const currentSet = new Set(current);
+    const result = buildTagKeyboard(tags, {
+        prefix: 'sendtag',
+        pagePrefix: 'sendtag_page',
+        page,
+        marker: { names: currentSet, on: '✅', off: '+' },
+        extraRows: [[{ text: '✅ 完成', callback_data: 'sendtag_done' }]]
+    });
+    return result;
 }
 
 async function handleTagCallback(query) {
@@ -159,6 +153,23 @@ async function handleTagCallback(query) {
         return;
     }
 
+    // 翻页
+    if (data.startsWith('sendtag_page:')) {
+        const page = parseInt(data.split(':')[1], 10) || 1;
+        const groupId = rawState ? rawState.lastGroupId : null;
+        if (!groupId) {
+            await bot.answerCallbackQuery(query.id, { text: '❌ 缺少媒体组信息' });
+            return;
+        }
+        const keyboard = await renderTagKeyboard(userId, query.message.message_id, groupId, page);
+        await bot.editMessageReplyMarkup(keyboard, {
+            chat_id: userId,
+            message_id: query.message.message_id
+        });
+        await bot.answerCallbackQuery(query.id);
+        return;
+    }
+
     if (data.startsWith('sendtag:')) {
         const tag = decodeURIComponent(data.split(':')[1]);
         const groupId = rawState ? rawState.lastGroupId : null;
@@ -169,8 +180,10 @@ async function handleTagCallback(query) {
         const current = await getGroupTags(groupId);
         if (current.includes(tag)) {
             await removeTagFromGroup(groupId, tag);
+            await tagUsed(tag, -1);
         } else {
             await addTagToGroup(groupId, tag);
+            await tagUsed(tag, 1);
         }
         const keyboard = await renderTagKeyboard(userId, query.message.message_id, groupId);
         // editMessageReplyMarkup 签名：(reply_markup, options)
@@ -182,6 +195,38 @@ async function handleTagCallback(query) {
         logger.info(`用户 ${userId} 发送模式切换标签: ${tag} -> group=${groupId}`);
         return;
     }
+}
+
+/**
+ * 手动输入标签（空格/、分隔）：不存在则自动创建后打上
+ */
+async function applyManualTags(userId, text, groupId, mode, tagMsgId) {
+    const names = splitTagInput(text);
+    if (!names.length) {
+        await bot.sendMessage(userId, '❌ 未识别到标签');
+        return;
+    }
+    const allTags = await getTags();
+    for (const name of names) {
+        const exists = allTags.some(t => t.name.toLowerCase() === name.toLowerCase());
+        if (!exists) {
+            await addTag(name);
+        }
+        if (mode === 'add') {
+            await addTagToGroup(groupId, name);
+            await tagUsed(name, 1);
+        } else {
+            await removeTagFromGroup(groupId, name);
+            await tagUsed(name, -1);
+        }
+    }
+    // 刷新标签按钮
+    if (tagMsgId) {
+        const keyboard = await renderTagKeyboard(userId, null, groupId, 1);
+        await bot.editMessageReplyMarkup(keyboard, { chat_id: userId, message_id: tagMsgId }).catch(() => { });
+    }
+    await bot.sendMessage(userId, `✅ 已${mode === 'add' ? '添加' : '移除'}标签：${names.join('、')}`);
+    logger.info(`用户 ${userId} 手动${mode === 'add' ? '添加' : '移除'}标签: ${names.join('、')}`);
 }
 
 // ---------------- 发送与收录 ----------------
@@ -307,19 +352,32 @@ async function flushMediaGroup(userId, mediaGroupId, items) {
         await recordSentMedia(sent, targetChatId, groupId, original);
     }
 
-    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}（媒体组 ${newItems.length} 个）`, groupId);
+    const firstCaption = newItems.length ? (newItems[0].caption || '') : '';
+    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}（媒体组 ${newItems.length} 个）`, groupId, firstCaption);
 }
 
 // ---------------- 发送成功回复 + 标签按钮 ----------------
 
-async function sendSuccessWithTags(userId, text, groupId) {
+async function sendSuccessWithTags(userId, text, groupId, caption) {
+    // 根据媒体文本自动识别其中出现的标签，输出给用户后再手动处理
+    const allTags = await getTags();
+    const matched = matchTagsInText(caption, allTags);
+    let finalText = text;
+    if (matched.length) {
+        finalText += `\n\n📌 文本中识别到标签：${matched.join('、')}\n（可点击下方按钮或直接发送文本添加）`;
+    }
+
     const keyboard = await renderTagKeyboard(userId, null, groupId);
-    // 更新用户状态记录 lastGroupId（标签按钮操作定位）
+    // 更新用户状态记录 lastGroupId（标签按钮操作定位）与标签消息 ID
     const rawState = getRawUserState(userId);
     if (rawState && rawState.mode === 'send') {
-        setUserState(userId, { ...rawState, lastGroupId: groupId, lastActivity: Date.now() });
+        setUserState(userId, { ...rawState, lastGroupId: groupId, step: 'tagging', lastActivity: Date.now() });
     }
-    await bot.sendMessage(userId, text, { reply_markup: keyboard });
+    const sent = await bot.sendMessage(userId, finalText, { reply_markup: keyboard });
+    const st = getRawUserState(userId);
+    if (st && st.mode === 'send') {
+        setUserState(userId, { ...st, tagMsgId: sent.message_id });
+    }
 }
 
 // ---------------- 模式消息处理 ----------------
@@ -328,6 +386,12 @@ async function handleSendMode(msg, state) {
     const userId = msg.from.id;
     updateUserActivity(userId);
     const userMsgId = msg.message_id;
+
+    // 标签阶段（发送成功后）：文本消息作为手动标签输入（空格/、分隔），不发送到群组
+    if (state.lastGroupId && msg.text && !msg.photo && !msg.video && !msg.audio && !msg.document) {
+        await applyManualTags(userId, msg.text, state.lastGroupId, 'add', state.tagMsgId);
+        return true;
+    }
 
     if (!state.targetChatId) {
         await bot.sendMessage(userId, '❌ 请先选择目标群组/频道', {
@@ -392,7 +456,7 @@ async function handleSendMode(msg, state) {
     }
 
     await recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo);
-    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}`, groupId);
+    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}`, groupId, mediaInfo.caption);
     logger.info(`用户 ${userId} 发送单个媒体到 ${targetChatId}，group_id=${groupId}`);
     return true;
 }

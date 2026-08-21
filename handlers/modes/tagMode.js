@@ -1,8 +1,10 @@
 // handlers/modes/tagMode.js
 /**
  * /tag 标签模式
- * 1. 修改消息标签：发送媒体 → 预览媒体组 → 展示现有标签 → 添加/删除模式（标签按钮直接操作，操作后刷新）
- * 2. 编辑标签：添加（发文本）/ 改名（选标签→发文本）/ 删除（选标签→确认），同步 message 集合
+ * 1. 修改消息标签：发送媒体 → 预览媒体组 → 展示现有标签 → 添加/删除模式
+ *    （标签按钮直接操作或手动输入，操作后刷新；标签按钮翻页 10 行/页）
+ * 2. 编辑标签：添加（发文本）/ 改名（选标签→发文本）/ 删除（选标签）/ 固定置顶，
+ *    修改与删除同步 message 集合
  */
 const bot = require('../../bot');
 const logger = require('../../logger');
@@ -10,24 +12,10 @@ const { findMediaByFileUniqueId } = require('../../db/media');
 const { findMessageByFileUniqueId } = require('../../db/message');
 const { getMediaByGroupIdSorted, sendMediaGroupAsReply } = require('../../media');
 const { addTagToGroup, removeTagFromGroup, getGroupTags } = require('../../db/message');
-const { getTags, addTag, removeTag, renameTag } = require('../../db/tags');
+const { getTags, sortTags, addTag, removeTag, renameTag, setTagImportant, tagUsed } = require('../../db/tags');
+const { buildTagKeyboard, splitTagInput } = require('../../utils/tagUi');
 const { extractMediaFromMessage } = require('../../media');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
-
-// ---------------- 键盘构建 ----------------
-
-/** 按行构建标签按钮（prefix 为回调前缀，标签名 URL 编码），每行固定 4 个 */
-function buildTagButtons(tags, prefix, rowSize = 4) {
-    const keyboard = [];
-    for (let i = 0; i < tags.length; i += rowSize) {
-        const row = [];
-        for (let j = i; j < i + rowSize && j < tags.length; j++) {
-            row.push({ text: tags[j], callback_data: `${prefix}:${encodeURIComponent(tags[j])}` });
-        }
-        keyboard.push(row);
-    }
-    return keyboard;
-}
 
 // ---------------- 菜单 ----------------
 
@@ -57,7 +45,7 @@ async function showTagMenu(userId, messageId) {
     }
 }
 
-/** 修改消息标签：请选择操作（添加/删除 + 现有标签展示） */
+/** 修改消息标签：请选择操作（添加/删除 + 现有标签展示），并记录按钮消息 ID */
 async function showGroupTagSelect(userId, messageId, groupId, asNew = false) {
     const current = await getGroupTags(groupId);
     const keyboard = {
@@ -70,9 +58,11 @@ async function showGroupTagSelect(userId, messageId, groupId, asNew = false) {
     };
     const tagText = current.length ? `📌 现有标签：${current.join('、')}` : '📌 现有标签：（无）';
     const text = `已找到，请选择操作：\n${tagText}`;
+    let tagMsgId = messageId;
     if (asNew) {
         // 在预览媒体组之后发送一条新消息来放置操作按钮
-        await bot.sendMessage(userId, text, { reply_markup: keyboard });
+        const sent = await bot.sendMessage(userId, text, { reply_markup: keyboard });
+        tagMsgId = sent.message_id;
     } else {
         await bot.editMessageText(text, {
             chat_id: userId,
@@ -80,41 +70,54 @@ async function showGroupTagSelect(userId, messageId, groupId, asNew = false) {
             reply_markup: keyboard
         }).catch(() => { });
     }
+    const st = getRawUserState(userId);
+    if (st && st.mode === 'tag') {
+        setUserState(userId, { ...st, tagMsgId, lastActivity: Date.now() });
+    }
 }
 
-/** 添加/删除标签模式界面 */
-async function showGroupTagAction(userId, messageId, groupId, mode) {
-    const tags = await getTags();
+/** 添加/删除标签模式界面（标签按钮翻页 10 行/页，手动输入同样可用） */
+async function showGroupTagAction(userId, messageId, groupId, mode, page = 1) {
+    const tags = sortTags(await getTags());
     const current = await getGroupTags(groupId);
 
-    const title = mode === 'add' ? '➕ 正在添加标签（点击即添加）' : '🗑️ 正在删除标签（点击即删除）';
+    const title = mode === 'add'
+        ? '➕ 正在添加标签（点击按钮或发送文本，空格/、分隔）'
+        : '🗑️ 正在删除标签（点击按钮或发送文本，空格/、分隔）';
+
     let available = [];
     if (mode === 'add') {
-        available = tags.filter(t => !current.includes(t));
+        available = tags.filter(t => !current.includes(t.name));
     } else {
-        available = current;
+        available = current.map(n => ({ name: n, important: false, count: 0 }));
     }
 
-    const keyboard = [];
-    if (available.length) {
-        keyboard.push(...buildTagButtons(available, 'tagmsg:tag'));
-    }
-    keyboard.push([{ text: '↩️ 返回选择', callback_data: 'tagmsg:back' }]);
+    const result = buildTagKeyboard(available, {
+        prefix: 'tagmsg:tag',
+        pagePrefix: 'tagmsg_page',
+        page,
+        extraRows: [[{ text: '↩️ 返回选择', callback_data: 'tagmsg:back' }]]
+    });
 
     const tagText = current.length ? `📌 现有标签：${current.join('、')}` : '📌 现有标签：（无）';
     const hint = mode === 'add'
-        ? (available.length ? `可添加：${available.join('、')}` : '（没有可添加的标签）')
-        : (available.length ? `可删除：${available.join('、')}` : '（没有可删除的标签）');
+        ? (available.length ? `共 ${available.length} 个可添加标签` : '（没有可添加的标签）')
+        : (available.length ? `共 ${available.length} 个可删除标签` : '（没有可删除的标签）');
     await bot.editMessageText(`${title}\n${tagText}\n${hint}`, {
         chat_id: userId,
         message_id: messageId,
-        reply_markup: { inline_keyboard: keyboard }
+        reply_markup: result
     }).catch(() => { });
+
+    const st = getRawUserState(userId);
+    if (st && st.mode === 'tag') {
+        setUserState(userId, { ...st, tagMsgId: messageId, lastActivity: Date.now() });
+    }
 }
 
 /** 编辑标签菜单 */
 async function showEditTagMenu(userId, messageId) {
-    const tags = await getTags();
+    const tags = sortTags(await getTags());
     const keyboard = {
         inline_keyboard: [
             [
@@ -123,16 +126,54 @@ async function showEditTagMenu(userId, messageId) {
                 { text: '🗑️ 删除标签', callback_data: 'tagedit:del' }
             ],
             [
+                { text: '⭐ 固定置顶', callback_data: 'tagedit:pin' },
                 { text: '↩️ 返回', callback_data: 'tagedit:back' }
             ]
         ]
     };
-    const tagText = tags.length ? `📌 当前标签：${tags.join('、')}` : '📌 当前标签：（无）';
+    const tagText = tags.length
+        ? `📌 当前标签：\n${tags.map(t => `${t.important ? '⭐' : '·'} ${t.name}（${t.count}次）`).join('\n')}`
+        : '📌 当前标签：（无）';
     await bot.editMessageText(`标签管理：\n${tagText}`, {
         chat_id: userId,
         message_id: messageId,
         reply_markup: keyboard
     }).catch(() => { });
+
+    const st = getRawUserState(userId);
+    if (st && st.mode === 'tag') {
+        setUserState(userId, { ...st, tagMsgId: messageId, lastActivity: Date.now() });
+    }
+}
+
+/** 标签选择列表（改名/删除/固定共用，翻页） */
+async function showTagPickList(userId, messageId, action, page = 1) {
+    const tags = sortTags(await getTags());
+    if (!tags.length) {
+        await bot.answerCallbackQuery(undefined, { text: '❌ 暂无标签' });
+        return;
+    }
+    const titles = {
+        rename: '✏️ 请选择要修改的标签：',
+        del: '🗑️ 请选择要删除的标签：',
+        pin: '⭐ 请选择要固定/取消固定的标签：'
+    };
+    const result = buildTagKeyboard(tags, {
+        prefix: 'tagedit:pick',
+        pagePrefix: 'tagedit_page',
+        page,
+        extraRows: [[{ text: '↩️ 返回', callback_data: 'tagedit:back' }]]
+    });
+    await bot.editMessageText(titles[action] || '请选择标签：', {
+        chat_id: userId,
+        message_id: messageId,
+        reply_markup: result
+    }).catch(() => { });
+
+    const st = getRawUserState(userId);
+    if (st && st.mode === 'tag') {
+        setUserState(userId, { ...st, tagMsgId: messageId, lastActivity: Date.now() });
+    }
 }
 
 // ---------------- 回调处理 ----------------
@@ -207,8 +248,10 @@ async function handleCallback(query) {
             const mode = state && state.groupTagMode ? state.groupTagMode : 'add';
             if (mode === 'add') {
                 await addTagToGroup(groupId, tag);
+                await tagUsed(tag, 1);
             } else {
                 await removeTagFromGroup(groupId, tag);
+                await tagUsed(tag, -1);
             }
             await bot.answerCallbackQuery(query.id, { text: `标签「${tag}」已${mode === 'add' ? '添加' : '移除'}` });
             logger.info(`用户 ${userId} 修改消息标签: ${mode} ${tag} -> group=${groupId}`);
@@ -216,6 +259,20 @@ async function handleCallback(query) {
             await showGroupTagAction(userId, messageId, groupId, mode);
             return;
         }
+    }
+
+    // ---- 修改消息标签：翻页 ----
+    if (prefix === 'tagmsg_page') {
+        const page = parseInt(parts[1], 10) || 1;
+        const groupId = state ? state.groupId : null;
+        const mode = state ? state.groupTagMode : 'add';
+        if (!groupId) {
+            await bot.answerCallbackQuery(query.id, { text: '❌ 请先发送媒体消息' });
+            return;
+        }
+        await bot.answerCallbackQuery(query.id);
+        await showGroupTagAction(userId, messageId, groupId, mode || 'add', page);
+        return;
     }
 
     // ---- 编辑标签 ----
@@ -227,35 +284,16 @@ async function handleCallback(query) {
             await bot.answerCallbackQuery(query.id);
             return;
         }
-        if (action === 'rename' || action === 'del') {
-            const tags = await getTags();
-            if (!tags.length) {
-                await bot.answerCallbackQuery(query.id, { text: '❌ 暂无标签' });
-                return;
-            }
+        if (action === 'rename' || action === 'del' || action === 'pin') {
             if (state) {
                 setUserState(userId, { ...state, pendingEditAction: action, lastActivity: Date.now() });
             }
-            const keyboard = {
-                inline_keyboard: [
-                    ...buildTagButtons(tags, 'tagedit:pick'),
-                    [{ text: '↩️ 返回', callback_data: 'tagedit:back' }]
-                ]
-            };
-            const text = action === 'rename' ? '✏️ 请选择要修改的标签：' : '🗑️ 请选择要删除的标签：';
-            await bot.editMessageText(text, {
-                chat_id: userId,
-                message_id: messageId,
-                reply_markup: keyboard
-            });
             await bot.answerCallbackQuery(query.id);
+            await showTagPickList(userId, messageId, action);
             return;
         }
         if (action === 'pick') {
             const tag = decodeURIComponent(parts[2]);
-            const step = state ? state.step : 'menu';
-            // 需要知道是 rename 还是 del：从消息文本判断不可靠，用 step 记录
-            // rename/del 选择时，把 pending 操作记录到 state
             const pendingAction = state && state.pendingEditAction;
             if (pendingAction === 'rename') {
                 if (state) setUserState(userId, { ...state, step: 'rename_tag', pendingRenameTag: tag, lastActivity: Date.now() });
@@ -273,6 +311,21 @@ async function handleCallback(query) {
                 } else {
                     await bot.answerCallbackQuery(query.id, { text: result.error || '删除失败' });
                 }
+            } else if (pendingAction === 'pin') {
+                const current = await getTags();
+                const t = current.find(x => x.name.toLowerCase() === tag.toLowerCase());
+                const nextImportant = t ? !t.important : false;
+                const result = await setTagImportant(tag, nextImportant);
+                if (result.ok) {
+                    await bot.editMessageText(`✅ 标签「${tag}」已${nextImportant ? '设为重要（固定置顶）' : '取消固定'}`, {
+                        chat_id: userId,
+                        message_id: messageId
+                    });
+                    await bot.answerCallbackQuery(query.id, { text: nextImportant ? '已固定' : '已取消固定' });
+                    logger.info(`用户 ${userId} 设置标签固定: ${tag} -> ${nextImportant}`);
+                } else {
+                    await bot.answerCallbackQuery(query.id, { text: result.error || '操作失败' });
+                }
             } else {
                 await bot.answerCallbackQuery(query.id, { text: '❌ 请先选择操作' });
             }
@@ -287,6 +340,15 @@ async function handleCallback(query) {
         await bot.answerCallbackQuery(query.id);
         return;
     }
+
+    // ---- 编辑标签：翻页 ----
+    if (prefix === 'tagedit_page') {
+        const page = parseInt(parts[1], 10) || 1;
+        const action = state ? state.pendingEditAction : 'rename';
+        await bot.answerCallbackQuery(query.id);
+        await showTagPickList(userId, messageId, action || 'rename', page);
+        return;
+    }
 }
 
 // ---------------- 模式消息处理 ----------------
@@ -295,6 +357,36 @@ async function handleTagMode(msg, state) {
     const userId = msg.from.id;
     updateUserActivity(userId);
     const userMsgId = msg.message_id;
+
+    // 修改消息标签的添加/删除模式：手动输入标签（空格/、分隔）
+    if (state.groupId && state.groupTagMode && msg.text &&
+        !msg.photo && !msg.video && !msg.audio && !msg.document) {
+        const names = splitTagInput(msg.text);
+        if (names.length) {
+            const allTags = await getTags();
+            for (const name of names) {
+                const exists = allTags.some(t => t.name.toLowerCase() === name.toLowerCase());
+                if (!exists) await addTag(name);
+                if (state.groupTagMode === 'add') {
+                    await addTagToGroup(state.groupId, name);
+                    await tagUsed(name, 1);
+                } else {
+                    await removeTagFromGroup(state.groupId, name);
+                    await tagUsed(name, -1);
+                }
+            }
+            // 刷新当前模式界面
+            if (state.tagMsgId) {
+                await showGroupTagAction(userId, state.tagMsgId, state.groupId, state.groupTagMode);
+            }
+            await bot.sendMessage(userId, `✅ 已${state.groupTagMode === 'add' ? '添加' : '移除'}标签：${names.join('、')}`, {
+                reply_to_message_id: userMsgId
+            });
+        } else {
+            await bot.sendMessage(userId, '❌ 未识别到标签', { reply_to_message_id: userMsgId });
+        }
+        return true;
+    }
 
     // 编辑标签：等待输入新标签名 / 新名字
     if (state.step === 'add_tag') {

@@ -37,9 +37,12 @@ const callbackHandlers = {
     sendpage: sendMode.handleCallback,
     sendtag: sendMode.handleTagCallback,
     sendtag_done: sendMode.handleTagCallback,
+    sendtag_page: sendMode.handleTagCallback,
     tagm: tagMode.handleCallback,
     tagmsg: tagMode.handleCallback,
+    tagmsg_page: tagMode.handleCallback,
     tagedit: tagMode.handleCallback,
+    tagedit_page: tagMode.handleCallback,
     edit_dbonly: editConfirmDbOnly,
     edit_dbonly_cancel: async (query) => {
         const userId = query.from.id;
