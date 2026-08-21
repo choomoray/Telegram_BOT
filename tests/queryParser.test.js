@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { parseQuery } = require('../utils/queryParser');
 
-const EMPTY = { types: [], specifiedLevels: [], levelGTE: [], levelLTE: [], keyword: '' };
+const EMPTY = { types: [], specifiedLevels: [], levelGTE: [], levelLTE: [], tags: [], keyword: '' };
 
 test('空/非法输入返回空结构', () => {
     assert.deepStrictEqual(parseQuery(''), EMPTY);
@@ -72,4 +72,36 @@ test('仅标记无关键字', () => {
     const r = parseQuery('-P');
     assert.deepStrictEqual(r.types, ['photo']);
     assert.strictEqual(r.keyword, '');
+});
+
+test('解析标签筛选 -tag', () => {
+    const r = parseQuery('-tag 图片 教程 关键词');
+    assert.deepStrictEqual(r.tags, ['图片', '教程', '关键词']);
+    assert.strictEqual(r.keyword, '');
+});
+
+test('标签用顿号/逗号分隔', () => {
+    const r = parseQuery('查找 -tag 图片、教程，高清');
+    assert.deepStrictEqual(r.tags, ['图片', '教程', '高清']);
+    assert.strictEqual(r.keyword, '查找');
+});
+
+test('-tag 指令不区分大小写', () => {
+    const r = parseQuery('-TAG HD');
+    assert.deepStrictEqual(r.tags, ['hd']);
+});
+
+test('-tag 与类型/等级标记不冲突', () => {
+    const r = parseQuery('-v -tag 教程 +S');
+    assert.deepStrictEqual(r.types, ['video']);
+    assert.deepStrictEqual(r.specifiedLevels, ['S']);
+    assert.deepStrictEqual(r.tags, ['教程']);
+    assert.strictEqual(r.keyword, '');
+});
+
+test('-tag 在标签后遇到其他标记停止收集', () => {
+    const r = parseQuery('-tag 教程 -v 视频');
+    assert.deepStrictEqual(r.tags, ['教程']);
+    assert.deepStrictEqual(r.types, ['video']);
+    assert.strictEqual(r.keyword, '视频');
 });

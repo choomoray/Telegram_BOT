@@ -124,7 +124,7 @@ async function renderTagKeyboard(userId, messageId, groupId) {
     const tags = await getTags();
     const current = await getGroupTags(groupId);
     const keyboard = [];
-    const rowSize = 2;
+    const rowSize = 5; // 每行固定 5 个
     for (let i = 0; i < tags.length; i += rowSize) {
         const row = [];
         for (let j = i; j < i + rowSize && j < tags.length; j++) {
@@ -173,7 +173,11 @@ async function handleTagCallback(query) {
             await addTagToGroup(groupId, tag);
         }
         const keyboard = await renderTagKeyboard(userId, query.message.message_id, groupId);
-        await bot.editMessageReplyMarkup({ chat_id: userId, message_id: query.message.message_id }, { reply_markup: keyboard });
+        // editMessageReplyMarkup 签名：(reply_markup, options)
+        await bot.editMessageReplyMarkup(keyboard, {
+            chat_id: userId,
+            message_id: query.message.message_id
+        });
         await bot.answerCallbackQuery(query.id, { text: `标签「${tag}」已更新` });
         logger.info(`用户 ${userId} 发送模式切换标签: ${tag} -> group=${groupId}`);
         return;

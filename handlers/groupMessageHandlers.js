@@ -84,6 +84,32 @@ async function updateProcessingMessage(msg, processingMessageId, finalText, auto
 }
 
 /**
+ * 判断是否为「频道 → 讨论群组」的自动转发重复媒体
+ * Telegram 机制：频道发布媒体会自动转发一份到绑定的讨论群组，
+ * 此时群组收到的媒体在媒体库中已存在（已从频道收录），应静默忽略而非提示重复。
+ * @param {Object} msg - 当前收到的群组消息
+ * @param {Object} existingMessage - 媒体库中已存在的 message 记录
+ * @returns {Promise<boolean>}
+ */
+async function isChannelAutoForward(msg, existingMessage) {
+    try {
+        if (!['group', 'supergroup'].includes(msg.chat.type)) return false;
+        if (!existingMessage || !existingMessage.chat_id) return false;
+        const channelGroupCol = getCollection(COLLECTIONS.CHANNEL_GROUP);
+        // 已收录媒体来自一个被管理的频道
+        const channel = await channelGroupCol.findOne({ id: existingMessage.chat_id, type: 'channel' });
+        if (!channel) return false;
+        // 当前群组是被管理群组，且绑定了该频道（讨论群组）
+        const group = await channelGroupCol.findOne({ id: msg.chat.id, type: 'group' });
+        if (!group) return false;
+        return group.bind_id === channel.id;
+    } catch (err) {
+        logger.error(`判断频道转发失败: ${err.message}`);
+        return false;
+    }
+}
+
+/**
  * 处理新消息（媒体收录）- 媒体组仅第一条回复，后续静默收录
  */
 async function handleNewMediaMessage(msg) {
@@ -145,6 +171,15 @@ async function handleNewMediaMessage(msg) {
         if (existingMedia) {
             const existingMessage = await findMessageByFileUniqueId(fileUniqueId);
             if (existingMessage) {
+                // 频道→讨论群组自动转发（Telegram 机制）：媒体已在频道收录，
+                // 群组收到同一条转发媒体时静默忽略，不提示重复
+                if (await isChannelAutoForward(msg, existingMessage)) {
+                    logger.info(`频道转发媒体静默忽略: chatId=${msg.chat.id}, file_unique_id=${fileUniqueId}, 原频道=${existingMessage.chat_id}`);
+                    if (hasMediaGroup && isFirstOfGroup) {
+                        groupProcessed.set(groupId, Date.now());
+                    }
+                    return;
+                }
                 if (shouldReply && isFirstOfGroup) {
                     const link = generateMessageLink(existingMessage.chat_id, existingMessage.message_id);
                     const button = {

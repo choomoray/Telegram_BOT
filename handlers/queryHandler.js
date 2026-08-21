@@ -12,7 +12,7 @@ const { insertLog } = require('../db/log');
 const LEVELS = ['S', 'A', 'B', 'C', 'D'];
 
 function buildQuery(parsed) {
-    const { types, specifiedLevels, levelGTE, levelLTE, keyword } = parsed;
+    const { types, specifiedLevels, levelGTE, levelLTE, keyword, tags } = parsed;
     const query = {};
 
     if (types.length > 0) {
@@ -42,6 +42,13 @@ function buildQuery(parsed) {
     if (keyword) {
         const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         query.text = { $regex: escaped, $options: 'i' };
+    }
+
+    // 标签筛选（大小写不敏感，匹配 message.tags 数组元素）
+    if (tags && tags.length > 0) {
+        query.tags = {
+            $in: tags.map(t => new RegExp(`^${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))
+        };
     }
 
     return query;
@@ -114,7 +121,7 @@ async function handleQuery(msg) {
     const { keyword } = parsed;
 
     if (!keyword && parsed.types.length === 0 && parsed.specifiedLevels.length === 0 &&
-        parsed.levelGTE.length === 0 && parsed.levelLTE.length === 0) {
+        parsed.levelGTE.length === 0 && parsed.levelLTE.length === 0 && parsed.tags.length === 0) {
         logger.info(`用户 ${userId} 发送空查询，已忽略`);
         return;
     }

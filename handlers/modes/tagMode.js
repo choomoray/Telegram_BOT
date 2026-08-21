@@ -16,8 +16,8 @@ const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = r
 
 // ---------------- 键盘构建 ----------------
 
-/** 按行构建标签按钮（prefix 为回调前缀，标签名 URL 编码） */
-function buildTagButtons(tags, prefix, rowSize = 3) {
+/** 按行构建标签按钮（prefix 为回调前缀，标签名 URL 编码），每行固定 5 个 */
+function buildTagButtons(tags, prefix, rowSize = 5) {
     const keyboard = [];
     for (let i = 0; i < tags.length; i += rowSize) {
         const row = [];
@@ -58,7 +58,7 @@ async function showTagMenu(userId, messageId) {
 }
 
 /** 修改消息标签：请选择操作（添加/删除 + 现有标签展示） */
-async function showGroupTagSelect(userId, messageId, groupId) {
+async function showGroupTagSelect(userId, messageId, groupId, asNew = false) {
     const current = await getGroupTags(groupId);
     const keyboard = {
         inline_keyboard: [
@@ -69,11 +69,17 @@ async function showGroupTagSelect(userId, messageId, groupId) {
         ]
     };
     const tagText = current.length ? `📌 现有标签：${current.join('、')}` : '📌 现有标签：（无）';
-    await bot.editMessageText(`已找到，请选择操作：\n${tagText}`, {
-        chat_id: userId,
-        message_id: messageId,
-        reply_markup: keyboard
-    }).catch(() => { });
+    const text = `已找到，请选择操作：\n${tagText}`;
+    if (asNew) {
+        // 在预览媒体组之后发送一条新消息来放置操作按钮
+        await bot.sendMessage(userId, text, { reply_markup: keyboard });
+    } else {
+        await bot.editMessageText(text, {
+            chat_id: userId,
+            message_id: messageId,
+            reply_markup: keyboard
+        }).catch(() => { });
+    }
 }
 
 /** 添加/删除标签模式界面 */
@@ -91,7 +97,7 @@ async function showGroupTagAction(userId, messageId, groupId, mode) {
 
     const keyboard = [];
     if (available.length) {
-        keyboard.push(...buildTagButtons(available, 'tagmsg:tag', 2));
+        keyboard.push(...buildTagButtons(available, 'tagmsg:tag'));
     }
     keyboard.push([{ text: '↩️ 返回选择', callback_data: 'tagmsg:back' }]);
 
@@ -232,7 +238,7 @@ async function handleCallback(query) {
             }
             const keyboard = {
                 inline_keyboard: [
-                    ...buildTagButtons(tags, 'tagedit:pick', 3),
+                    ...buildTagButtons(tags, 'tagedit:pick'),
                     [{ text: '↩️ 返回', callback_data: 'tagedit:back' }]
                 ]
             };
@@ -387,8 +393,8 @@ async function handleTagMode(msg, state) {
                 message_id: processingMsg.message_id
             }).catch(() => { });
 
-            // 回复选择操作
-            await showGroupTagSelect(userId, processingMsg.message_id, groupId);
+            // 在预览媒体组下方发送一条新消息来放置操作按钮
+            await showGroupTagSelect(userId, null, groupId, true);
             logger.info(`用户 ${userId} 定位媒体组: ${groupId}`);
         } catch (err) {
             logger.error(`定位媒体组失败: ${err.message}`);
