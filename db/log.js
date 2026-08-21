@@ -20,7 +20,9 @@ const LOG_TYPES = {
     MEDIA_UNHIDE: 21,
     KEYWORD_QUERY: 22,
     EDIT_TEXT: 23,
-    SETTING_UPDATE: 24// 新增
+    SETTING_UPDATE: 24, // 设置更新
+    SEND: 25,           // /send 发送
+    TAG: 26             // /tag 标签操作
 };
 
 /**

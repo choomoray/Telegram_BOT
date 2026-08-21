@@ -18,7 +18,9 @@ const DEFAULT_SETTINGS = {
     random_videos_num_video: 10,
     media_group_num: 10,
     article_sort: 'recent',
-    sub_article_sort: 'time_desc'
+    sub_article_sort: 'time_desc',
+    // 标签管理（message 集合的 tags 字段使用，数组存储标签名）
+    tags: []
 };
 
 // 允许更新的 key 列表
@@ -133,4 +135,4 @@ async function updateSettings(config, updates, retries = 2) {
     return updateSetting(config, keys[0], updates[keys[0]], retries); // 简化版，可扩展为逐个更新
 }
 
-module.exports = { getSettings, loadSettings, updateSetting, ALLOWED_KEYS };
+module.exports = { getSettings, loadSettings, updateSetting, updateSettings, ALLOWED_KEYS, DEFAULT_SETTINGS };

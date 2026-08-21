@@ -33,6 +33,10 @@ async function handleHelpCommand(userId, msg) {
                 { text: '📚 合集', callback_data: 'exec_cmd:/collection' }
             ],
             [
+                { text: '📤 发送', callback_data: 'exec_cmd:/send' },
+                { text: '🏷️ 标签', callback_data: 'exec_cmd:/tag' }
+            ],
+            [
                 { text: '📄 文章', callback_data: 'exec_cmd:/articles' }
             ]
         ]

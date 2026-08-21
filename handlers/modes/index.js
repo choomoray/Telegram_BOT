@@ -14,6 +14,8 @@ const { handlePasswordMessage } = require('./passwordMode');
 const { handleManageMessage } = require('./manage');
 const { handleArticleMessage } = require('./articleMode');
 const { handleCollectionMessage } = require('./collectionMode');
+const sendMode = require('./sendMode');
+const tagMode = require('./tagMode');
 
 const modeHandlers = {
     media_group: mediaCollectMode,
@@ -31,7 +33,9 @@ const modeHandlers = {
     password: handlePasswordMessage,
     manage: handleManageMessage,
     article: handleArticleMessage,
-    collection: handleCollectionMessage
+    collection: handleCollectionMessage,
+    send: sendMode.handleSendMode,
+    tag: tagMode.handleTagMode
 };
 
 async function handleModeMessage(msg, state) {

@@ -486,6 +486,7 @@ module.exports = {
 | `random_videos_num_text` | number | 15 | 随机视频文字列表数 |
 | `random_videos_num_video` | number | 10 | 随机视频实际发送数 |
 | `media_group_num` | number | 10 | 媒体合并默认数量 |
+| `tags` | string[] | [] | 消息标签列表（/tag 管理，message 集合的 tags 字段引用） |
 
 #### db/media.js — 媒体文件记录
 
@@ -668,6 +669,8 @@ for (const file of commandFiles) {
 | `/log` | log.js | 操作统计 | 从 log 集合聚合统计并展示 |
 | `/manage` | manage.js | 管理面板 | 进入 manage 模式，显示管理主菜单 |
 | `/mark` | mark.js | 标记模式 | 进入标记菜单（开始标记/标记记录/退出），标记记录支持按次数或时间排序分页展示 |
+| `/send` | send.js | 发送模式 | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录，可附加标签 |
+| `/tag` | tag.js | 标签模式 | 修改消息标签（预览媒体组后添加/删除）、编辑标签（添加/改名/删除，同步 message） |
 | `/media_group` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group |
 | `/media_hide` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide |
 | `/media_unhide` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide |
@@ -927,6 +930,8 @@ handleGroupEditedMessage()
 | `/random_videos` | 随机获取视频 | commands/randomVideos.js |
 | `/random_pictures` | 随机获取图片 | commands/randomPictures.js |
 | `/mark` | 标记模式（开始标记/标记记录/退出） | modes/markMode.js |
+| `/send` | 发送模式（选择群组/频道发送并收录，可打标签） | modes/sendMode.js |
+| `/tag` | 标签模式（修改消息标签 / 编辑标签，同步 message） | modes/tagMode.js |
 | `/edit` | 编辑消息文本或清空 | modes/editMode.js |
 | `/log` | 查看操作统计 | commands/log.js |
 | `/help` | 显示命令列表按钮 | commands/help.js |

@@ -13,6 +13,8 @@ const batchContinueCallback = require('./batchContinueCallback');
 const editConfirmDbOnly = require('./editConfirmDbOnly');
 const execCmdCallback = require('./execCmd');
 const { handleMarkMenuCallback, handleMarkRecordCallback, handleMarkRecordSwitchCallback } = require('./markCallback');
+const sendMode = require('../modes/sendMode');
+const tagMode = require('../modes/tagMode');
 const transportMode = require('../modes/transportMode');
 const settingMode = require('../modes/settingMode');
 const passwordMode = require('../modes/passwordMode');
@@ -31,6 +33,13 @@ const callbackHandlers = {
     mark_menu: handleMarkMenuCallback,
     markrec: handleMarkRecordCallback,
     markrec_switch: handleMarkRecordSwitchCallback,
+    sendg: sendMode.handleCallback,
+    sendpage: sendMode.handleCallback,
+    sendtag: sendMode.handleTagCallback,
+    sendtag_done: sendMode.handleTagCallback,
+    tagm: tagMode.handleCallback,
+    tagmsg: tagMode.handleCallback,
+    tagedit: tagMode.handleCallback,
     edit_dbonly: editConfirmDbOnly,
     edit_dbonly_cancel: async (query) => {
         const userId = query.from.id;
