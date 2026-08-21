@@ -87,6 +87,11 @@ async function updateProcessingMessage(msg, processingMessageId, finalText, auto
  * 判断是否为「频道 → 讨论群组」的自动转发重复媒体
  * Telegram 机制：频道发布媒体会自动转发一份到绑定的讨论群组，
  * 此时群组收到的媒体在媒体库中已存在（已从频道收录），应静默忽略而非提示重复。
+ *
+ * 判断方式（两层，均不依赖 bind_id 配置）：
+ *   1. 消息带转发来源且来源为频道（forward_origin.type === 'channel' 或 forward_from_chat），
+ *      且转发来源的频道 ID 与已收录消息的 chat_id 一致 —— 最可靠
+ *   2. 后备：已收录媒体来自被管理频道，且当前群组绑定了该频道（bind_id）
  * @param {Object} msg - 当前收到的群组消息
  * @param {Object} existingMessage - 媒体库中已存在的 message 记录
  * @returns {Promise<boolean>}
@@ -95,11 +100,23 @@ async function isChannelAutoForward(msg, existingMessage) {
     try {
         if (!['group', 'supergroup'].includes(msg.chat.type)) return false;
         if (!existingMessage || !existingMessage.chat_id) return false;
+
+        // 方式一（最可靠）：Telegram 转发来源标记
+        let originChatId = null;
+        if (msg.forward_origin && msg.forward_origin.type === 'channel' && msg.forward_origin.chat) {
+            originChatId = msg.forward_origin.chat.id;
+        } else if (msg.forward_from_chat) {
+            originChatId = msg.forward_from_chat.id;
+        }
+        if (originChatId && existingMessage.chat_id === originChatId) {
+            logger.info(`频道转发识别(forward_origin): 频道=${originChatId}`);
+            return true;
+        }
+
+        // 方式二（后备）：绑定关系判断
         const channelGroupCol = getCollection(COLLECTIONS.CHANNEL_GROUP);
-        // 已收录媒体来自一个被管理的频道
         const channel = await channelGroupCol.findOne({ id: existingMessage.chat_id, type: 'channel' });
         if (!channel) return false;
-        // 当前群组是被管理群组，且绑定了该频道（讨论群组）
         const group = await channelGroupCol.findOne({ id: msg.chat.id, type: 'group' });
         if (!group) return false;
         return group.bind_id === channel.id;
