@@ -407,6 +407,12 @@ async function flushMediaGroup(userId, mediaGroupId, items) {
 // ---------------- 发送成功回复 + 标签按钮 ----------------
 
 async function sendSuccessWithTags(userId, text, groupId, caption) {
+    // 无文本的媒体没有 message 记录，打标签是无效操作 → 不进入标签流程
+    if (!caption || !String(caption).trim()) {
+        await bot.sendMessage(userId, text);
+        return;
+    }
+
     // 自动识别媒体文本中出现的标签，并自动打上（勾选）
     const allTags = await getTags();
     const matched = matchTagsInText(caption, allTags);
