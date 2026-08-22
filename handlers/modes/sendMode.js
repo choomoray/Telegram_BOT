@@ -272,14 +272,57 @@ async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo) {
 /**
  * 发送媒体组到目标群组（分批，Telegram 每批最多 10 条）
  */
-async function sendMediaGroupToChat(chatId, items) {
-    // Telegram 机制：媒体组仅第一条可带 caption。
-    // 组内文本可能不在第一条（收录/转发/编辑后），自动取组内第一个有文本的
-    // 作为第一条 caption 发送，保证文本不丢失
-    let firstCaption = null;
-    for (const item of items) {
-        if (item.caption) { firstCaption = item.caption; break; }
+/**
+ * 恢复媒体组文本到原始位置（与用户发送一致）
+ * 发送时 Telegram 限制文本只能在第一条，二次编辑：
+ *   1. 清空第一条的临时文本
+ *   2. 为原始位置的媒体添加文本
+ */
+async function restoreMediaGroupCaptions(chatId, sentMessages, items, captionIndexes) {
+    try {
+        // 文本原本在第一条 → 无需调整；无文本 → 无需处理
+        if (captionIndexes.includes(0) || captionIndexes.length === 0) return;
+
+        // 1. 清空第一条的临时文本
+        const firstSent = sentMessages[0];
+        if (firstSent) {
+            await bot.editMessageCaption('', {
+                chat_id: chatId,
+                message_id: firstSent.message_id
+            }).catch(() => { });
+        }
+
+        // 2. 为原始位置的媒体添加文本
+        for (const idx of captionIndexes) {
+            const sent = sentMessages[idx];
+            const item = items[idx];
+            if (sent && item.caption) {
+                await bot.editMessageCaption(item.caption, {
+                    chat_id: chatId,
+                    message_id: sent.message_id,
+                    parse_mode: 'HTML'
+                }).catch((err) => {
+                    logger.warn(`为媒体 ${idx + 1} 添加文本失败: ${err.message}`);
+                });
+            }
+        }
+        logger.info(`媒体组文本位置恢复完成: chatId=${chatId}, 文本位于第 ${captionIndexes.map(i => i + 1).join('、')} 条`);
+    } catch (err) {
+        logger.warn(`媒体组文本位置恢复失败: ${err.message}`);
     }
+}
+
+async function sendMediaGroupToChat(chatId, items) {
+    // 记录文本原始位置（Telegram 机制：发送媒体组仅第一条可带 caption，
+    // 先临时放第一条，发送成功后二次编辑恢复到原始位置）
+    let firstCaption = null;
+    const captionIndexes = [];
+    items.forEach((item, idx) => {
+        if (item.caption) {
+            if (firstCaption === null) firstCaption = item.caption;
+            captionIndexes.push(idx);
+        }
+    });
 
     const BATCH = 10;
     const sentMessages = [];
@@ -290,15 +333,18 @@ async function sendMediaGroupToChat(chatId, items) {
                 type: item.type,
                 media: item.fileId
             };
-            // 整组第一条：优先自身 caption，否则用组内第一个有文本的 caption
-            if (i === 0 && idx === 0) {
-                base.caption = item.caption || firstCaption || undefined;
+            // 整组第一条：临时放组内第一个文本（Telegram 限制）
+            if (i === 0 && idx === 0 && firstCaption) {
+                base.caption = firstCaption;
             }
             return base;
         });
         const results = await bot.sendMediaGroup(chatId, media);
         sentMessages.push(...results);
     }
+
+    // 发送成功后立即二次编辑，保证文本位置与用户发送一致
+    await restoreMediaGroupCaptions(chatId, sentMessages, items, captionIndexes);
     return sentMessages;
 }
 
