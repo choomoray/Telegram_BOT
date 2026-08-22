@@ -199,7 +199,8 @@ async function applyManualTags(userId, text, groupId, mode, tagMsgId) {
         return;
     }
     const allTags = await getTags();
-    for (const name of names) {
+    for (const rawName of names) {
+        const name = rawName.toUpperCase(); // 标签名统一大写
         const exists = allTags.some(t => t.name.toLowerCase() === name.toLowerCase());
         if (!exists) {
             await addTag(name);
@@ -272,6 +273,14 @@ async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo) {
  * 发送媒体组到目标群组（分批，Telegram 每批最多 10 条）
  */
 async function sendMediaGroupToChat(chatId, items) {
+    // Telegram 机制：媒体组仅第一条可带 caption。
+    // 组内文本可能不在第一条（收录/转发/编辑后），自动取组内第一个有文本的
+    // 作为第一条 caption 发送，保证文本不丢失
+    let firstCaption = null;
+    for (const item of items) {
+        if (item.caption) { firstCaption = item.caption; break; }
+    }
+
     const BATCH = 10;
     const sentMessages = [];
     for (let i = 0; i < items.length; i += BATCH) {
@@ -281,8 +290,10 @@ async function sendMediaGroupToChat(chatId, items) {
                 type: item.type,
                 media: item.fileId
             };
-            // 仅第一条可带 caption
-            if (idx === 0 && item.caption) base.caption = item.caption;
+            // 整组第一条：优先自身 caption，否则用组内第一个有文本的 caption
+            if (i === 0 && idx === 0) {
+                base.caption = item.caption || firstCaption || undefined;
+            }
             return base;
         });
         const results = await bot.sendMediaGroup(chatId, media);
@@ -363,17 +374,16 @@ async function sendSuccessWithTags(userId, text, groupId, caption) {
     const finalText = text + (current.length ? `\n\n📌 已选标签：${current.join('、')}` : '');
 
     const keyboard = await renderTagKeyboard(userId, null, groupId);
-    // 更新用户状态：记录 lastGroupId / 标签消息 ID / 基础文本
+    // 进入标签阶段（可从任意模式切入：覆盖为 send 标签状态）
     const rawState = getRawUserState(userId);
-    if (rawState && rawState.mode === 'send') {
-        setUserState(userId, {
-            ...rawState,
-            lastGroupId: groupId,
-            step: 'tagging',
-            tagBaseText: text,
-            lastActivity: Date.now()
-        });
-    }
+    setUserState(userId, {
+        ...(rawState || {}),
+        mode: 'send',
+        lastGroupId: groupId,
+        step: 'tagging',
+        tagBaseText: text,
+        lastActivity: Date.now()
+    });
     const sent = await bot.sendMessage(userId, finalText, { reply_markup: keyboard });
     const st = getRawUserState(userId);
     if (st && st.mode === 'send') {
@@ -482,5 +492,6 @@ module.exports = {
     handleSendMode,
     handleCallback,
     handleTagCallback,
-    showGroupList
+    showGroupList,
+    sendSuccessWithTags
 };

@@ -16,7 +16,7 @@ const logger = require('../logger');
 const SETTINGS_ID = 'app_settings';
 
 /**
- * 获取标签数组（兼容旧数据：字符串自动转为对象）
+ * 获取标签数组（兼容旧数据：字符串自动转为对象；标签名统一转为大写显示）
  * @returns {Promise<Array<{name, important, count}>>}
  */
 async function getTags() {
@@ -24,9 +24,14 @@ async function getTags() {
         const col = getCollection(COLLECTIONS.SETTINGS);
         const doc = await col.findOne({ _id: SETTINGS_ID });
         const raw = Array.isArray(doc && doc.tags) ? doc.tags : [];
-        return raw.map(t => typeof t === 'string'
-            ? { name: t, important: false, count: 0 }
-            : { name: t.name || String(t), important: !!t.important, count: t.count || 0 });
+        return raw.map(t => {
+            const name = String(typeof t === 'string' ? t : (t && t.name) || '').trim().toUpperCase();
+            return {
+                name,
+                important: !!(t && typeof t === 'object' && t.important),
+                count: (t && typeof t === 'object' && t.count) || 0
+            };
+        });
     } catch (err) {
         logger.error(`获取标签列表失败: ${err.message}`);
         return [];
@@ -52,12 +57,12 @@ async function saveTags(tags) {
 }
 
 /**
- * 添加标签（已存在则报错）
+ * 添加标签（已存在则报错；标签名统一转换为大写）
  * @param {string} name - 标签名
  * @param {Object} opts - { important }
  */
 async function addTag(name, opts = {}) {
-    const trimmed = String(name || '').trim();
+    const trimmed = String(name || '').trim().toUpperCase();
     if (!trimmed) return { ok: false, error: '标签名不能为空' };
     if (trimmed.length > 20) return { ok: false, error: '标签名最长 20 个字符' };
     const tags = await getTags();

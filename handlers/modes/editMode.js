@@ -143,13 +143,18 @@ async function handleEditMode(msg, state) {
                 targetFileUniqueId, targetMediaType, cleanText
             });
 
-            await bot.sendMessage(chatId, '✅ 修改完毕', {
-                reply_to_message_id: messageId
-            });
+            // 编辑为无文本媒体添加了文本 → 主动进入打标签流程
+            if (!isClearing && cleanText && targetGroupId) {
+                const { sendSuccessWithTags } = require('./sendMode');
+                await sendSuccessWithTags(userId, '✅ 修改完毕（可为此媒体打标签）', targetGroupId, cleanText);
+            } else {
+                await bot.sendMessage(chatId, '✅ 修改完毕', {
+                    reply_to_message_id: messageId
+                });
+                deleteUserState(userId);
+            }
             insertLog(23, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
             logger.info(`用户 ${userId} 成功编辑消息 ${targetChatId}/${targetMessageId}`);
-
-            deleteUserState(userId);
         } catch (err) {
             const errMsg = err.message || '';
             // 判断是否为"消息无法编辑"类错误（超过48小时、权限不足等）

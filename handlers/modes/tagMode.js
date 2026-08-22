@@ -364,7 +364,8 @@ async function handleTagMode(msg, state) {
         const names = splitTagInput(msg.text);
         if (names.length) {
             const allTags = await getTags();
-            for (const name of names) {
+            for (const rawName of names) {
+                const name = rawName.toUpperCase(); // 标签名统一大写
                 const exists = allTags.some(t => t.name.toLowerCase() === name.toLowerCase());
                 if (!exists) await addTag(name);
                 if (state.groupTagMode === 'add') {
@@ -462,8 +463,9 @@ async function handleTagMode(msg, state) {
                 return true;
             }
 
-            // 预览媒体组
-            const mediaList = await getMediaByGroupIdSorted(groupId);
+            // 预览媒体组（只展示第一组 subgroup=1 的媒体）
+            const allMediaList = await getMediaByGroupIdSorted(groupId);
+            const mediaList = allMediaList.filter(m => m.subgroup === 1);
             if (mediaList.length) {
                 const previewItems = mediaList.map(m => ({
                     type: m.media_type,
