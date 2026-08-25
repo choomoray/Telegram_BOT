@@ -34,7 +34,8 @@
 
    ```bash
    node index.js          # 正常模式
-   node index.js --test   # 测试模式（使用测试数据库）
+   node index.js --test   # 测试模式（使用测试数据库 TEST_MONGODB_URI）
+   node index.js test     # test-log 模式（额外生成 AI 可读临时日志，随 webui 启动）
    ```
 
 4. **运行单元测试：**
@@ -51,13 +52,13 @@
 
    浏览器访问 `http://127.0.0.1:9700`，登录密码见启动日志（或在 `.env` 中配置 `WEBUI_PASSWORD`）。
 
-6. **（可选）test 模式（临时日志）：**
+6. **（可选）test-log 模式（AI 可读临时日志）：**
 
    ```bash
    npm run start:test     # 或 node index.js test
    ```
 
-   在 webui 模式基础上，日志除正常写入 `logs/<年>/<月>/<周>/<日>.log` 外，额外复制一份到 `test-log/`（与 logs 平级，仅含 `log.log`、`error.log` 两个扁平文件），**每次启动时重置**这两个文件，关闭时不清理由 test 模式产生的数据。
+   在 webui 模式基础上，日志除正常写入 `logs/<年>/<月>/<周>/<日>.log` 外，额外复制一份到 `test-log/`（与 logs 平级，仅含 `log.log`、`error.log` 两个扁平文件），**供 AI 读取分析**。`test-log` 在**每次以 test 启动时初始化**（清空上次内容），关闭时不清理由 test 模式产生的数据。
 
 ---
 
@@ -82,6 +83,7 @@
 - [指令列表](#指令列表)
 - [数据库设计](#数据库设计)
 - [管理权限](#管理权限)
+- [版本历史](#版本历史)
 
 ---
 
@@ -247,16 +249,19 @@ const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, {
 **实现机制：**
 
 - 使用 `chalk` 库实现彩色输出：
-  - `error` → 红色背景，写入 `logs/error.log`
-  - `warn` → 黄色，写入 `logs/operation.log`
-  - `success` → 绿色，写入 `logs/operation.log`
-  - `info` → 蓝色，写入 `logs/operation.log`
+  - `error` → 红色背景
+  - `warn` → 黄色
+  - `success` → 绿色
+  - `info` → 蓝色
 - 使用 `async` 库的异步队列（`async.queue`）实现有序文件写入，避免并发写入错乱
 - 每条日志包含时间戳、日志级别、消息内容
 - 日志按 **年/月/周分级目录 + 按天拆文件** 存储：`logs/<年>/<月>/<ISO周>/<YYYY-MM-DD>.log`
-  （如 `logs/2026/08/2026-W36/2026-08-31.log`，ISO 周号周一为一周开始）
-- **test 模式**（`node index test`）：日志额外复制一份到 `test-log/log.log`、`test-log/error.log`（与 logs 平级的扁平临时日志，启动时重置）
-- **关闭清理**：收到关闭信号时立即删除"定时删除"的群组提示消息与消息回复模式遗留的"正在回复该消息"提示，并刷盘日志队列保证日志不丢失
+  （如 `logs/2026/08/2026-W36/2026-08-31.log`，ISO 周号周一为一周开始；所有级别合在当天文件，
+  每行自带 `[INFO]`/`[ERRO]` 级别标记）
+- **test 模式**（`node index test`）：日志额外复制一份到 `test-log/log.log`、`test-log/error.log`
+  （与 logs 平级的扁平临时日志，启动时重置，便于本次运行统一查看）
+- **关闭清理**：收到关闭信号时立即删除"定时删除"的群组提示消息与消息回复模式遗留的"正在回复该消息"提示，
+  并刷盘日志队列保证日志不丢失
 - 日志目录在首次写入时自动创建
 
 ---
@@ -271,7 +276,7 @@ const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, {
 |------|------|----------|
 | `extractMediaFromMessage(msg)` | 从消息中提取媒体信息 | 检测 photo/video/audio/document 类型，返回标准化媒体对象 |
 | `sendMediaAsReply(chatId, replyId, media)` | 回复发送单个媒体 | 按 media_type 调用不同的 send 方法，附带原文链接按钮 |
-| `sendMediaGroupAsReply(chatId, replyId, items, size)` | 批量发送媒体组 | 按 subgroup 分组发送，每批最多 10 条 |
+| `sendMediaGroupAsReply(chatId, replyId, items, size)` | 批量发送媒体组 | 按 subgroup 分组发送，每批最多 10 条；注释位置还原（Telegram 仅第一条可带注释，其余位置发送后二次编辑恢复） |
 | `clearMediaGroupState(userId, send, state)` | 清理收集状态并发送 | 将 `mediaCollection` 中的暂存媒体分批发出后清空 |
 | `sendMediaSubgroup(chatId, groupId, subgroup)` | 发送指定子组 | 直接查询数据库获取指定 subgroup 的媒体列表 |
 | `sendMediaGroup(chatId, groupId)` | 发送完整媒体组 | 遍历所有 subgroup 逐批发送 |
@@ -504,21 +509,30 @@ module.exports = {
 
 | 函数 | 功能 |
 |------|------|
-| `insertMedia(mediaRecord)` | 插入新的媒体记录 |
+| `insertMedia(mediaRecord)` | 插入新的媒体记录（支持 `group`/`channel` 双位置字段） |
 | `findMediaByFileUniqueId(fileUniqueId)` | 按 file_unique_id 精确查询 |
 | `findMediaByGroupId(groupId)` | 按 group_id 查询所有媒体 |
 | `getMaxSubgroup(groupId)` | 获取指定组的最大子组编号 |
 | `deleteMediaByFileUniqueId(fileUniqueId)` | 按 file_unique_id 删除 |
 | `updateMediaPassword(fileUniqueId, pwd)` | 更新媒体密码 |
+| `buildMediaLocation(chatId, messageId, chatType)` | 按聊天类型构建媒体位置（频道 → `channel`，群组 → `group`） |
+
+> **双位置字段：** `group: { chat_id, message_id }`（群组位置）与 `channel: { chat_id, message_id }`（频道位置）。
+> 频道转发媒体两项都有；给空媒体补注释时可据此获得双位置信息。
 
 #### db/message.js — 消息记录
 
 | 函数 | 功能 |
 |------|------|
-| `upsertMessage(messageRecord)` | 插入或更新消息记录 |
+| `upsertMessage(messageRecord)` | 插入或更新消息记录（支持 `tags`、`channel_forward` 字段） |
 | `findMessageByFileUniqueId(fileUniqueId)` | 按 file_unique_id 查询 |
 | `deleteMessageByFileUniqueId(fileUniqueId)` | 删除消息 |
 | `findMessagesByGroupId(groupId)` | 按组查询所有消息 |
+| `addTagToGroup(groupId, tag)` / `removeTagFromGroup(groupId, tag)` | 给媒体组所有消息添加/移除标签 |
+| `getGroupTags(groupId)` | 获取媒体组全部标签（并集） |
+
+> **channel_forward 字段：** `{ is_channel: true, channel_chat_id, channel_message_id, group_chat_id, group_message_id }`，
+> 标记消息为频道转发并记录群组中该消息的位置，回复时可选频道或群组。
 
 #### db/groupList.js — 媒体组汇总
 
@@ -606,15 +620,20 @@ module.exports = {
 收到群组媒体消息
     │
     ├── 提取媒体信息 (extractMediaFromMessage)
+    ├── 频道转发识别 (resolveChannelForwardInfo)
+    │   ├── 是（forward_origin / is_automatic_forward + 绑定库）→ 不重复收录，
+    │   │      记录 message.channel_forward（频道源 + 群组位置）+ media 双位置（group/channel）
+    │   └── 否 → 继续
+    │
     ├── 生成 group_id (generateGroupIdFromMessage)
     │
     ├── 去重检查
-    │   ├── 已存在 → 回复 "已收录"
+    │   ├── 已存在 → 回复 "已收录" + 原文链接
     │   └── 不存在 → 继续
     │
     ├── 数据库操作（三步写入）
     │   ├── upsertGroupList (组汇总，$inc)
-    │   ├── insertMedia (媒体记录)
+    │   ├── insertMedia (媒体记录，含 group/channel 位置)
     │   └── upsertMessage (消息记录，仅带文本媒体)
     │
     └── 失败时逆序回滚 (rollback)
@@ -678,17 +697,17 @@ for (const file of commandFiles) {
 | `/log` | log.js | 操作统计 | 从 log 集合聚合统计并展示 |
 | `/manage` | manage.js | 管理面板 | 进入 manage 模式，显示管理主菜单 |
 | `/mark` | mark.js | 标记模式 | 进入标记菜单（开始标记/标记记录/退出），标记记录支持按次数或时间排序分页展示 |
-| `/send` | send.js | 发送模式 | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录；成功后可打标签（按钮/手动输入，文本自动识别勾选） |
+| `/send` | send.js | 发送模式 | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录；成功后可打标签（按钮/手动输入，文本自动识别勾选），打标签时可一键"回复该消息"自动进入回复模式 |
 | `/tag` | tag.js | 标签模式 | 修改消息标签（预览媒体组后添加/删除，按钮翻页+手动输入）；编辑标签（添加/改名/删除/固定置顶，同步 message） |
-| `/media_group` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group |
-| `/media_hide` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide |
-| `/media_unhide` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide |
-| `/message_reply` | messageReply.js | 消息回复 | 进入 messageReply 模式，定位到频道转发消息时可选择回复在群组/频道 |
+| `/media_group [N]` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group；N=每组个数（1~10，退出时按 N 个一组打包发送） |
+| `/media_hide [N]` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide；N=每组个数（1~10） |
+| `/media_unhide [N]` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide；N=每组个数（1~10） |
+| `/message_reply [N]` | messageReply.js | 消息回复 | 进入 messageReply 模式，定位到频道转发消息时可选择回复在群组/频道；N>=2 时媒体按 N 个为一组打包为媒体组回复 |
 | `/message_reply_group` | messageReplyGroup.js | 消息回复（群组） | 直接回复在群组中（频道转发消息用群组位置，非转发消息用消息自身位置） |
 | `/message_reply_channel` | messageReplyChannel.js | 消息回复（频道） | 直接回复在频道中（无频道位置时回退消息自身位置） |
 | `/password` | password.js | 媒体密码 | 进入 password 模式，设置/更新媒体访问密码 |
-| `/random_pictures` | randomPictures.js | 随机图片 | 查询 media_type=photo 的随机结果 |
-| `/random_videos` | randomVideos.js | 随机视频 | 可按时长筛选，支持文字列表和实际视频发送 |
+| `/random_pictures [N]` | randomPictures.js | 随机图片 | 查询 media_type=photo 的随机结果，可指定数量 N（1~10） |
+| `/random_videos [N]` | randomVideos.js | 随机视频 | 可按时长筛选；可指定数量：N 1~10 直接发送 N 个视频媒体，N>=11 以标题列表展示 |
 | `/search` | search.js | 搜索模式 | 进入 search 模式，后续消息全部作为查询 |
 | `/setting` | setting.js | 全局设置 | 进入 setting 模式，显示设置面板内联键盘 |
 | `/transport` | transport.js | 搬运管理 | 进入 transport 模式，管理搬运链接的 CRUD |
@@ -833,6 +852,11 @@ handleGroupMessage()
     │
     ├── 判断消息包含媒体 ──► handleNewMediaMessage()
     │   │
+    │   ├── 频道转发识别（resolveChannelForwardInfo）
+    │   │   ├── 是（手动转发 / is_automatic_forward 自动转发 + 绑定库）
+    │   │   │   └── 不重复收录 → 记录 channel_forward + media 双位置
+    │   │   └── 否 → 正常收录流程
+    │   │
     │   ├── extractMediaFromMessage(msg)    → { file_id, file_unique_id, media_type }
     │   ├── generateGroupIdFromMessage(msg) → group_id
     │   │
@@ -841,7 +865,7 @@ handleGroupMessage()
     │   │   └── 不存在 → 继续
     │   │
     │   ├── upsertGroupList(group_id, 1)    → 组计数 +1
-    │   ├── insertMedia({...})              → 写入媒体记录
+    │   ├── insertMedia({...})              → 写入媒体记录（含 group/channel 位置）
     │   ├── upsertMessage({...})            → 写入消息记录
     │   ├── insertLog(MEDIA_SAVE, ...)      → 记录操作日志
     │   │
@@ -929,20 +953,20 @@ handleGroupEditedMessage()
 
 | 命令 | 功能 | 所属模块 |
 |------|------|----------|
-| `/media_group` | 媒体合并模式 | modes/mediaCollectMode.js |
-| `/media_hide` | 媒体遮罩模式（Spoiler） | modes/mediaCollectMode.js |
-| `/media_unhide` | 媒体去遮罩模式 | modes/mediaCollectMode.js |
-| `/message_reply` | 在群组/频道中回复指定消息（频道转发消息可先选择回复位置） | modes/messageReplyMode.js |
-| `/message_reply_group` | 在群组中回复指定消息 | modes/messageReplyMode.js |
-| `/message_reply_channel` | 在频道中回复指定消息 | modes/messageReplyMode.js |
+| `/media_group [N]` | 媒体合并模式（N=每组个数 1~10，退出时按 N 个一组打包发送） | modes/mediaCollectMode.js |
+| `/media_hide [N]` | 媒体遮罩模式（Spoiler，N=每组个数 1~10） | modes/mediaCollectMode.js |
+| `/media_unhide [N]` | 媒体去遮罩模式（N=每组个数 1~10） | modes/mediaCollectMode.js |
+| `/message_reply [N]` | 在群组/频道中回复指定消息（频道转发消息可先选择回复位置；N>=2 时媒体按 N 个一组打包为媒体组回复） | modes/messageReplyMode.js |
+| `/message_reply_group [N]` | 在群组中回复指定消息（支持 N 打包） | modes/messageReplyMode.js |
+| `/message_reply_channel [N]` | 在频道中回复指定消息（支持 N 打包） | modes/messageReplyMode.js |
 | `/search` | 进入搜索模式 | modes/searchMode.js |
 | `/delete` | 删除单一媒体 | modes/deleteMode.js |
 | `/delete_group` | 删除整个媒体组 | modes/deleteGroupMode.js |
 | `/clean` | 数据库清理模式 | modes/cleanMode.js |
-| `/random_videos` | 随机获取视频 | commands/randomVideos.js |
-| `/random_pictures` | 随机获取图片 | commands/randomPictures.js |
+| `/random_videos [N]` | 随机获取视频（N 1~10 直接发送视频媒体，N>=11 标题列表展示） | commands/randomVideos.js |
+| `/random_pictures [N]` | 随机获取图片（N 1~10 张） | commands/randomPictures.js |
 | `/mark` | 标记模式（开始标记/标记记录/退出） | modes/markMode.js |
-| `/send` | 发送模式（选择群组/频道发送并收录，可打标签） | modes/sendMode.js |
+| `/send` | 发送模式（选择群组/频道发送并收录；发送后先显示"正在发送中"再刷新为结果，可打标签；媒体组注释不在第一条时自动还原到正确位置并对该媒体打标签） | modes/sendMode.js |
 | `/tag` | 标签模式（修改消息标签 / 编辑标签，同步 message） | modes/tagMode.js |
 | `/edit` | 编辑消息文本或清空 | modes/editMode.js |
 | `/log` | 查看操作统计 | commands/log.js |
@@ -952,6 +976,8 @@ handleGroupEditedMessage()
 | `/password` | 媒体文件密码设置 | modes/passwordMode.js |
 | `/manage` | 管理面板（群组/用户/白名单） | modes/manage/ |
 | `/exit` | 退出当前模式 | commands/exit.js |
+
+> **标签展示时机：** 媒体组标签（📌）不会出现在查询结果列表里，而是在**查看媒体时**展示——发送的媒体组注释下方、以及"媒体过多询问是否发送/选择查看方式"的询问界面下方（无标签时不显示）。
 
 ### 群组/频道自动功能
 
@@ -972,8 +998,8 @@ handleGroupEditedMessage()
 
 | 集合 | 存储内容 | 文档数 |
 |------|----------|--------|
-| `message` | 消息元数据（文本、类型、标签） | 与带文本媒体对应 |
-| `media` | 媒体文件记录（file_id、密码） | 每条媒体一条记录 |
+| `message` | 消息元数据（文本、类型、标签、频道转发信息） | 与带文本媒体对应 |
+| `media` | 媒体文件记录（file_id、密码、group/channel 双位置） | 每条媒体一条记录 |
 | `group_list` | 媒体组汇总信息 | 每组一条 |
 | `channel_group` | 管理的群组/频道 | 每个群组/频道一条 |
 | `users` | 用户信息及权限 | 每个用户一条 |
@@ -1013,3 +1039,39 @@ handleGroupEditedMessage()
 1. 检查是否被封禁 → 是则拒绝
 2. 检查是否已加入关联频道 → 否则拒绝
 3. 通过 → 自动批准入群
+
+---
+
+## 版本历史
+
+### v0.5.1（当前）
+
+**发送模式 `/send`**
+- 发送媒体后先回复"♻️ 正在发送中，请耐心等待..."，完成后刷新同一条消息为结果（成功+标签界面 / 失败提示）
+- 媒体组注释不在第一条时，发送后自动编辑回正确位置（不再放临时文本再清空），并**对正确注释位置的媒体进入打标签流程**；注释同时在首条与其他位置时全部还原
+- 媒体组收集防重复/防丢失：3 秒收集窗口（覆盖 Telegram 分批发货）、定时器同步设置（根除双定时器竞态导致的重复发送/覆盖标签界面）、文件级守卫 + 组内去重 + 同用户 flush 串行化
+
+**消息回复 `/message_reply`**
+- 频道转发双位置：message 记录新增 `channel_forward`（`is_channel` + 频道源位置 + 群组位置），
+  识别含 `is_automatic_forward` + 绑定库 `channel_group`；media 记录新增 `group`/`channel` 双位置
+- 定位到**频道转发消息**时弹出"👥 回复在群组 / 📢 回复在频道"选择；非转发消息直接用消息自身位置
+- 新增 `/message_reply_group`（直接回复在群组）、`/message_reply_channel`（直接回复在频道）
+- 回复收录新消息后自动进入打标签流程
+- 修复退出/切换模式/超时未删除"💬 正在回复该消息"提示（`_onExit` 全链路保留 + `cleanPreviousMode` 调用 `_onExit`）
+
+**标签 / 编辑**
+- 手动添加标签自动生成并统一大写（已有）；重命名标签也统一转大写
+- 给空媒体/频道转发媒体补注释时，从 media 双位置自动补全 `channel_forward`，补完立即可选回复位置
+
+**日志系统**
+- 年/月/周（ISO 周号，周一为周起始）分级目录 + 按天拆文件：`logs/<年>/<月>/<周>/<日>.log`
+- **test 模式**（`node index test`）：启动 Web UI 且日志额外复制到 `test-log/log.log`、`test-log/error.log`（启动时重置）
+- **关闭清理**：收到关闭信号时立即删除定时删除消息与遗留提示消息，日志队列刷盘后再退出
+
+### v0.5.0
+
+- 标签系统重构：翻页展示 / 重要置顶 / 使用次数排序 / 手动输入 / 文本自动识别勾选
+- `/send` 发送模式：选择群组/频道发送并收录，发送后可打标签；媒体组文本合并到首条
+- `/tag` 标签模式：修改消息标签（预览第一组）+ 编辑标签（添加/改名/删除/固定置顶，同步 message）
+- 频道转发媒体归属转移至群组；媒体组文本位置还原
+- Web UI 管理面板（AI 翻译数据库操作、实时日志 SSE）
