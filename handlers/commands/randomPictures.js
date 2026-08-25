@@ -5,6 +5,7 @@ const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { getSettings } = require('../../db/settings');
 const { sendMediaGroup } = require('../../utils/sendMedia');
 const { insertLog } = require('../../db/log');
+const { getNumberArg } = require('../../utils/commandArgs');
 
 async function handleRandomPicturesCommand(userId, msg) {
     const chatId = msg.chat.id;
@@ -27,6 +28,13 @@ async function handleRandomPicturesCommand(userId, msg) {
         }
     } catch (err) {
         logger.warn(`获取随机图片设置失败: ${err.message}`);
+    }
+
+    // 参数覆盖：/random_pictures N（1 <= N <= 10）→ 展示 N 张图片（媒体模式）
+    const argNum = getNumberArg(msg);
+    if (argNum !== null) {
+        pictureCount = Math.min(10, Math.max(1, argNum));
+        logger.info(`用户 ${userId} /random_pictures 参数 ${argNum} → 展示 ${pictureCount} 张`);
     }
 
     let processingMsg;

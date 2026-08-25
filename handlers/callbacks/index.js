@@ -38,6 +38,7 @@ const callbackHandlers = {
     sendpage: sendMode.handleCallback,
     sendtag: sendMode.handleTagCallback,
     sendtag_done: sendMode.handleTagCallback,
+    sendtag_reply: sendMode.handleTagCallback,
     sendtag_page: sendMode.handleTagCallback,
     tagm: tagMode.handleCallback,
     tagmsg: tagMode.handleCallback,
@@ -74,7 +75,8 @@ const callbackHandlers = {
     transport: async (query) => {
         await transportMode.handleCallback(query);
     },
-    mreply_loc: messageReplyMode.handleLocationCallback
+    mreply_loc: messageReplyMode.handleLocationCallback,
+    mreply_switch: messageReplyMode.handleSwitchLocationCallback
 };
 
 async function handleCallbackQuery(query) {

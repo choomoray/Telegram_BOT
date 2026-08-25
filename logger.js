@@ -36,9 +36,9 @@ function onLog(cb) {
 const LOG_ROOT = path.join(__dirname, 'logs');
 fs.mkdir(LOG_ROOT, { recursive: true }).catch(() => { });
 
-// ---------------- test 模式临时日志（node index test） ----------------
-// test-log 与 logs 平级双根；test-log 下只有 log.log / error.log 两个扁平文件，
-// 每次以 test 启动时重置（清空），关闭时不清理（仅启动时初始化）
+// ---------------- test-log 模式临时日志（node index test） ----------------
+// test-log 与 logs 平级双根，供 AI 读取分析；test-log 下只有 log.log / error.log 两个扁平文件，
+// 每次以 test 启动时初始化（清空重写），关闭时不清理（仅启动时初始化）
 const TEST_MODE = process.argv.includes('test');
 const TEST_LOG_DIR = path.join(__dirname, 'test-log');
 const TEST_LOG_FILES = {

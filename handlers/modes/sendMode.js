@@ -128,7 +128,8 @@ async function handleCallback(query) {
             });
         }
 
-        await bot.editMessageText(`✅ 已选择：${name}\n请发送要发送的消息（支持单个媒体或媒体组）：`, {
+        const icon = group ? (group.type === 'channel' ? '📢' : '👥') : '👥';
+        await bot.editMessageText(`✅ 已选择：${icon} ${name}\n请发送要发送的消息（支持单个媒体或媒体组）：`, {
             chat_id: userId,
             message_id: query.message.message_id
         });
@@ -149,7 +150,10 @@ async function renderTagKeyboard(userId, messageId, groupId, page = 1) {
         pagePrefix: 'sendtag_page',
         page,
         marker: { names: currentSet, on: '✅', off: '+' },
-        extraRows: [[{ text: '✅ 完成', callback_data: 'sendtag_done' }]]
+        extraRows: [
+            [{ text: '✅ 完成', callback_data: 'sendtag_done' }],
+            [{ text: '🔁 回复该消息', callback_data: 'sendtag_reply' }]
+        ]
     });
     return result;
 }
@@ -169,6 +173,30 @@ async function handleTagCallback(query) {
             deleteUserState(userId);
         }
         logger.info(`用户 ${userId} 完成发送模式标签操作，退出发送模式`);
+        return;
+    }
+
+    // 完成打标签并自动进入回复模式，回复目标为当前打标签的媒体组
+    if (data === 'sendtag_reply') {
+        const groupId = rawState ? rawState.lastGroupId : null;
+        if (!groupId) {
+            await bot.answerCallbackQuery(query.id, { text: '❌ 缺少媒体组信息' });
+            return;
+        }
+        await bot.answerCallbackQuery(query.id, { text: '🔁 正在进入回复模式...' });
+        await bot.editMessageText('🔁 已完成标签操作，正在进入回复模式...', {
+            chat_id: userId,
+            message_id: query.message.message_id
+        }).catch(() => { });
+        if (rawState && rawState.mode === 'send') {
+            deleteUserState(userId);
+        }
+        const { autoEnterReplyFromTag } = require('../modes/messageReplyMode');
+        const result = await autoEnterReplyFromTag(userId, groupId, query.message.message_id);
+        if (!result.ok) {
+            await bot.sendMessage(userId, result.error).catch(() => { });
+        }
+        logger.info(`用户 ${userId} 打标签后点击回复该消息: group_id=${groupId}`);
         return;
     }
 
@@ -255,7 +283,9 @@ async function sendSingleMediaToChat(chatId, mediaInfo) {
 }
 
 /**
- * 收录发送的媒体（media + message + group_list），group_id 按目标群组新建
+ * 收录发送的媒体（media + message），group_id 按目标群组新建
+ * 注意：group_list 的计数/删除标记由调用方统一更新（每组一次），
+ * 避免媒体组内各条媒体并发 upsert 同一 group_id 触发唯一索引冲突
  */
 async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo, targetType) {
     const { fileUniqueId, type, caption, videoTime } = mediaInfo;
@@ -273,9 +303,6 @@ async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo, target
         video_time: videoTime,
         ...location
     });
-
-    await upsertGroupList(groupId);
-    await setGroupDelete(groupId, 0);
 
     // 只有带文本（caption）的媒体才收录至 message
     if (caption) {
@@ -436,12 +463,15 @@ async function flushMediaGroup(userId, mediaGroupId, items, processingMsgId) {
         return;
     }
 
-    for (let i = 0; i < sentMessages.length; i++) {
-        const sent = sentMessages[i];
+    // 并行落库：每条媒体独立插入（media + message），全部完成后统一更新 group_list（一次 +N）
+    // 相比逐条串行 await（每条 3~4 次 DB 往返），媒体组越大提速越明显
+    await Promise.all(sentMessages.map((sent, i) => {
         const original = newItems[i];
-        if (!original) continue;
-        await recordSentMedia(sent, targetChatId, groupId, original, targetType);
-    }
+        if (!original) return null;
+        return recordSentMedia(sent, targetChatId, groupId, original, targetType);
+    }));
+    await upsertGroupList(groupId, newItems.length);
+    await setGroupDelete(groupId, 0);
 
     // 发送完成并已把注释还原到正确位置后，取"正确注释位置"（组内第一条带注释的媒体）的注释进入打标签流程
     const captionIndex = newItems.findIndex(item => item.caption && String(item.caption).trim());
@@ -617,6 +647,9 @@ async function handleSendMode(msg, state) {
     }
 
     await recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo, state.targetType || 'group');
+    // group_list 计数与删除标记（单条媒体，每组一次）
+    await upsertGroupList(groupId);
+    await setGroupDelete(groupId, 0);
     await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}`, groupId, mediaInfo.caption, processingMsgId);
     logger.info(`用户 ${userId} 发送单个媒体到 ${targetChatId}，group_id=${groupId}`);
     return true;

@@ -12,10 +12,66 @@ const { upsertMessage } = require('../../db/message');
 const { upsertGroupList, setGroupDelete } = require('../../db/groupList');
 const { extractMediaFromMessage, sendMediaAsReply, sendMediaGroupAsReply } = require('../../media');
 const { removeLevelSuffix } = require('../../utils/levelExtractor');
+const { insertLog } = require('../../db/log');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
+
+// ---------- 图标常量（与选择按钮/群组列表保持一致） ----------
+const CHANNEL_ICON = '📢';
+const GROUP_ICON = '👥';
+
+function targetDisplay(target) {
+    return target === 'channel'
+        ? { icon: CHANNEL_ICON, label: '频道' }
+        : { icon: GROUP_ICON, label: '群组' };
+}
+
+/**
+ * 由 message 记录一次性解析"群组/频道"双位置（频道转发消息时两者都有，否则为 null）
+ * @returns {{ group: {chatId:number,messageId:number}|null, channel: {chatId:number,messageId:number}|null, isForwarded: boolean }}
+ */
+function deriveReplyLocations(messageDoc) {
+    const fwd = messageDoc.channel_forward;
+    const isForwarded = !!(fwd && fwd.is_channel);
+    const group = (isForwarded && fwd.group_chat_id && fwd.group_message_id)
+        ? { chatId: fwd.group_chat_id, messageId: fwd.group_message_id }
+        : null;
+    const channel = (isForwarded && fwd.channel_chat_id && fwd.channel_message_id)
+        ? { chatId: fwd.channel_chat_id, messageId: fwd.channel_message_id }
+        : null;
+    return { group, channel, isForwarded };
+}
+
+/**
+ * 就绪状态下的"更改回复位置"按钮：仅当群组/频道双位置都存在（频道转发消息）时提供。
+ * 按钮始终指向当前选择的反方向：选了群组 → "更改为发送至📢频道"，选了频道 → "更改为发送至👥群组"
+ * @param {Object} locations - deriveReplyLocations 的返回值
+ * @param {string} currentTarget - 当前回复位置（'group' | 'channel'）
+ */
+function buildReadySwitchKeyboard(locations, currentTarget) {
+    if (!locations || !locations.group || !locations.channel) return undefined;
+    const switchTarget = currentTarget === 'channel' ? 'group' : 'channel';
+    const { icon, label } = targetDisplay(switchTarget);
+    return {
+        inline_keyboard: [[
+            { text: `🔄 更改为发送至${icon} ${label}`, callback_data: `mreply_switch:${switchTarget}` }
+        ]]
+    };
+}
+
+/**
+ * 解析目标聊天类型（channel/group），用于非转发消息回退时正确显示图标
+ */
+async function resolveChatType(chatId) {
+    const { getChannelGroupById } = require('../../db/channelGroup');
+    const info = await getChannelGroupById(chatId);
+    return (info && info.type) || 'group';
+}
 
 // ---------- 用户隔离上下文 ----------
 const userContexts = new Map();
+
+// 打包模式（/message_reply N）安静窗口：最后一条媒体后等这么久冲刷余量
+const PACK_FLUSH_DELAY = 3000;
 
 // 定期清理已退出模式的用户上下文
 setInterval(() => {
@@ -36,7 +92,8 @@ function getContext(userId) {
             targetPendingGroups: new Map(),
             targetProcessedGroups: new Set(),
             targetQuerySent: new Set(),
-            targetQueryMsgIds: new Map()
+            targetQueryMsgIds: new Map(),
+            packBuffer: { items: [], timer: null } // 打包模式缓冲：{ items, timer }
         });
     }
     return userContexts.get(userId);
@@ -56,6 +113,9 @@ function clearUserContext(userId) {
                 clearTimeout(groupData.timer);
             }
         }
+        if (ctx.packBuffer) {
+            clearTimeout(ctx.packBuffer.timer);
+        }
         userContexts.delete(userId);
     }
 }
@@ -65,9 +125,33 @@ function getMessageReplyContext(userId) {
     return userContexts.get(userId);
 }
 
+/**
+ * 构造消息回复模式的退出清理函数（/exit、超时退出、自动进入等路径共用）：
+ * 打包模式冲刷剩余媒体 → 删除群组/频道提示消息 → 清理用户上下文
+ */
+function buildReplyModeExitHandler() {
+    return async (uid) => {
+        // 打包模式：退出前冲刷剩余媒体
+        await flushPackOnExit(uid);
+        // 清理上下文和可能的群组提示消息
+        const rawState = require('../../states').getRawUserState(uid);
+        if (rawState && rawState.hintMsgInfo) {
+            try {
+                await bot.deleteMessage(rawState.hintMsgInfo.chat_id, rawState.hintMsgInfo.message_id);
+            } catch (err) {
+                logger.warn(`退出时删除群组提示消息失败: ${err.message}`);
+            }
+        }
+        clearUserContext(uid);
+    };
+}
+
 async function exitMessageReplyMode(userId, sendExitMessage = true) {
     const rawState = getRawUserState(userId);
     if (rawState && rawState.mode === 'message_reply') {
+        // 打包模式（/message_reply N）：退出前冲刷剩余未打包的媒体
+        await flushPackOnExit(userId);
+
         if (rawState.hintMsgInfo) {
             try {
                 await bot.deleteMessage(rawState.hintMsgInfo.chat_id, rawState.hintMsgInfo.message_id);
@@ -131,6 +215,19 @@ function resolveReplyLocation(messageDoc, replyTarget) {
 /** 发送群组提示消息并进入就绪状态（使用已解析的回复位置） */
 async function finishEnterReadyState(userId, messageDoc, processingMsgId, resolved) {
     const targetGroupId = messageDoc.group_id;
+    const locations = deriveReplyLocations(messageDoc);
+
+    // 确定当前目标类型（用于显示图标）：优先按双位置匹配，非转发回退按实际聊天类型
+    let target;
+    if (locations.channel && resolved.chatId === locations.channel.chatId && resolved.messageId === locations.channel.messageId) {
+        target = 'channel';
+    } else if (locations.group && resolved.chatId === locations.group.chatId && resolved.messageId === locations.group.messageId) {
+        target = 'group';
+    } else {
+        target = await resolveChatType(resolved.chatId);
+    }
+    const { icon, label } = targetDisplay(target);
+    const readyText = `✅ 已选择回复在${icon} ${label}，现在可以向我发送消息了`;
 
     let hintMsg;
     try {
@@ -142,9 +239,10 @@ async function finishEnterReadyState(userId, messageDoc, processingMsgId, resolv
         hintMsg = null;
     }
 
-    await bot.editMessageText('✅ 找到了，现在可以向我发送消息了', {
+    await bot.editMessageText(readyText, {
         chat_id: userId,
-        message_id: processingMsgId
+        message_id: processingMsgId,
+        reply_markup: buildReadySwitchKeyboard(locations, target)
     });
 
     // 保留 _onExit（退出时删除群组/频道提示消息、清理上下文）
@@ -156,6 +254,10 @@ async function finishEnterReadyState(userId, messageDoc, processingMsgId, resolv
         targetChatId: resolved.chatId,
         targetMessageId: resolved.messageId,
         hintMsgInfo: hintMsg ? { chat_id: resolved.chatId, message_id: hintMsg.message_id } : null,
+        replyLocations: locations,          // 供"发送至群组/频道"切换按钮使用
+        readyMsgId: processingMsgId,        // 就绪确认消息（回复成功后移除切换按钮）
+        readyText,                          // 就绪确认消息文本
+        packSize: (prevRaw && prevRaw.packSize) || null, // 保留打包模式数量
         _onExit: (prevRaw && prevRaw._onExit) || (async () => { }),
         lastActivity: Date.now()
     });
@@ -203,6 +305,7 @@ async function enterReplyReadyState(userId, messageDoc, processingMsgId, replyTa
             targetGroupId: messageDoc.group_id,
             pendingMessageDoc: messageDoc,
             processingMsgId,
+            packSize: (prevRaw && prevRaw.packSize) || null, // 保留打包模式数量
             _onExit: (prevRaw && prevRaw._onExit) || (async () => { }),
             lastActivity: Date.now()
         });
@@ -212,6 +315,50 @@ async function enterReplyReadyState(userId, messageDoc, processingMsgId, replyTa
 
     const resolved = resolveReplyLocation(messageDoc, replyTarget);
     await finishEnterReadyState(userId, messageDoc, processingMsgId, resolved);
+}
+
+/**
+ * 打标签完成后"回复该消息"：完成打标签后自动进入消息回复模式，
+ * 回复目标就是打标签的这个媒体（跳过用户重新发送媒体的定位步骤）。
+ * 频道转发消息（有双位置）直接进入"选择回复至频道/群组"界面，其余直接进入就绪状态。
+ * @param {number} userId - 用户ID
+ * @param {string} groupId - 打标签的媒体组 ID
+ * @param {number} baseMsgId - 当前标签消息 ID（将被编辑为回复模式界面）
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+async function autoEnterReplyFromTag(userId, groupId, baseMsgId) {
+    try {
+        // 打标签的媒体必然带文本（无文本不进入打标签流程），因此一定有 message 记录
+        const messageCol = getCollection(COLLECTIONS.MESSAGE);
+        const messageDoc = await messageCol.findOne({ group_id: groupId }, { sort: { message_id: 1 } });
+        if (!messageDoc) {
+            return { ok: false, error: '❌ 未找到该媒体的消息记录，无法回复' };
+        }
+
+        // 建立 message_reply 状态（复用进入回复模式的退出清理逻辑）
+        setUserState(userId, {
+            mode: 'message_reply',
+            lastActivity: Date.now(),
+            step: 'waiting_for_target',
+            replyTarget: null,      // null：频道转发消息时询问回复位置
+            packSize: null,
+            targetGroupId: null,
+            targetChatId: null,
+            targetMessageId: null,
+            processingMsgId: null,
+            hintMsgInfo: null,
+            _onExit: buildReplyModeExitHandler()
+        });
+
+        // 直接定位目标：频道转发消息进入"选择回复至频道/群组"界面，其余直接进入就绪状态
+        await enterReplyReadyState(userId, messageDoc, baseMsgId, null);
+        insertLog(13, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
+        logger.info(`用户 ${userId} 打标签后自动进入回复模式: group_id=${groupId}`);
+        return { ok: true };
+    } catch (err) {
+        logger.error(`打标签后自动进入回复模式失败: ${err.message}`);
+        return { ok: false, error: '❌ 进入回复模式失败，请重试' };
+    }
 }
 
 /** 处理"回复在群组/频道"选择回调（mreply_loc:group | mreply_loc:channel） */
@@ -227,6 +374,9 @@ async function handleLocationCallback(query) {
     const target = (data.split(':')[1] === 'channel') ? 'channel' : 'group';
     const messageDoc = rawState.pendingMessageDoc;
     const resolved = resolveReplyLocation(messageDoc, target);
+    const locations = deriveReplyLocations(messageDoc);
+    const { icon, label } = targetDisplay(target);
+    const readyText = `✅ 已选择回复在${icon} ${label}，现在可以向我发送消息了`;
 
     let hintMsg;
     try {
@@ -238,9 +388,10 @@ async function handleLocationCallback(query) {
         hintMsg = null;
     }
 
-    await bot.editMessageText(`✅ 已选择回复在${target === 'group' ? '群组' : '频道'}，现在可以向我发送消息了`, {
+    await bot.editMessageText(readyText, {
         chat_id: userId,
-        message_id: query.message.message_id
+        message_id: query.message.message_id,
+        reply_markup: buildReadySwitchKeyboard(locations, target)
     });
 
     // 保留 _onExit（退出时删除群组/频道提示消息、清理上下文）
@@ -252,12 +403,182 @@ async function handleLocationCallback(query) {
         targetChatId: resolved.chatId,
         targetMessageId: resolved.messageId,
         hintMsgInfo: hintMsg ? { chat_id: resolved.chatId, message_id: hintMsg.message_id } : null,
+        replyLocations: locations,          // 供"发送至群组/频道"切换按钮使用
+        readyMsgId: query.message.message_id,
+        readyText,
+        packSize: (prevRaw && prevRaw.packSize) || null, // 保留打包模式数量
         _onExit: (prevRaw && prevRaw._onExit) || (async () => { }),
         lastActivity: Date.now()
     });
 
-    await bot.answerCallbackQuery(query.id, { text: `已选择回复在${target === 'group' ? '群组' : '频道'}` });
+    await bot.answerCallbackQuery(query.id, { text: `已选择回复在${icon}${label}` });
     logger.info(`用户 ${userId} 选择回复位置: ${target}`);
+}
+
+/**
+ * 处理就绪状态下的"发送至群组/频道"切换回调（mreply_switch:group | mreply_switch:channel）
+ * 用于选错回复位置后随时更正：删除旧聊天提示 → 新聊天发提示 → 更新状态 → 刷新确认消息
+ */
+async function handleSwitchLocationCallback(query) {
+    const data = query.data;
+    const userId = query.from.id;
+    const rawState = getRawUserState(userId);
+    if (!rawState || rawState.mode !== 'message_reply' || rawState.step !== 'ready') {
+        await bot.answerCallbackQuery(query.id, { text: '❌ 状态已过期，请重新发送媒体' });
+        return;
+    }
+
+    const target = (data.split(':')[1] === 'channel') ? 'channel' : 'group';
+    const locations = rawState.replyLocations;
+    const loc = locations && locations[target];
+    if (!loc) {
+        await bot.answerCallbackQuery(query.id, { text: '❌ 该位置不存在' });
+        return;
+    }
+    if (rawState.targetChatId === loc.chatId && rawState.targetMessageId === loc.messageId) {
+        await bot.answerCallbackQuery(query.id, { text: '已是当前回复位置' });
+        return;
+    }
+
+    // 删除旧聊天中的提示消息（💬 Der包正在回复该消息）
+    if (rawState.hintMsgInfo) {
+        try {
+            await bot.deleteMessage(rawState.hintMsgInfo.chat_id, rawState.hintMsgInfo.message_id);
+        } catch (err) {
+            logger.warn(`切换位置时删除旧提示消息失败: ${err.message}`);
+        }
+    }
+
+    // 在新聊天中发送提示消息
+    let hintMsg = null;
+    try {
+        hintMsg = await bot.sendMessage(loc.chatId, '💬 Der包正在回复该消息', {
+            reply_to_message_id: loc.messageId
+        });
+    } catch (err) {
+        logger.warn(`切换位置时发送提示消息失败: ${err.message}`);
+    }
+
+    const { icon, label } = targetDisplay(target);
+    const readyText = `✅ 已选择回复在${icon} ${label}，现在可以向我发送消息了`;
+    // 保留 _onExit、replyLocations、readyMsgId 等既有字段
+    const prevRaw = getRawUserState(userId);
+    setUserState(userId, {
+        ...prevRaw,
+        targetChatId: loc.chatId,
+        targetMessageId: loc.messageId,
+        hintMsgInfo: hintMsg ? { chat_id: loc.chatId, message_id: hintMsg.message_id } : null,
+        readyText,
+        lastActivity: Date.now()
+    });
+
+    await bot.editMessageText(readyText, {
+        chat_id: userId,
+        message_id: query.message.message_id,
+        reply_markup: buildReadySwitchKeyboard(locations, target)
+    }).catch(() => { });
+
+    await bot.answerCallbackQuery(query.id, { text: `已切换为回复在${icon}${label}` });
+    logger.info(`用户 ${userId} 切换回复位置: ${target} -> chat=${loc.chatId}/${loc.messageId}`);
+}
+
+/**
+ * 回复成功后移除就绪确认消息上的切换按钮
+ * （回复并进入打标签流程后 mode 会变为 send，切换按钮将失效，先移除避免"点了没反应"；
+ *   仅当就绪消息确实带切换按钮（双位置存在）时才编辑）
+ */
+async function removeReadySwitchButtons(userId) {
+    const st = getRawUserState(userId);
+    if (st && st.readyMsgId && st.replyLocations && st.replyLocations.group && st.replyLocations.channel) {
+        await bot.editMessageText(st.readyText || '✅ 已选择回复位置', {
+            chat_id: userId,
+            message_id: st.readyMsgId
+        }).catch(() => { });
+    }
+}
+
+// ---------------- 打包模式（/message_reply N） ----------------
+
+/**
+ * 冲刷打包缓冲中的一组媒体为媒体组回复（不进入打标签流程，保持打包会话）
+ */
+async function flushPackGroup(userId, state, items, userMsgId) {
+    await processMediaGroupReply(
+        userId,
+        state.targetChatId,
+        state.targetMessageId,
+        state.targetGroupId,
+        items,
+        userMsgId,
+        { withTagging: false }
+    );
+}
+
+/**
+ * 打包模式收集：所有媒体（含相册成员）进入打包缓冲，
+ * 满 packSize 立即作为媒体组回复；最后一条媒体后安静 PACK_FLUSH_DELAY 冲刷余量
+ */
+async function handlePackMedia(userId, msg, mediaInfo, state, userMsgId) {
+    const ctx = getContext(userId);
+    const packSize = state.packSize;
+    const buffer = ctx.packBuffer || (ctx.packBuffer = { items: [], timer: null });
+
+    // 缓冲内去重：同一文件不重复收集（防止相册重复投递导致条目翻倍）
+    if (buffer.items.some(it => it.fileUniqueId === mediaInfo.fileUniqueId)) {
+        logger.info(`文件 ${mediaInfo.fileUniqueId} 已在打包缓冲中，忽略重复`);
+        return;
+    }
+    buffer.items.push({ ...mediaInfo, message_id: msg.message_id });
+    logger.info(`用户 ${userId} 打包模式收集媒体 ${buffer.items.length}/${packSize}`);
+
+    // 重新武装安静窗口定时器（最后一条消息后 PACK_FLUSH_DELAY 冲刷余量）
+    clearTimeout(buffer.timer);
+    buffer.timer = setTimeout(() => {
+        const items = buffer.items.splice(0);
+        if (items.length > 0) {
+            flushPackGroup(userId, state, items, userMsgId).catch(err =>
+                logger.error(`打包模式静默冲刷失败: ${err.message}`));
+        }
+    }, PACK_FLUSH_DELAY);
+
+    // 满 packSize：立即冲刷一组，余量由重新武装的定时器继续等待
+    while (buffer.items.length >= packSize) {
+        clearTimeout(buffer.timer);
+        buffer.timer = null;
+        const chunk = buffer.items.splice(0, packSize);
+        await flushPackGroup(userId, state, chunk, userMsgId);
+        if (buffer.items.length > 0) {
+            clearTimeout(buffer.timer);
+            buffer.timer = setTimeout(() => {
+                const items = buffer.items.splice(0);
+                if (items.length > 0) {
+                    flushPackGroup(userId, state, items, userMsgId).catch(err =>
+                        logger.error(`打包模式余量冲刷失败: ${err.message}`));
+                }
+            }, PACK_FLUSH_DELAY);
+        }
+    }
+}
+
+/**
+ * 退出消息回复模式前冲刷打包缓冲的剩余媒体（/exit、超时、模式内错误退出都会走到）
+ */
+async function flushPackOnExit(userId) {
+    try {
+        const rawState = getRawUserState(userId);
+        if (!rawState || rawState.mode !== 'message_reply' || !rawState.packSize || rawState.packSize < 2) return;
+        if (rawState.step !== 'ready' || !rawState.targetChatId) return;
+        const ctx = getContext(userId);
+        const buffer = ctx.packBuffer;
+        if (!buffer || buffer.items.length === 0) return;
+        clearTimeout(buffer.timer);
+        buffer.timer = null;
+        const items = buffer.items.splice(0);
+        logger.info(`用户 ${userId} 退出消息回复模式，冲刷打包缓冲 ${items.length} 个媒体`);
+        await flushPackGroup(userId, rawState, items, items[0].message_id);
+    } catch (err) {
+        logger.error(`退出时冲刷打包缓冲失败: ${err.message}`);
+    }
 }
 
 async function recordReplyMessage(sentMsg, targetGroupId) {
@@ -325,8 +646,15 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         ...location
     });
 
-    await upsertGroupList(targetGroupId);
-    await setGroupDelete(targetGroupId, 0);
+    // 并行更新：group_list 计数/删除标记 + message 收录（不同集合、互不依赖）
+    const updates = [
+        upsertGroupList(targetGroupId),
+        setGroupDelete(targetGroupId, 0)
+    ];
+    if (caption) {
+        updates.push(recordReplyMessage(sentMsg, targetGroupId));
+    }
+    await Promise.all(updates);
 
     const countKey = `${targetGroupId}:${fileUniqueId}`;
     if (!ctx.countedMediaSet.has(countKey)) {
@@ -334,9 +662,8 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         logger.info(`用户发送的媒体已计入 group_list，并加入 Set: key=${countKey}`);
     }
 
-    if (caption) {
-        await recordReplyMessage(sentMsg, targetGroupId);
-    }
+    // 回复成功后移除就绪消息上的切换按钮（避免进入打标签流程后按钮失效）
+    await removeReadySwitchButtons(userId);
 
     // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）
     const { sendSuccessWithTags } = require('./sendMode');
@@ -345,7 +672,19 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
     logger.info(`用户 ${userId} 已回复媒体到群组 ${targetChatId}/${targetMessageId}，新 subgroup=${newSubgroup}`);
 }
 
-async function processMediaGroupReply(userId, targetChatId, targetMessageId, targetGroupId, mediaItems, userMsgId) {
+/**
+ * 回复媒体组并收录
+ * @param {number} userId - 用户ID
+ * @param {number} targetChatId - 回复目标聊天
+ * @param {number} targetMessageId - 回复目标消息
+ * @param {string} targetGroupId - 目标媒体组
+ * @param {Array} mediaItems - 媒体项
+ * @param {number} userMsgId - 用户消息ID（用于回复提示）
+ * @param {Object} [options] - { withTagging: boolean }
+ *   withTagging=false：打包模式/退出冲刷使用——只回复并收录，不进入打标签流程
+ *   （打标签会把 mode 改成 send/tagging，会打断打包会话）
+ */
+async function processMediaGroupReply(userId, targetChatId, targetMessageId, targetGroupId, mediaItems, userMsgId, options = {}) {
     const ctx = getContext(userId);
     if (mediaItems.length === 0) return;
 
@@ -382,13 +721,16 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
         return;
     }
 
-    for (let i = 0; i < sentMessages.length; i++) {
-        const sentMsg = sentMessages[i];
+    // 一次解析目标聊天类型，整组复用（避免每条媒体各查一次 channel_group）
+    const chatType = await resolveChatType(targetChatId);
+
+    // 并行落库：每条媒体独立插入（media + message），相比逐条串行 await 显著减少 DB 往返
+    await Promise.all(sentMessages.map(async (sentMsg, i) => {
         const originalItem = newItems[i];
-        if (!originalItem) continue;
+        if (!originalItem) return;
 
         // 回复目标位置写入 media（目标为频道存 channel，为群组存 group）
-        const location = await buildMediaLocation(targetChatId, sentMsg.message_id, null);
+        const location = await buildMediaLocation(targetChatId, sentMsg.message_id, chatType);
 
         await insertMedia({
             group_id: targetGroupId,
@@ -409,17 +751,27 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
         if (originalItem.caption) {
             await recordReplyMessage(sentMsg, targetGroupId);
         }
-    }
+    }));
 
-    for (let i = 0; i < newItems.length; i++) {
-        await upsertGroupList(targetGroupId);
-    }
+    // group_list 统一计数（一次 +N，替代原 N 次串行 upsert）
+    await upsertGroupList(targetGroupId, newItems.length);
     await setGroupDelete(targetGroupId, 0);
 
-    // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）
-    const firstCaption = newItems.length ? (newItems[0].caption || '') : '';
-    const { sendSuccessWithTags } = require('./sendMode');
-    await sendSuccessWithTags(userId, `✅ 已回复媒体组 (${newItems.length} 个)`, targetGroupId, firstCaption);
+    if (options.withTagging === false) {
+        // 打包模式/退出冲刷：仅提示，不进入打标签流程（避免打断打包会话）
+        await bot.sendMessage(userId, `✅ 已回复媒体组 (${newItems.length} 个)`, {
+            reply_to_message_id: userMsgId,
+            allow_sending_without_reply: true
+        }).catch(() => { });
+    } else {
+        // 回复成功后移除就绪消息上的切换按钮（避免进入打标签流程后按钮失效）
+        await removeReadySwitchButtons(userId);
+
+        // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）
+        const firstCaption = newItems.length ? (newItems[0].caption || '') : '';
+        const { sendSuccessWithTags } = require('./sendMode');
+        await sendSuccessWithTags(userId, `✅ 已回复媒体组 (${newItems.length} 个)`, targetGroupId, firstCaption);
+    }
 
     logger.info(`用户 ${userId} 已回复媒体组到群组 ${targetChatId}/${targetMessageId}，新 subgroup=${newSubgroup}，共 ${newItems.length} 个媒体`);
 }
@@ -720,6 +1072,14 @@ async function handleMessageReplyMode(msg, state) {
             return true;
         }
 
+        // 打包模式（/message_reply N，N >= 2）：所有媒体进入打包缓冲，
+        // 满 N 个立即作为媒体组回复；安静窗口/退出时冲刷余量
+        if (state.packSize && state.packSize >= 2) {
+            await handlePackMedia(userId, msg, mediaInfo, state, userMsgId);
+            updateUserActivity(userId);
+            return true;
+        }
+
         // 在就绪状态，支持发送媒体组作为回复
         if (msg.media_group_id) {
             const groupKey = `${userId}_${msg.media_group_id}`;
@@ -765,5 +1125,9 @@ async function handleMessageReplyMode(msg, state) {
 module.exports = handleMessageReplyMode;
 module.exports.getMessageReplyContext = getMessageReplyContext;
 module.exports.clearUserContext = clearUserContext;
+module.exports.buildReplyModeExitHandler = buildReplyModeExitHandler;
+module.exports.autoEnterReplyFromTag = autoEnterReplyFromTag;
 module.exports.handleLocationCallback = handleLocationCallback;
+module.exports.handleSwitchLocationCallback = handleSwitchLocationCallback;
+module.exports.flushPackOnExit = flushPackOnExit;
 module.exports.cleanupHintMessagesOnShutdown = cleanupHintMessagesOnShutdown;

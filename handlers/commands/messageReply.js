@@ -8,8 +8,9 @@ const {
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
 const { insertLog } = require('../../db/log');
-const { clearUserContext } = require('../modes/messageReplyMode');
+const { clearUserContext, buildReplyModeExitHandler } = require('../modes/messageReplyMode');
 const { repeatModeMsg } = require('../../utils/reply');
+const { getClampedNumberArg } = require('../../utils/commandArgs');
 
 /**
  * 进入消息回复模式
@@ -32,36 +33,30 @@ async function enterMessageReplyMode(userId, msg, replyTarget) {
 
     await cleanPreviousMode(userId);
 
+    // /message_reply N：N >= 2 时进入打包模式，用户发送的媒体按 N 个为一组打包为媒体组回复
+    const packSize = getClampedNumberArg(msg, 1, 10);
+
     setUserState(userId, {
         mode: 'message_reply',
         lastActivity: Date.now(),
         step: 'waiting_for_target',
         replyTarget: replyTarget || null,   // null=定位后询问, 'group'/'channel'=直接指定
+        packSize: packSize || null,         // /message_reply N 的打包数量（1 视为不打包）
         targetGroupId: null,
         targetChatId: null,
         targetMessageId: null,
         processingMsgId: null,
         hintMsgInfo: null,
-        _onExit: async (uid) => {
-            // 清理上下文和可能的群组提示消息
-            const rawState = require('../../states').getRawUserState(uid);
-            if (rawState && rawState.hintMsgInfo) {
-                try {
-                    await bot.deleteMessage(rawState.hintMsgInfo.chat_id, rawState.hintMsgInfo.message_id);
-                } catch (err) {
-                    logger.warn(`退出时删除群组提示消息失败: ${err.message}`);
-                }
-            }
-            clearUserContext(uid);
-        }
+        _onExit: buildReplyModeExitHandler()
     });
 
-    logger.info(`用户 ${userId} 进入消息回复模式${replyTarget ? `（回复位置: ${replyTarget}）` : ''}`);
+    logger.info(`用户 ${userId} 进入消息回复模式${replyTarget ? `（回复位置: ${replyTarget}）` : ''}${packSize && packSize >= 2 ? `（打包: 每组 ${packSize} 个）` : ''}`);
 
     const targetHint = replyTarget === 'group'
-        ? '\n回复位置：群组'
-        : (replyTarget === 'channel' ? '\n回复位置：频道' : '');
-    const welcomeMsg = `✅ 已进入消息回复模式${targetHint}\n\n请发送需要回复的媒体消息：`;
+        ? '\n回复位置：👥 群组'
+        : (replyTarget === 'channel' ? '\n回复位置：📢 频道' : '');
+    const packHint = packSize && packSize >= 2 ? `\n📦 媒体将以 ${packSize} 个为一组打包回复` : '';
+    const welcomeMsg = `✅ 已进入消息回复模式${targetHint}${packHint}\n\n请发送需要回复的媒体消息：`;
     await bot.sendMessage(userId, welcomeMsg, {
         reply_to_message_id: msg.message_id,
         allow_sending_without_reply: true

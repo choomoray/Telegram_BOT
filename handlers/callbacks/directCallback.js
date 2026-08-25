@@ -3,6 +3,9 @@ const bot = require('../../bot');
 const logger = require('../../logger');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { generateMessageLink } = require('../../utils/chatIdConverter');
+const { getGroupTags } = require('../../db/message');
+const { removeLevelSuffix } = require('../../utils/levelExtractor');
+const { escapeHTML } = require('../../utils/sanitize');
 
 async function handleDirectCallback(query) {
     const data = query.data;
@@ -45,14 +48,22 @@ async function handleDirectCallback(query) {
                 ]
             };
 
-            await bot.editMessageText(
-                `该组共有 ${totalMedia} 个媒体，分为 ${subgroupCount} 组。\n请选择查看方式：`,
-                {
-                    chat_id: query.message.chat.id,
-                    message_id: query.message.message_id,
-                    reply_markup: keyboard
-                }
-            );
+            // 媒体描述 + 标签展示在询问界面（描述在上，标签在下）
+            const desc = firstMessage && firstMessage.text ? removeLevelSuffix(firstMessage.text) : '';
+            const tags = await getGroupTags(groupId);
+            const tagLine = tags.length > 0 ? `\n📌 标签：${escapeHTML(tags.join('、'))}` : '';
+
+            let promptText = `该组共有 ${totalMedia} 个媒体，分为 ${subgroupCount} 组。`;
+            if (desc) {
+                promptText += `\n\n${escapeHTML(desc)}`;
+            }
+            promptText += `${tagLine}\n请选择查看方式：`;
+
+            await bot.editMessageText(promptText, {
+                chat_id: query.message.chat.id,
+                message_id: query.message.message_id,
+                reply_markup: keyboard
+            });
             await bot.answerCallbackQuery(query.id);
         } else {
             const { sendMediaGroup } = require('../../media');

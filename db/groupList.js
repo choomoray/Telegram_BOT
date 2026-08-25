@@ -5,14 +5,16 @@ const logger = require('../logger');
 /**
  * 原子性地增加 group_list 的 is_group 计数，若不存在则创建
  * @param {string} groupId - 媒体组ID
+ * @param {number} [count=1] - 一次增加的数量（媒体组批量落库时一次 +N，避免 N 次串行往返；
+ *                             也避免同一 group_id 的并发 upsert 触发唯一索引冲突）
  */
-async function upsertGroupList(groupId) {
+async function upsertGroupList(groupId, count = 1) {
     try {
         const col = getCollection(COLLECTIONS.GROUP_LIST);
         const result = await col.updateOne(
             { group_id: groupId },
             {
-                $inc: { is_group: 1 },
+                $inc: { is_group: count },
                 $setOnInsert: {
                     group_id: groupId,
                     is_delete: null,      // 🔁 默认 null，表示“未确定状态”
@@ -24,10 +26,10 @@ async function upsertGroupList(groupId) {
         );
 
         if (result.upsertedCount > 0) {
-            logger.info(`group_list 创建: group_id=${groupId}, is_group=1, is_delete=null`);
+            logger.info(`group_list 创建: group_id=${groupId}, is_group=${count}, is_delete=null`);
         } else {
             const updated = await col.findOne({ group_id: groupId });
-            logger.info(`group_list 更新: group_id=${groupId}, +1, is_group now=${updated?.is_group || 'unknown'}`);
+            logger.info(`group_list 更新: group_id=${groupId}, +${count}, is_group now=${updated?.is_group || 'unknown'}`);
         }
         return result;
     } catch (err) {

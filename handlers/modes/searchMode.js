@@ -3,9 +3,10 @@ const bot = require('../../bot');
 const logger = require('../../logger');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { findMediaByFileUniqueId } = require('../../db/media');
-const { findMessageByFileUniqueId } = require('../../db/message');
+const { findMessageByFileUniqueId, getGroupTags } = require('../../db/message');
 const { deleteUserState } = require('../../states');
 const { generateMessageLink } = require('../../utils/chatIdConverter');
+const { escapeHTML } = require('../../utils/sanitize');
 const { extractMediaFromMessage } = require('../../media');
 
 async function handleSearchMode(msg, state) {
@@ -62,7 +63,11 @@ async function handleSearchMode(msg, state) {
             ]
         };
 
-        await bot.editMessageText('✅ 找到了，请选择查看方式', {
+        // 媒体组标签展示在查看方式下方
+        const tags = await getGroupTags(found.group_id);
+        const tagLine = tags.length > 0 ? `\n📌 标签：${escapeHTML(tags.join('、'))}` : '';
+
+        await bot.editMessageText(`✅ 找到了，请选择查看方式${tagLine}`, {
             chat_id: userId,
             message_id: processingMsg.message_id,
             reply_markup: keyboard

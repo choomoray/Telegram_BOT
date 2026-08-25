@@ -7,6 +7,7 @@ const { createSession } = require('../../utils/queryCache');
 const { formatResultLine } = require('../../utils/queryFormatter');
 const { sendMediaGroup } = require('../../utils/sendMedia');
 const { insertLog } = require('../../db/log');
+const { getNumberArg } = require('../../utils/commandArgs');
 
 const TIME_FILTERS = {
     'all': null,
@@ -54,6 +55,21 @@ async function handleRandomVideosCommand(userId, msg) {
         }
     } catch (err) {
         logger.warn(`获取随机视频设置失败: ${err.message}`);
+    }
+
+    // 参数覆盖：/random_videos N
+    // N 1~10 → 视频媒体模式展示 N 个视频；N >= 11 → 标题列表模式展示 N 条
+    const argNum = getNumberArg(msg);
+    if (argNum !== null) {
+        if (argNum <= 10) {
+            videoMode = 1;
+            videoCount = Math.max(1, argNum);
+            logger.info(`用户 ${userId} /random_videos 参数 ${argNum} → 视频媒体模式 ${videoCount} 个`);
+        } else {
+            videoMode = 0;
+            textCount = Math.min(50, Math.max(10, argNum));
+            logger.info(`用户 ${userId} /random_videos 参数 ${argNum} → 标题列表模式 ${textCount} 条`);
+        }
     }
 
     let processingMsg;

@@ -1,5 +1,7 @@
 // media.js
 const { getCollection, COLLECTIONS } = require('./db/getCollection');
+const { getGroupTags } = require('./db/message');
+const { escapeHTML } = require('./utils/sanitize');
 const logger = require('./logger');
 const bot = require('./bot');
 
@@ -185,7 +187,7 @@ async function clearMediaGroupState(userId, sendCollected = true, rawState = nul
             }
 
             let groupSize = 10;
-            if (state.groupSize && mode === 'media_group') {
+            if (state.groupSize) {
                 groupSize = state.groupSize;
             }
             await sendMediaGroupAsReply(userId, null, processedItems, groupSize).catch(err => {
@@ -223,6 +225,14 @@ async function sendMediaSubgroup(chatId, groupId, subgroup) {
         if (doc.text) {
             caption = doc.text;
             break;
+        }
+    }
+
+    // 注释最下面单独列出该媒体组的标签（无注释或没有标签时保持原样）
+    if (caption) {
+        const tags = await getGroupTags(groupId);
+        if (tags.length > 0) {
+            caption += `\n\n📌 标签：${escapeHTML(tags.join('、'))}`;
         }
     }
 

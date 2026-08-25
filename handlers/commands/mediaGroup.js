@@ -10,6 +10,7 @@ const {
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
 const { repeatModeMsg } = require('../../utils/reply');
+const { getClampedNumberArg } = require('../../utils/commandArgs');
 
 async function handleMediaGroupCommand(userId, msg) {
     const state = getUserState(userId);
@@ -36,6 +37,13 @@ async function handleMediaGroupCommand(userId, msg) {
         }
     } catch (err) {
         logger.warn(`获取 media_group_num 失败: ${err.message}`);
+    }
+
+    // 参数覆盖：/media_group N → 每组 N 个媒体（1~10）
+    const argNum = getClampedNumberArg(msg, 1, 10);
+    if (argNum !== null) {
+        groupSize = argNum;
+        logger.info(`用户 ${userId} /media_group 参数 ${argNum} → 每组 ${groupSize} 个媒体`);
     }
 
     let processingMsg;
