@@ -5,7 +5,8 @@ const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const {
     findMediaByFileUniqueId,
     insertMedia,
-    getMaxSubgroup
+    getMaxSubgroup,
+    buildMediaLocation
 } = require('../../db/media');
 const { upsertMessage } = require('../../db/message');
 const { upsertGroupList, setGroupDelete } = require('../../db/groupList');
@@ -87,6 +88,178 @@ async function exitMessageReplyMode(userId, sendExitMessage = true) {
     }
 }
 
+/**
+ * 收到关闭信号时：删除所有消息回复模式遗留的群组/频道提示消息
+ * （"💬 正在回复该消息"），避免进程退出后残留
+ */
+async function cleanupHintMessagesOnShutdown() {
+    const { userStates } = require('../../states');
+    for (const [userId, state] of userStates.entries()) {
+        if (state && state.mode === 'message_reply' && state.hintMsgInfo) {
+            try {
+                await bot.deleteMessage(state.hintMsgInfo.chat_id, state.hintMsgInfo.message_id);
+                logger.info(`关闭清理: 删除用户 ${userId} 的回复提示消息 (chatId=${state.hintMsgInfo.chat_id})`);
+            } catch (err) {
+                logger.warn(`关闭清理: 删除回复提示消息失败 (用户 ${userId}): ${err.message}`);
+            }
+        }
+    }
+}
+
+/**
+ * 解析回复位置：
+ * - 频道转发消息（message.channel_forward 存在）：
+ *   - replyTarget='group'   → 群组中该消息的位置（channel_forward.group_*）
+ *   - replyTarget='channel' → 频道源消息位置（channel_forward.channel_*，即原始 chat_id/message_id）
+ * - 非转发消息：一律使用消息自身位置（chat_id/message_id）
+ * @param {Object} messageDoc - message 记录
+ * @param {string|null} replyTarget - 'group' | 'channel' | null
+ */
+function resolveReplyLocation(messageDoc, replyTarget) {
+    const fwd = messageDoc.channel_forward;
+    if (fwd && fwd.is_channel) {
+        if (replyTarget === 'group' && fwd.group_chat_id && fwd.group_message_id) {
+            return { chatId: fwd.group_chat_id, messageId: fwd.group_message_id, isForwarded: true };
+        }
+        if (replyTarget === 'channel' && fwd.channel_chat_id && fwd.channel_message_id) {
+            return { chatId: fwd.channel_chat_id, messageId: fwd.channel_message_id, isForwarded: true };
+        }
+    }
+    return { chatId: messageDoc.chat_id, messageId: messageDoc.message_id, isForwarded: false };
+}
+
+/** 发送群组提示消息并进入就绪状态（使用已解析的回复位置） */
+async function finishEnterReadyState(userId, messageDoc, processingMsgId, resolved) {
+    const targetGroupId = messageDoc.group_id;
+
+    let hintMsg;
+    try {
+        hintMsg = await bot.sendMessage(resolved.chatId, '💬 Der包正在回复该消息', {
+            reply_to_message_id: resolved.messageId
+        });
+    } catch (err) {
+        logger.warn(`发送群组提示消息失败: ${err.message}`);
+        hintMsg = null;
+    }
+
+    await bot.editMessageText('✅ 找到了，现在可以向我发送消息了', {
+        chat_id: userId,
+        message_id: processingMsgId
+    });
+
+    // 保留 _onExit（退出时删除群组/频道提示消息、清理上下文）
+    const prevRaw = getRawUserState(userId);
+    setUserState(userId, {
+        mode: 'message_reply',
+        step: 'ready',
+        targetGroupId,
+        targetChatId: resolved.chatId,
+        targetMessageId: resolved.messageId,
+        hintMsgInfo: hintMsg ? { chat_id: resolved.chatId, message_id: hintMsg.message_id } : null,
+        _onExit: (prevRaw && prevRaw._onExit) || (async () => { }),
+        lastActivity: Date.now()
+    });
+
+    logger.info(`用户 ${userId} 消息回复模式已找到目标，进入就绪状态`);
+}
+
+/**
+ * 目标消息定位后的统一处理：
+ * - 频道转发消息且未指定回复位置 → 询问"回复在群组/频道"
+ * - 其余情况 → 解析位置后直接进入就绪状态
+ * @param {Object} messageDoc - message 记录
+ * @param {string|null} replyTarget - 指令指定的回复位置（'group'/'channel'/null=询问）
+ */
+async function enterReplyReadyState(userId, messageDoc, processingMsgId, replyTarget) {
+    const fwd = messageDoc.channel_forward;
+    const isForwarded = !!(fwd && fwd.is_channel);
+
+    if (isForwarded && !replyTarget) {
+        const hasGroupLoc = !!(fwd.group_chat_id && fwd.group_message_id);
+        const hasChannelLoc = !!(fwd.channel_chat_id && fwd.channel_message_id);
+        const rows = [];
+        if (hasGroupLoc) rows.push({ text: '👥 回复在群组', callback_data: 'mreply_loc:group' });
+        if (hasChannelLoc) rows.push({ text: '📢 回复在频道', callback_data: 'mreply_loc:channel' });
+
+        if (rows.length === 0) {
+            // 两个位置都未知：回退到消息自身位置
+            const resolved = resolveReplyLocation(messageDoc, null);
+            await finishEnterReadyState(userId, messageDoc, processingMsgId, resolved);
+            return;
+        }
+
+        const keyboard = { inline_keyboard: [rows] };
+        await bot.editMessageText('✅ 已找到该消息（频道转发）\n请选择回复位置：', {
+            chat_id: userId,
+            message_id: processingMsgId,
+            reply_markup: keyboard
+        });
+
+        // 保留 _onExit（退出时删除群组/频道提示消息、清理上下文）
+        const prevRaw = getRawUserState(userId);
+        setUserState(userId, {
+            mode: 'message_reply',
+            step: 'waiting_reply_location',
+            targetGroupId: messageDoc.group_id,
+            pendingMessageDoc: messageDoc,
+            processingMsgId,
+            _onExit: (prevRaw && prevRaw._onExit) || (async () => { }),
+            lastActivity: Date.now()
+        });
+        logger.info(`用户 ${userId} 消息回复模式：频道转发消息，等待选择回复位置`);
+        return;
+    }
+
+    const resolved = resolveReplyLocation(messageDoc, replyTarget);
+    await finishEnterReadyState(userId, messageDoc, processingMsgId, resolved);
+}
+
+/** 处理"回复在群组/频道"选择回调（mreply_loc:group | mreply_loc:channel） */
+async function handleLocationCallback(query) {
+    const data = query.data;
+    const userId = query.from.id;
+    const rawState = getRawUserState(userId);
+    if (!rawState || rawState.mode !== 'message_reply' || rawState.step !== 'waiting_reply_location' || !rawState.pendingMessageDoc) {
+        await bot.answerCallbackQuery(query.id, { text: '❌ 状态已过期，请重新发送媒体' });
+        return;
+    }
+
+    const target = (data.split(':')[1] === 'channel') ? 'channel' : 'group';
+    const messageDoc = rawState.pendingMessageDoc;
+    const resolved = resolveReplyLocation(messageDoc, target);
+
+    let hintMsg;
+    try {
+        hintMsg = await bot.sendMessage(resolved.chatId, '💬 Der包正在回复该消息', {
+            reply_to_message_id: resolved.messageId
+        });
+    } catch (err) {
+        logger.warn(`发送群组提示消息失败: ${err.message}`);
+        hintMsg = null;
+    }
+
+    await bot.editMessageText(`✅ 已选择回复在${target === 'group' ? '群组' : '频道'}，现在可以向我发送消息了`, {
+        chat_id: userId,
+        message_id: query.message.message_id
+    });
+
+    // 保留 _onExit（退出时删除群组/频道提示消息、清理上下文）
+    const prevRaw = getRawUserState(userId);
+    setUserState(userId, {
+        mode: 'message_reply',
+        step: 'ready',
+        targetGroupId: messageDoc.group_id,
+        targetChatId: resolved.chatId,
+        targetMessageId: resolved.messageId,
+        hintMsgInfo: hintMsg ? { chat_id: resolved.chatId, message_id: hintMsg.message_id } : null,
+        _onExit: (prevRaw && prevRaw._onExit) || (async () => { }),
+        lastActivity: Date.now()
+    });
+
+    await bot.answerCallbackQuery(query.id, { text: `已选择回复在${target === 'group' ? '群组' : '频道'}` });
+    logger.info(`用户 ${userId} 选择回复位置: ${target}`);
+}
+
 async function recordReplyMessage(sentMsg, targetGroupId) {
     try {
         const mediaInfo = extractMediaFromMessage(sentMsg);
@@ -138,6 +311,9 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         return;
     }
 
+    // 回复目标位置写入 media（目标为频道存 channel，为群组存 group）
+    const location = await buildMediaLocation(targetChatId, sentMsg.message_id, null);
+
     await insertMedia({
         group_id: targetGroupId,
         subgroup: newSubgroup,
@@ -145,7 +321,8 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         file_unique_id: fileUniqueId,
         media_type: type,
         message_id: sentMsg.message_id,
-        video_time: videoTime
+        video_time: videoTime,
+        ...location
     });
 
     await upsertGroupList(targetGroupId);
@@ -161,9 +338,10 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         await recordReplyMessage(sentMsg, targetGroupId);
     }
 
-    await bot.sendMessage(userId, '✅ 已回复', {
-        reply_to_message_id: userMsgId
-    });
+    // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）
+    const { sendSuccessWithTags } = require('./sendMode');
+    await sendSuccessWithTags(userId, '✅ 已回复', targetGroupId, caption);
+
     logger.info(`用户 ${userId} 已回复媒体到群组 ${targetChatId}/${targetMessageId}，新 subgroup=${newSubgroup}`);
 }
 
@@ -209,6 +387,9 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
         const originalItem = newItems[i];
         if (!originalItem) continue;
 
+        // 回复目标位置写入 media（目标为频道存 channel，为群组存 group）
+        const location = await buildMediaLocation(targetChatId, sentMsg.message_id, null);
+
         await insertMedia({
             group_id: targetGroupId,
             subgroup: newSubgroup,
@@ -216,7 +397,8 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
             file_unique_id: originalItem.fileUniqueId,
             media_type: originalItem.type,
             message_id: sentMsg.message_id,
-            video_time: originalItem.videoTime
+            video_time: originalItem.videoTime,
+            ...location
         });
 
         const countKey = `${targetGroupId}:${originalItem.fileUniqueId}`;
@@ -234,9 +416,11 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
     }
     await setGroupDelete(targetGroupId, 0);
 
-    await bot.sendMessage(userId, `✅ 已回复媒体组 (${newItems.length} 个)`, {
-        reply_to_message_id: userMsgId
-    });
+    // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）
+    const firstCaption = newItems.length ? (newItems[0].caption || '') : '';
+    const { sendSuccessWithTags } = require('./sendMode');
+    await sendSuccessWithTags(userId, `✅ 已回复媒体组 (${newItems.length} 个)`, targetGroupId, firstCaption);
+
     logger.info(`用户 ${userId} 已回复媒体组到群组 ${targetChatId}/${targetMessageId}，新 subgroup=${newSubgroup}，共 ${newItems.length} 个媒体`);
 }
 
@@ -284,36 +468,13 @@ async function processTargetGroup(userId, groupKey, mediaItems, processingMsgId)
             return;
         }
 
-        const targetGroupId = targetMessage.group_id;
-        const targetChatId = targetMessage.chat_id;
-        const targetMessageId = targetMessage.message_id;
+        // 读取用户指定的回复位置（/message_reply_group、/message_reply_channel），
+        // 未指定时若为频道转发消息则询问回复位置
+        const rawState = getRawUserState(userId);
+        const replyTarget = rawState && rawState.replyTarget ? rawState.replyTarget : null;
+        await enterReplyReadyState(userId, targetMessage, processingMsgId, replyTarget);
 
-        let hintMsg;
-        try {
-            hintMsg = await bot.sendMessage(targetChatId, '💬 Der包正在回复该消息', {
-                reply_to_message_id: targetMessageId
-            });
-        } catch (err) {
-            logger.warn(`发送群组提示消息失败: ${err.message}`);
-            hintMsg = null;
-        }
-
-        await bot.editMessageText('✅ 找到了，现在可以向我发送消息了', {
-            chat_id: userId,
-            message_id: processingMsgId
-        });
-
-        setUserState(userId, {
-            mode: 'message_reply',
-            step: 'ready',
-            targetGroupId,
-            targetChatId,
-            targetMessageId,
-            hintMsgInfo: hintMsg ? { chat_id: targetChatId, message_id: hintMsg.message_id } : null,
-            lastActivity: Date.now()
-        });
-
-        logger.info(`用户 ${userId} 消息回复模式已找到目标（媒体组），进入就绪状态`);
+        logger.info(`用户 ${userId} 消息回复模式已找到目标（媒体组）`);
     } catch (err) {
         logger.error(`处理目标媒体组失败: ${err.message}`);
         await bot.editMessageText('❌ 查询失败，请稍后重试', {
@@ -347,6 +508,14 @@ async function handleMessageReplyMode(msg, state) {
     const mediaInfo = extractMediaFromMessage(msg);
     const userMsgId = msg.message_id;
     const ctx = getContext(userId);
+
+    // 等待选择回复位置时，普通消息一律忽略（只能通过上方按钮选择）
+    if (state.step === 'waiting_reply_location') {
+        await bot.sendMessage(userId, '⚠️ 请先点击上方按钮选择回复位置', {
+            reply_to_message_id: userMsgId
+        }).catch(() => { });
+        return true;
+    }
 
     // 如果是媒体组，检查该组是否已处理过（成功或失败）或已发送查询消息
     if (msg.media_group_id) {
@@ -412,36 +581,8 @@ async function handleMessageReplyMode(msg, state) {
 
                 // 执行立即处理（类似于单条媒体）
                 try {
-                    const targetGroupId = targetMessage.group_id;
-                    const targetChatId = targetMessage.chat_id;
-                    const targetMessageId = targetMessage.message_id;
-
-                    let hintMsg;
-                    try {
-                        hintMsg = await bot.sendMessage(targetChatId, '💬 Der包正在回复该消息', {
-                            reply_to_message_id: targetMessageId
-                        });
-                    } catch (err) {
-                        logger.warn(`发送群组提示消息失败: ${err.message}`);
-                        hintMsg = null;
-                    }
-
-                    await bot.editMessageText('✅ 找到了，现在可以向我发送消息了', {
-                        chat_id: userId,
-                        message_id: processingMsg.message_id
-                    });
-
-                    setUserState(userId, {
-                        mode: 'message_reply',
-                        step: 'ready',
-                        targetGroupId,
-                        targetChatId,
-                        targetMessageId,
-                        hintMsgInfo: hintMsg ? { chat_id: targetChatId, message_id: hintMsg.message_id } : null,
-                        lastActivity: Date.now()
-                    });
-
-                    logger.info(`用户 ${userId} 消息回复模式立即找到目标，进入就绪状态`);
+                    await enterReplyReadyState(userId, targetMessage, processingMsg.message_id, state.replyTarget);
+                    logger.info(`用户 ${userId} 消息回复模式立即找到目标`);
                 } catch (err) {
                     logger.error(`立即处理目标失败: ${err.message}`);
                     await bot.editMessageText('❌ 处理失败', {
@@ -559,36 +700,9 @@ async function handleMessageReplyMode(msg, state) {
                 }
             }
 
-            const targetGroupId = targetMessage.group_id;
-            const targetChatId = targetMessage.chat_id;
-            const targetMessageId = targetMessage.message_id;
+            await enterReplyReadyState(userId, targetMessage, processingMsg.message_id, state.replyTarget);
 
-            let hintMsg;
-            try {
-                hintMsg = await bot.sendMessage(targetChatId, '💬 Der包正在回复该消息', {
-                    reply_to_message_id: targetMessageId
-                });
-            } catch (err) {
-                logger.warn(`发送群组提示消息失败: ${err.message}`);
-                hintMsg = null;
-            }
-
-            await bot.editMessageText('✅ 找到了，现在可以向我发送消息了', {
-                chat_id: userId,
-                message_id: processingMsg.message_id
-            });
-
-            setUserState(userId, {
-                ...state,
-                step: 'ready',
-                targetGroupId,
-                targetChatId,
-                targetMessageId,
-                hintMsgInfo: hintMsg ? { chat_id: targetChatId, message_id: hintMsg.message_id } : null,
-                lastActivity: Date.now()
-            });
-
-            logger.info(`用户 ${userId} 消息回复模式已找到目标，进入就绪状态`);
+            logger.info(`用户 ${userId} 消息回复模式已找到目标`);
         } catch (err) {
             logger.error(`查询目标媒体失败: ${err.message}`);
             await bot.editMessageText('❌ 查询失败，请稍后重试', {
@@ -651,3 +765,5 @@ async function handleMessageReplyMode(msg, state) {
 module.exports = handleMessageReplyMode;
 module.exports.getMessageReplyContext = getMessageReplyContext;
 module.exports.clearUserContext = clearUserContext;
+module.exports.handleLocationCallback = handleLocationCallback;
+module.exports.cleanupHintMessagesOnShutdown = cleanupHintMessagesOnShutdown;

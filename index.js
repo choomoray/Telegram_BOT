@@ -30,8 +30,11 @@ function safeHandler(fn) {
     };
 }
 
-// Web UI 服务引用（node index.js webui 时启用）
+// Web UI 服务引用（node index.js webui / node index.js test 时启用）
 let webServer = null;
+
+// test 模式（node index test）：在 webui 基础上，日志额外复制一份到 test-log（启动时重置）
+const TEST_MODE = process.argv.includes('test');
 
 async function start() {
     try {
@@ -43,6 +46,10 @@ async function start() {
         });
         // 3. 加载动态设置
         await loadSettings(config);
+        // test 模式：初始化临时日志（重置 test-log/log.log、error.log，仅启动时初始化）
+        if (TEST_MODE) {
+            await logger.initTestLog().catch(err => logger.warn(`初始化 test 日志失败: ${err.message}`));
+        }
         logger.success('数据库连接成功，设置已加载，正在启动 Telegram Bot...');
 
         // 4. 启动机器人
@@ -168,8 +175,8 @@ async function start() {
 
         logger.success('系统就绪，Telegram Bot 已启动并等待消息...');
 
-        // 可选：启动 Web UI 管理面板（node index.js webui）
-        if (process.argv.includes('webui')) {
+        // 可选：启动 Web UI 管理面板（node index.js webui / node index.js test）
+        if (process.argv.includes('webui') || TEST_MODE) {
             const { startWebUI } = require('./webui/server');
             webServer = startWebUI();
         }
@@ -198,6 +205,14 @@ async function gracefulShutdown(signal) {
     ]);
 
     try {
+        // 0. 关闭前立即清理：删除定时删除消息 + 遗留提示消息（收到关闭信号时立即执行，不等定时器）
+        try {
+            const { cleanupOnShutdown } = require('./handlers/shutdownCleanup');
+            await cleanupOnShutdown();
+        } catch (err) {
+            logger.warn(`关闭前清理失败: ${err.message}`);
+        }
+
         // 1. 停止 Telegram 轮询（最多等待 5 秒）
         try {
             const bot = require('./bot');
@@ -229,6 +244,14 @@ async function gracefulShutdown(signal) {
             } catch (err) {
                 logger.warn(`关闭 MongoDB 失败: ${err.message}`);
             }
+        }
+
+        // 4. 日志队列刷盘：放在最后，等待所有待写日志（含上述清理日志）落盘后再退出
+        try {
+            const { flushLogs } = require('./logger');
+            await withTimeout(flushLogs(), 3000);
+        } catch (err) {
+            console.error(`日志刷盘失败: ${err.message}`);
         }
     } finally {
         clearTimeout(forceExitTimer);

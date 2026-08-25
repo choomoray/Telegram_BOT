@@ -9,21 +9,37 @@ const bot = require('../../bot');
 const logger = require('../../logger');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { getAllChannelGroups } = require('../../db/channelGroup');
-const { findMediaByFileUniqueId, insertMedia } = require('../../db/media');
+const { findMediaByFileUniqueId, insertMedia, buildMediaLocation } = require('../../db/media');
 const { upsertMessage } = require('../../db/message');
 const { upsertGroupList, setGroupDelete } = require('../../db/groupList');
 const { addTagToGroup, removeTagFromGroup, getGroupTags } = require('../../db/message');
 const { getTags, sortTags, tagUsed, addTag } = require('../../db/tags');
 const { buildTagKeyboard, splitTagInput, matchTagsInText } = require('../../utils/tagUi');
-const { extractMediaFromMessage } = require('../../media');
+const { extractMediaFromMessage, restoreMediaGroupCaptions } = require('../../media');
 const { removeLevelSuffix } = require('../../utils/levelExtractor');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
 
 const PAGE_SIZE = 6;        // 每页群组按钮数
-const GROUP_FLUSH_DELAY = 1500; // 媒体组收集延迟(ms)
+const GROUP_FLUSH_DELAY = 3000; // 媒体组收集窗口(ms)：最后一条消息后等待这么久才发送
+                                // （Telegram 相册消息可能分多批投递，间隔可达 2 秒以上，窗口太短会丢媒体）
+const FLUSH_GUARD_TTL = 5 * 60 * 1000; // 已发送守卫窗口（防止重复发送）
 
-// 媒体组暂存：key=userId_mediaGroupId -> { items, timer }
+// 媒体组暂存：key=userId_mediaGroupId -> { items, timer, processingMsgId }
 const pendingGroups = new Map();
+// 文件级守卫：file_unique_id -> 时间戳，文件正在发送/刚发送过（TTL 内忽略，
+// 用于防止已发送的文件被重复收集/发送——同一批文件可能以不同 media_group_id 重复送达）
+const sendingFiles = new Map();
+// 同一用户的 flush 串行化：userId -> Promise，上一轮 flush 完全落库后下一轮才执行，
+// 保证并发 flush 的去重查询能读到已提交数据
+const userFlushChains = new Map();
+
+// 定期清理已发送守卫
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, ts] of sendingFiles.entries()) {
+        if (now - ts > FLUSH_GUARD_TTL) sendingFiles.delete(key);
+    }
+}, 60 * 1000);
 
 // ---------------- 群组列表（分页） ----------------
 
@@ -89,12 +105,14 @@ async function handleCallback(query) {
         const name = group ? (group.name || `Chat${chatId}`) : `Chat${chatId}`;
 
         const rawState = getRawUserState(userId);
+        const targetType = group ? (group.type === 'channel' ? 'channel' : 'group') : 'group';
         if (!rawState || rawState.mode !== 'send') {
             setUserState(userId, {
                 mode: 'send',
                 step: 'ready',
                 targetChatId: chatId,
                 targetName: name,
+                targetType,
                 pendingMediaGroup: null,
                 lastActivity: Date.now(),
                 _onExit: async () => { }
@@ -105,6 +123,7 @@ async function handleCallback(query) {
                 step: 'ready',
                 targetChatId: chatId,
                 targetName: name,
+                targetType,
                 lastActivity: Date.now()
             });
         }
@@ -238,8 +257,11 @@ async function sendSingleMediaToChat(chatId, mediaInfo) {
 /**
  * 收录发送的媒体（media + message + group_list），group_id 按目标群组新建
  */
-async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo) {
+async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo, targetType) {
     const { fileUniqueId, type, caption, videoTime } = mediaInfo;
+
+    // 写入媒体位置：目标为频道存 channel，目标为群组存 group
+    const location = await buildMediaLocation(targetChatId, sentMsg.message_id, targetType);
 
     await insertMedia({
         group_id: groupId,
@@ -248,7 +270,8 @@ async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo) {
         file_unique_id: fileUniqueId,
         media_type: type,
         message_id: sentMsg.message_id,
-        video_time: videoTime
+        video_time: videoTime,
+        ...location
     });
 
     await upsertGroupList(groupId);
@@ -270,58 +293,16 @@ async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo) {
 }
 
 /**
- * 发送媒体组到目标群组（分批，Telegram 每批最多 10 条）
+ * 发送媒体组到目标群组（注释位置还原）
+ * Telegram 机制：媒体组仅第一条可带注释。注释不在第一条时不放置临时注释
+ * （不再清空重编辑，少一次 API 调用、无错误文本闪现），发完直接编辑回原始位置；
+ * 同时修复"注释同时在第一条和其他位置时其余注释丢失"的问题。
+ * 按 /send 原有行为不使用 HTML 解析，避免注释中含 & < > 等字符时发送失败。
  */
-/**
- * 恢复媒体组文本到原始位置（与用户发送一致）
- * 发送时 Telegram 限制文本只能在第一条，二次编辑：
- *   1. 清空第一条的临时文本
- *   2. 为原始位置的媒体添加文本
- */
-async function restoreMediaGroupCaptions(chatId, sentMessages, items, captionIndexes) {
-    try {
-        // 文本原本在第一条 → 无需调整；无文本 → 无需处理
-        if (captionIndexes.includes(0) || captionIndexes.length === 0) return;
-
-        // 1. 清空第一条的临时文本
-        const firstSent = sentMessages[0];
-        if (firstSent) {
-            await bot.editMessageCaption('', {
-                chat_id: chatId,
-                message_id: firstSent.message_id
-            }).catch(() => { });
-        }
-
-        // 2. 为原始位置的媒体添加文本
-        for (const idx of captionIndexes) {
-            const sent = sentMessages[idx];
-            const item = items[idx];
-            if (sent && item.caption) {
-                await bot.editMessageCaption(item.caption, {
-                    chat_id: chatId,
-                    message_id: sent.message_id,
-                    parse_mode: 'HTML'
-                }).catch((err) => {
-                    logger.warn(`为媒体 ${idx + 1} 添加文本失败: ${err.message}`);
-                });
-            }
-        }
-        logger.info(`媒体组文本位置恢复完成: chatId=${chatId}, 文本位于第 ${captionIndexes.map(i => i + 1).join('、')} 条`);
-    } catch (err) {
-        logger.warn(`媒体组文本位置恢复失败: ${err.message}`);
-    }
-}
-
 async function sendMediaGroupToChat(chatId, items) {
-    // 记录文本原始位置（Telegram 机制：发送媒体组仅第一条可带 caption，
-    // 先临时放第一条，发送成功后二次编辑恢复到原始位置）
-    let firstCaption = null;
     const captionIndexes = [];
     items.forEach((item, idx) => {
-        if (item.caption) {
-            if (firstCaption === null) firstCaption = item.caption;
-            captionIndexes.push(idx);
-        }
+        if (item.caption) captionIndexes.push(idx);
     });
 
     const BATCH = 10;
@@ -333,9 +314,9 @@ async function sendMediaGroupToChat(chatId, items) {
                 type: item.type,
                 media: item.fileId
             };
-            // 整组第一条：临时放组内第一个文本（Telegram 限制）
-            if (i === 0 && idx === 0 && firstCaption) {
-                base.caption = firstCaption;
+            // 注释原本在整组第一条时直接带上；否则不放置临时注释
+            if (i === 0 && idx === 0 && captionIndexes.includes(0)) {
+                base.caption = items[0].caption;
             }
             return base;
         });
@@ -343,45 +324,102 @@ async function sendMediaGroupToChat(chatId, items) {
         sentMessages.push(...results);
     }
 
-    // 发送成功后立即二次编辑，保证文本位置与用户发送一致
+    // 注释不在第一条时：发送后编辑回原始位置
     await restoreMediaGroupCaptions(chatId, sentMessages, items, captionIndexes);
     return sentMessages;
 }
 
 // ---------------- 媒体组收集 ----------------
 
-function collectMediaGroup(userId, msg, mediaInfo) {
+async function collectMediaGroup(userId, msg, mediaInfo) {
     const key = `${userId}_${msg.media_group_id}`;
+    // 文件级守卫：该文件正在发送/刚发送过（TTL 内）：忽略重复送达/已发送的文件
+    // （同一批文件可能以不同的 media_group_id 再次到达，或相册被重复投递）
+    if (sendingFiles.has(mediaInfo.fileUniqueId)) {
+        logger.info(`文件 ${mediaInfo.fileUniqueId} 正在发送/已发送，忽略重复消息 (key=${key})`);
+        return;
+    }
+
     let entry = pendingGroups.get(key);
+    const isNewEntry = !entry;
     if (entry) {
+        // 组内去重：同一文件不重复收集（防止同组重复投递导致条目翻倍）
+        if (entry.items.some(it => it.fileUniqueId === mediaInfo.fileUniqueId)) {
+            logger.info(`文件 ${mediaInfo.fileUniqueId} 已在收集队列中，忽略重复 (key=${key})`);
+            return;
+        }
         entry.items.push({ ...mediaInfo, message_id: msg.message_id });
-        clearTimeout(entry.timer);
     } else {
-        entry = { items: [{ ...mediaInfo, message_id: msg.message_id }], timer: null };
+        entry = { items: [{ ...mediaInfo, message_id: msg.message_id }], timer: null, processingMsgId: null };
         pendingGroups.set(key, entry);
     }
+
+    // 定时器在同步代码中统一设置（await 之前）：任何时刻该 entry 只有一个活定时器。
+    // 每条消息都会重置窗口（clearTimeout + 重设），保证最后一条消息后等待完整窗口才发送。
+    // （旧实现把定时器放在 await 之后，并发消息会互相覆盖而不清除旧定时器，
+    //   导致同一 entry 存在两个定时器 → 触发两次 flush → 重复发送 / 覆盖标签界面）
+    clearTimeout(entry.timer);
     entry.timer = setTimeout(() => {
         pendingGroups.delete(key);
-        flushMediaGroup(userId, msg.media_group_id, entry.items);
+        // 同一用户串行化：上一轮 flush 完全完成（含入库）后本轮的 flush 才执行，
+        // 使去重查询能读到已提交数据，避免并发 flush 互相竞争导致重复发送
+        const prev = userFlushChains.get(userId) || Promise.resolve();
+        const next = prev.catch(() => { }).then(() =>
+            flushMediaGroup(userId, msg.media_group_id, entry.items, entry.processingMsgId)
+        );
+        userFlushChains.set(userId, next.catch(() => { }));
     }, GROUP_FLUSH_DELAY);
+
+    if (isNewEntry) {
+        // 第一条消息：回复"正在发送中"，随后由 flushMediaGroup 刷新为最终结果
+        try {
+            const sent = await bot.sendMessage(userId, '♻️ 正在发送中，请耐心等待...', {
+                reply_to_message_id: msg.message_id,
+                allow_sending_without_reply: true
+            });
+            const cur = pendingGroups.get(key);
+            if (cur) {
+                cur.processingMsgId = sent.message_id;
+                pendingGroups.set(key, cur);
+            }
+        } catch (err) {
+            logger.error(`发送处理中消息失败: ${err.message}`);
+        }
+    }
+    logger.info(`媒体组收集: key=${key}, media_group_id=${msg.media_group_id}, 当前 ${entry.items.length} 条`);
 }
 
-async function flushMediaGroup(userId, mediaGroupId, items) {
+async function flushMediaGroup(userId, mediaGroupId, items, processingMsgId) {
     const rawState = getRawUserState(userId);
     if (!rawState || rawState.mode !== 'send' || !rawState.targetChatId) return;
     const targetChatId = rawState.targetChatId;
     const targetName = rawState.targetName || '目标群组';
+    const targetType = rawState.targetType || 'group';
     const groupId = `${targetChatId}_${mediaGroupId}`;
 
     const sorted = [...items].sort((a, b) => a.message_id - b.message_id);
     const newItems = [];
     for (const item of sorted) {
         const existing = await findMediaByFileUniqueId(item.fileUniqueId);
-        if (!existing) newItems.push(item);
+        if (!existing && !sendingFiles.has(item.fileUniqueId)) {
+            newItems.push(item);
+        } else if (sendingFiles.has(item.fileUniqueId)) {
+            logger.info(`文件 ${item.fileUniqueId} 正在发送/已发送，去重跳过`);
+        }
     }
     if (!newItems.length) {
-        await bot.sendMessage(userId, '❌ 所有媒体均已存在，无法发送');
+        const text = '❌ 所有媒体均已存在，无法发送';
+        if (processingMsgId) {
+            await bot.editMessageText(text, { chat_id: userId, message_id: processingMsgId }).catch(() => { });
+        } else {
+            await bot.sendMessage(userId, text);
+        }
         return;
+    }
+
+    // 发送前标记文件级守卫（供并发 flush / 后续重复投递去重）
+    for (const item of newItems) {
+        sendingFiles.set(item.fileUniqueId, Date.now());
     }
 
     let sentMessages;
@@ -389,7 +427,12 @@ async function flushMediaGroup(userId, mediaGroupId, items) {
         sentMessages = await sendMediaGroupToChat(targetChatId, newItems);
     } catch (err) {
         logger.error(`发送媒体组失败: ${err.message}`);
-        await bot.sendMessage(userId, '❌ 发送媒体组失败，请重试');
+        const text = '❌ 发送媒体组失败，请重试';
+        if (processingMsgId) {
+            await bot.editMessageText(text, { chat_id: userId, message_id: processingMsgId }).catch(() => { });
+        } else {
+            await bot.sendMessage(userId, text);
+        }
         return;
     }
 
@@ -397,19 +440,33 @@ async function flushMediaGroup(userId, mediaGroupId, items) {
         const sent = sentMessages[i];
         const original = newItems[i];
         if (!original) continue;
-        await recordSentMedia(sent, targetChatId, groupId, original);
+        await recordSentMedia(sent, targetChatId, groupId, original, targetType);
     }
 
-    const firstCaption = newItems.length ? (newItems[0].caption || '') : '';
-    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}（媒体组 ${newItems.length} 个）`, groupId, firstCaption);
+    // 发送完成并已把注释还原到正确位置后，取"正确注释位置"（组内第一条带注释的媒体）的注释进入打标签流程
+    const captionIndex = newItems.findIndex(item => item.caption && String(item.caption).trim());
+    const caption = captionIndex >= 0 ? newItems[captionIndex].caption : '';
+    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}（媒体组 ${newItems.length} 个）`, groupId, caption, processingMsgId || null);
 }
 
 // ---------------- 发送成功回复 + 标签按钮 ----------------
 
-async function sendSuccessWithTags(userId, text, groupId, caption) {
+/**
+ * 发送成功提示 + 标签界面
+ * @param {number} userId - 用户ID
+ * @param {string} text - 提示文本
+ * @param {string} groupId - 媒体组 ID
+ * @param {string} caption - 媒体注释（用于自动识别标签；空则只提示不进入标签流程）
+ * @param {number|null} [editMessageId] - 传入则编辑该消息（"正在发送中"消息刷新为结果），不传则发送新消息
+ */
+async function sendSuccessWithTags(userId, text, groupId, caption, editMessageId = null) {
     // 无文本的媒体没有 message 记录，打标签是无效操作 → 不进入标签流程
     if (!caption || !String(caption).trim()) {
-        await bot.sendMessage(userId, text);
+        if (editMessageId) {
+            await bot.editMessageText(text, { chat_id: userId, message_id: editMessageId }).catch(() => { });
+        } else {
+            await bot.sendMessage(userId, text);
+        }
         return;
     }
 
@@ -436,7 +493,17 @@ async function sendSuccessWithTags(userId, text, groupId, caption) {
         tagBaseText: text,
         lastActivity: Date.now()
     });
-    const sent = await bot.sendMessage(userId, finalText, { reply_markup: keyboard });
+    let sent;
+    if (editMessageId) {
+        await bot.editMessageText(finalText, {
+            chat_id: userId,
+            message_id: editMessageId,
+            reply_markup: keyboard
+        }).catch(() => { });
+        sent = { message_id: editMessageId };
+    } else {
+        sent = await bot.sendMessage(userId, finalText, { reply_markup: keyboard });
+    }
     const st = getRawUserState(userId);
     if (st && st.mode === 'send') {
         setUserState(userId, { ...st, tagMsgId: sent.message_id });
@@ -509,7 +576,7 @@ async function handleSendMode(msg, state) {
 
     // 媒体组：收集后统一发送
     if (msg.media_group_id) {
-        collectMediaGroup(userId, msg, mediaInfo);
+        await collectMediaGroup(userId, msg, mediaInfo);
         return true;
     }
 
@@ -522,20 +589,35 @@ async function handleSendMode(msg, state) {
         return true;
     }
 
+    // 先回复"正在发送中"，随后刷新为最终结果
+    let processingMsg = null;
+    try {
+        processingMsg = await bot.sendMessage(userId, '♻️ 正在发送中，请耐心等待...', {
+            reply_to_message_id: userMsgId,
+            allow_sending_without_reply: true
+        });
+    } catch (err) {
+        logger.error(`发送处理中消息失败: ${err.message}`);
+    }
+    const processingMsgId = processingMsg ? processingMsg.message_id : null;
+
     const groupId = `${targetChatId}_${msg.message_id}`;
     let sentMsg;
     try {
         sentMsg = await sendSingleMediaToChat(targetChatId, mediaInfo);
     } catch (err) {
         logger.error(`发送单个媒体失败: ${err.message}`);
-        await bot.sendMessage(userId, '❌ 发送失败，请检查机器人是否为该群组管理员', {
-            reply_to_message_id: userMsgId
-        });
+        const text = '❌ 发送失败，请检查机器人是否为该群组管理员';
+        if (processingMsgId) {
+            await bot.editMessageText(text, { chat_id: userId, message_id: processingMsgId }).catch(() => { });
+        } else {
+            await bot.sendMessage(userId, text, { reply_to_message_id: userMsgId });
+        }
         return true;
     }
 
-    await recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo);
-    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}`, groupId, mediaInfo.caption);
+    await recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo, state.targetType || 'group');
+    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}`, groupId, mediaInfo.caption, processingMsgId);
     logger.info(`用户 ${userId} 发送单个媒体到 ${targetChatId}，group_id=${groupId}`);
     return true;
 }

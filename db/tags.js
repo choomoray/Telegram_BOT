@@ -97,7 +97,7 @@ async function removeTag(name) {
  * @returns {Promise<{ok, tags, synced?, error?}>}
  */
 async function renameTag(oldName, newName) {
-    const trimmed = String(newName || '').trim();
+    const trimmed = String(newName || '').trim().toUpperCase();
     if (!trimmed) return { ok: false, error: '新标签名不能为空' };
     if (trimmed.length > 20) return { ok: false, error: '标签名最长 20 个字符' };
     const tags = await getTags();

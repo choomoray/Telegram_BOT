@@ -28,6 +28,10 @@ for (const file of commandFiles) {
         commandMap.set('/random_pictures', handler);
     } else if (commandName === 'messageReply') {
         commandMap.set('/message_reply', handler);
+    } else if (commandName === 'messageReplyGroup') {
+        commandMap.set('/message_reply_group', handler);
+    } else if (commandName === 'messageReplyChannel') {
+        commandMap.set('/message_reply_channel', handler);
     } else if (commandName === 'edit') {
         commandMap.set('/edit', handler);
     } else if (commandName === 'help') {

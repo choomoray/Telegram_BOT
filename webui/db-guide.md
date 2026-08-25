@@ -7,11 +7,12 @@
 
 ### message（消息记录，与媒体一一对应）
 - `message_id`: number — Telegram 消息 ID
-- `chat_id`: number — 所属群组/频道 ID（负值）
-- `text`: string — 文本内容（已去除等级标记）
+- `chat_id`: number — 所属群组/频道 ID（负值；频道转发消息保持频道源位置）
+- `text`: string — 文本内容
 - `file_unique_id`: string — 媒体唯一 ID（唯一索引）
 - `media_type`: string — 媒体类型（photo/video/audio/document）
-- `level`: string — 等级（S/A/B/C/D）
+- `tags`: array — 标签列表（统一大写）
+- `channel_forward`: object — 频道转发信息（可选）：`{ is_channel: true, channel_chat_id, channel_message_id, group_chat_id, group_message_id }`，标记消息为频道转发，并记录群组中该消息的位置（`group_chat_id`/`group_message_id`），用于回复时选择频道或群组
 - `group_id`: string — 媒体组 ID（格式 `chatId_messageId` 或 `chatId_mediaGroupId`）
 
 ### media（媒体文件记录）
@@ -21,6 +22,8 @@
 - `file_unique_id`: string（唯一索引）
 - `media_type`: string
 - `message_id`: number
+- `group`: object — 群组位置（可选）：`{ chat_id, message_id }`
+- `channel`: object — 频道位置（可选）：`{ chat_id, message_id }`（频道转发媒体 group/channel 两项都有）
 - `video_time`: number — 视频时长（秒，仅视频）
 - `pwd`: string — 访问密码（可选）
 

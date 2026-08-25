@@ -2,7 +2,7 @@
 
 一个功能丰富的 Telegram Bot，基于 Node.js 开发，用于群组/频道媒体消息的自动收录、检索、回复与管理，并集成群组管理和用户权限控制。
 
-**版本:** 0.5.0 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
+**版本:** 0.5.1 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
 
 ---
 
@@ -50,6 +50,14 @@
    ```
 
    浏览器访问 `http://127.0.0.1:9700`，登录密码见启动日志（或在 `.env` 中配置 `WEBUI_PASSWORD`）。
+
+6. **（可选）test 模式（临时日志）：**
+
+   ```bash
+   npm run start:test     # 或 node index.js test
+   ```
+
+   在 webui 模式基础上，日志除正常写入 `logs/<年>/<月>/<周>/<日>.log` 外，额外复制一份到 `test-log/`（与 logs 平级，仅含 `log.log`、`error.log` 两个扁平文件），**每次启动时重置**这两个文件，关闭时不清理由 test 模式产生的数据。
 
 ---
 
@@ -245,7 +253,11 @@ const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, {
   - `info` → 蓝色，写入 `logs/operation.log`
 - 使用 `async` 库的异步队列（`async.queue`）实现有序文件写入，避免并发写入错乱
 - 每条日志包含时间戳、日志级别、消息内容
-- 日志目录 `logs/` 在首次写入时自动创建
+- 日志按 **年/月/周分级目录 + 按天拆文件** 存储：`logs/<年>/<月>/<ISO周>/<YYYY-MM-DD>.log`
+  （如 `logs/2026/08/2026-W36/2026-08-31.log`，ISO 周号周一为一周开始）
+- **test 模式**（`node index test`）：日志额外复制一份到 `test-log/log.log`、`test-log/error.log`（与 logs 平级的扁平临时日志，启动时重置）
+- **关闭清理**：收到关闭信号时立即删除"定时删除"的群组提示消息与消息回复模式遗留的"正在回复该消息"提示，并刷盘日志队列保证日志不丢失
+- 日志目录在首次写入时自动创建
 
 ---
 
@@ -671,7 +683,9 @@ for (const file of commandFiles) {
 | `/media_group` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group |
 | `/media_hide` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide |
 | `/media_unhide` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide |
-| `/message_reply` | messageReply.js | 消息回复 | 进入 messageReply 模式，按编号选择消息回复 |
+| `/message_reply` | messageReply.js | 消息回复 | 进入 messageReply 模式，定位到频道转发消息时可选择回复在群组/频道 |
+| `/message_reply_group` | messageReplyGroup.js | 消息回复（群组） | 直接回复在群组中（频道转发消息用群组位置，非转发消息用消息自身位置） |
+| `/message_reply_channel` | messageReplyChannel.js | 消息回复（频道） | 直接回复在频道中（无频道位置时回退消息自身位置） |
 | `/password` | password.js | 媒体密码 | 进入 password 模式，设置/更新媒体访问密码 |
 | `/random_pictures` | randomPictures.js | 随机图片 | 查询 media_type=photo 的随机结果 |
 | `/random_videos` | randomVideos.js | 随机视频 | 可按时长筛选，支持文字列表和实际视频发送 |
@@ -918,7 +932,9 @@ handleGroupEditedMessage()
 | `/media_group` | 媒体合并模式 | modes/mediaCollectMode.js |
 | `/media_hide` | 媒体遮罩模式（Spoiler） | modes/mediaCollectMode.js |
 | `/media_unhide` | 媒体去遮罩模式 | modes/mediaCollectMode.js |
-| `/message_reply` | 在群组中回复指定消息 | modes/messageReplyMode.js |
+| `/message_reply` | 在群组/频道中回复指定消息（频道转发消息可先选择回复位置） | modes/messageReplyMode.js |
+| `/message_reply_group` | 在群组中回复指定消息 | modes/messageReplyMode.js |
+| `/message_reply_channel` | 在频道中回复指定消息 | modes/messageReplyMode.js |
 | `/search` | 进入搜索模式 | modes/searchMode.js |
 | `/delete` | 删除单一媒体 | modes/deleteMode.js |
 | `/delete_group` | 删除整个媒体组 | modes/deleteGroupMode.js |
@@ -942,6 +958,7 @@ handleGroupEditedMessage()
 | 功能 | 说明 |
 |------|------|
 | 媒体自动收录 | 群组/频道媒体自动入库（去重），带文本的媒体同步写入 message |
+| 频道转发双位置 | 频道转发至群组的媒体（含 `is_automatic_forward` 自动转发识别）在 message 记录新增 `channel_forward`、media 记录写入 `group`/`channel` 双位置，回复时可选回复在频道或群组 |
 | 编辑同步 | 消息编辑/删除后自动同步数据库 |
 | 关键字查询 | 管理员在群组中发送文本自动搜索 |
 | 成员记录 | 加入/退出自动记录，可配置封禁策略 |

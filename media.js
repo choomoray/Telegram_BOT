@@ -81,8 +81,49 @@ async function sendMediaAsReply(chatId, replyToMessageId, mediaInfo) {
     }
 }
 
+/**
+ * 恢复媒体组注释到原始位置（与用户发送一致）
+ * Telegram 机制：媒体组仅第一条可带注释。发送时不放置临时注释（仅当注释
+ * 原本就在第一条时才直接带上），其余位置的注释通过发送后二次编辑还原，
+ * 比"先放临时文本再清空重编辑"少一次 API 调用，也避免错误文本闪现。
+ * @param {number} chatId - 目标聊天 ID
+ * @param {Array} sentMessages - 发送成功的消息数组（与 items 顺序对应）
+ * @param {Array} items - 原始媒体项（含 caption）
+ * @param {number[]} captionIndexes - 注释所在的原始下标
+ */
+async function restoreMediaGroupCaptions(chatId, sentMessages, items, captionIndexes) {
+    try {
+        // 需要二次编辑的位置：不在第 0 条的所有注释位置（第 0 条发送时已带上）
+        const toEdit = captionIndexes.filter(idx => idx > 0);
+        if (toEdit.length === 0) return;
+
+        for (const idx of toEdit) {
+            const sent = sentMessages[idx];
+            const item = items[idx];
+            if (sent && item.caption) {
+                // 纯文本编辑（不启用 HTML 解析），保证任何字符的注释都能还原
+                await bot.editMessageCaption(item.caption, {
+                    chat_id: chatId,
+                    message_id: sent.message_id
+                }).catch((err) => {
+                    logger.warn(`为媒体 ${idx + 1} 添加注释失败: ${err.message}`);
+                });
+            }
+        }
+        logger.info(`媒体组注释位置恢复完成: chatId=${chatId}, 注释位于第 ${toEdit.map(i => i + 1).join('、')} 条`);
+    } catch (err) {
+        logger.warn(`媒体组注释位置恢复失败: ${err.message}`);
+    }
+}
+
 async function sendMediaGroupAsReply(chatId, replyToMessageId, mediaItems, maxGroupSize = 10) {
     if (!mediaItems || mediaItems.length === 0) return [];
+
+    // 记录注释原始位置（Telegram 机制：媒体组仅第一条可带注释，其余发送后二次编辑还原）
+    const captionIndexes = [];
+    mediaItems.forEach((item, idx) => {
+        if (item.caption) captionIndexes.push(idx);
+    });
 
     const allSentMessages = [];
 
@@ -91,7 +132,8 @@ async function sendMediaGroupAsReply(chatId, replyToMessageId, mediaItems, maxGr
         const mediaGroup = chunk.map((item, index) => ({
             type: item.type,
             media: item.fileId,
-            caption: index === 0 ? (item.caption || undefined) : undefined,
+            // 注释原本在整组第一条时直接带上；否则不放置临时注释（发送后编辑还原）
+            caption: (i === 0 && index === 0 && captionIndexes.includes(0)) ? item.caption : undefined,
             parse_mode: 'HTML',
             has_spoiler: item.has_spoiler || false
         }));
@@ -111,6 +153,9 @@ async function sendMediaGroupAsReply(chatId, replyToMessageId, mediaItems, maxGr
             throw err;
         }
     }
+
+    // 注释不在第一条时：发送后编辑回原始位置
+    await restoreMediaGroupCaptions(chatId, allSentMessages, mediaItems, captionIndexes);
 
     return allSentMessages;
 }
@@ -258,6 +303,7 @@ module.exports = {
     extractMediaFromMessage,
     sendMediaAsReply,
     sendMediaGroupAsReply,
+    restoreMediaGroupCaptions,
     clearMediaGroupState,
     getMediaByGroupIdSorted,
     getMediaByGroupIdAndSubgroup,

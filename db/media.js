@@ -4,7 +4,8 @@ const logger = require('../logger');
 
 /**
  * 新增 media 记录
- * @param {Object} data - { group_id, subgroup, file_id, file_unique_id, media_type, message_id, video_time (optional) }
+ * @param {Object} data - { group_id, subgroup, file_id, file_unique_id, media_type, message_id, video_time (optional),
+ *                          group (optional): { chat_id, message_id }, channel (optional): { chat_id, message_id } }
  */
 async function insertMedia(data) {
     try {
@@ -18,6 +19,13 @@ async function insertMedia(data) {
             message_id: data.message_id
             // 不再添加 pwd 字段，只有通过 /password 设置的才有
         };
+        // 双位置：group=群组位置、channel=频道位置（频道转发媒体两项都有）
+        if (data.group && data.group.chat_id) {
+            doc.group = { chat_id: data.group.chat_id, message_id: data.group.message_id };
+        }
+        if (data.channel && data.channel.chat_id) {
+            doc.channel = { chat_id: data.channel.chat_id, message_id: data.channel.message_id };
+        }
         if (data.media_type === 'video' && data.video_time !== undefined && data.video_time !== null) {
             doc.video_time = data.video_time;
         }
@@ -34,6 +42,27 @@ async function insertMedia(data) {
         logger.error(`media 插入失败: ${err.message}`);
         throw err;
     }
+}
+
+/**
+ * 根据聊天类型构建媒体位置对象：
+ * 频道 → { channel: { chat_id, message_id } }；群组/未知 → { group: { chat_id, message_id } }
+ * @param {number|string} chatId - 聊天 ID
+ * @param {number|string} messageId - 消息 ID
+ * @param {string} [chatType] - 已知聊天类型（channel/group），未知时查询 channel_group 库
+ * @returns {Promise<Object>} 形如 { group: {...} } 或 { channel: {...} }
+ */
+async function buildMediaLocation(chatId, messageId, chatType) {
+    let type = chatType;
+    if (!type) {
+        const { getChannelGroupById } = require('./channelGroup');
+        const info = await getChannelGroupById(chatId);
+        type = info && info.type ? info.type : 'group';
+    }
+    if (type === 'channel') {
+        return { channel: { chat_id: chatId, message_id: messageId } };
+    }
+    return { group: { chat_id: chatId, message_id: messageId } };
 }
 
 /**
@@ -138,5 +167,6 @@ module.exports = {
     findMediaByGroupIdAndSubgroup,
     getMaxSubgroup,
     deleteMediaByFileUniqueId,
-    updateMediaPassword
+    updateMediaPassword,
+    buildMediaLocation
 };

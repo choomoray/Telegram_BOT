@@ -61,10 +61,14 @@ async function handleEditMode(msg, state) {
             return true;
         }
 
-        // 获取目标消息的 chat_id 和 message_id
+        // 获取目标消息的 chat_id 和 message_id（优先群组位置，其次频道位置，最后从 group_id 推导）
         const targetGroupId = mediaDoc.group_id;
-        const targetMessageId = mediaDoc.message_id;
-        const targetChatId = extractChatIdFromGroupId(targetGroupId);
+        const targetChatId = (mediaDoc.group && mediaDoc.group.chat_id) ||
+            (mediaDoc.channel && mediaDoc.channel.chat_id) ||
+            extractChatIdFromGroupId(targetGroupId);
+        const targetMessageId = (mediaDoc.group && mediaDoc.group.message_id) ||
+            (mediaDoc.channel && mediaDoc.channel.message_id) ||
+            mediaDoc.message_id;
 
         if (!targetChatId) {
             logger.error(`无法从 group_id 提取 chat_id: ${targetGroupId}`);
@@ -210,18 +214,37 @@ async function handleEditMode(msg, state) {
 
 /**
  * 执行数据库更新操作（更新/插入 message 记录 + group_list 标记）
+ * 若媒体记录中存在频道位置（频道转发媒体），新建/更新 message 时一并写入
+ * channel_forward（双位置），使补注释后的消息立即可选"回复在频道/群组"。
  */
 async function updateMessageDb(messageCol, {
     isClearing, targetChatId, targetMessageId, targetGroupId,
     targetFileUniqueId, targetMediaType, cleanText
 }) {
+    // 从媒体记录获取双位置（group + channel），用于补全 channel_forward
+    let channelForward = null;
+    try {
+        const { findMediaByFileUniqueId } = require('../../db/media');
+        const mediaDoc = await findMediaByFileUniqueId(targetFileUniqueId);
+        if (mediaDoc && mediaDoc.channel && mediaDoc.channel.chat_id) {
+            channelForward = {
+                is_channel: true,
+                channel_chat_id: mediaDoc.channel.chat_id,
+                channel_message_id: mediaDoc.channel.message_id || null,
+                group_chat_id: (mediaDoc.group && mediaDoc.group.chat_id) || targetChatId,
+                group_message_id: (mediaDoc.group && mediaDoc.group.message_id) || targetMessageId
+            };
+        }
+    } catch (err) {
+        logger.error(`构建 channel_forward 失败: ${err.message}`);
+    }
+
+    const existing = await messageCol.findOne({ file_unique_id: targetFileUniqueId });
+
     if (isClearing) {
-        const existing = await messageCol.findOne({
-            chat_id: targetChatId, message_id: targetMessageId
-        });
         if (existing) {
-            await messageCol.deleteOne({ chat_id: targetChatId, message_id: targetMessageId });
-            logger.info(`已删除消息记录: chat_id=${targetChatId}, message_id=${targetMessageId}`);
+            await messageCol.deleteOne({ file_unique_id: targetFileUniqueId });
+            logger.info(`已删除消息记录: file_unique_id=${targetFileUniqueId}`);
 
             const otherMessages = await messageCol.countDocuments({ group_id: targetGroupId });
             if (otherMessages === 0) {
@@ -232,15 +255,11 @@ async function updateMessageDb(messageCol, {
             }
         }
     } else {
-        const existing = await messageCol.findOne({
-            chat_id: targetChatId, message_id: targetMessageId
-        });
         if (existing) {
-            await messageCol.updateOne(
-                { chat_id: targetChatId, message_id: targetMessageId },
-                { $set: { text: cleanText } }
-            );
-            logger.info(`已更新消息文本: chat_id=${targetChatId}, message_id=${targetMessageId}`);
+            const update = { text: cleanText };
+            if (channelForward) update.channel_forward = channelForward;
+            await messageCol.updateOne({ file_unique_id: targetFileUniqueId }, { $set: update });
+            logger.info(`已更新消息文本: file_unique_id=${targetFileUniqueId}`);
         } else {
             await messageCol.insertOne({
                 chat_id: targetChatId,
@@ -248,9 +267,10 @@ async function updateMessageDb(messageCol, {
                 text: cleanText,
                 file_unique_id: targetFileUniqueId,
                 media_type: targetMediaType,
-                group_id: targetGroupId
+                group_id: targetGroupId,
+                ...(channelForward ? { channel_forward: channelForward } : {})
             });
-            logger.info(`已插入新消息记录: chat_id=${targetChatId}, message_id=${targetMessageId}`);
+            logger.info(`已插入新消息记录: file_unique_id=${targetFileUniqueId}`);
         }
         await setGroupDelete(targetGroupId, 0);
     }

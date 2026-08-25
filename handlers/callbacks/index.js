@@ -15,6 +15,7 @@ const execCmdCallback = require('./execCmd');
 const { handleMarkMenuCallback, handleMarkRecordCallback, handleMarkRecordSwitchCallback } = require('./markCallback');
 const sendMode = require('../modes/sendMode');
 const tagMode = require('../modes/tagMode');
+const messageReplyMode = require('../modes/messageReplyMode');
 const transportMode = require('../modes/transportMode');
 const settingMode = require('../modes/settingMode');
 const passwordMode = require('../modes/passwordMode');
@@ -72,7 +73,8 @@ const callbackHandlers = {
     },
     transport: async (query) => {
         await transportMode.handleCallback(query);
-    }
+    },
+    mreply_loc: messageReplyMode.handleLocationCallback
 };
 
 async function handleCallbackQuery(query) {

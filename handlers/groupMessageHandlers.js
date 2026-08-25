@@ -50,11 +50,18 @@ setInterval(() => {
     }
 }, 60 * 1000);
 
+// 待定时删除的消息注册表（收到关闭信号时立即执行删除）
+const pendingDeletions = new Set();
+
 /**
- * 延迟删除消息
+ * 延迟删除消息（60 秒后自动删除"处理中/收录成功"等提示）
+ * 同时登记到 pendingDeletions，收到关闭信号时立即删除
  */
-async function scheduleDelete(chatId, messageId, delay = 60 * 1000) {
+function scheduleDelete(chatId, messageId, delay = 60 * 1000) {
+    const key = `${chatId}:${messageId}`;
+    pendingDeletions.add(key);
     setTimeout(async () => {
+        pendingDeletions.delete(key);
         try {
             await bot.deleteMessage(chatId, messageId);
             logger.info(`自动删除消息: chatId=${chatId}, messageId=${messageId}`);
@@ -62,6 +69,24 @@ async function scheduleDelete(chatId, messageId, delay = 60 * 1000) {
             logger.warn(`自动删除消息失败: ${err.message}`);
         }
     }, delay);
+}
+
+/**
+ * 立即执行所有待定时删除的消息（收到关闭信号时调用，不再等待定时器）
+ */
+async function flushPendingDeletions() {
+    for (const key of [...pendingDeletions]) {
+        pendingDeletions.delete(key);
+        const sep = key.lastIndexOf(':');
+        const chatId = Number(key.slice(0, sep));
+        const messageId = Number(key.slice(sep + 1));
+        try {
+            await bot.deleteMessage(chatId, messageId);
+            logger.info(`关闭清理: 立即删除定时消息 chatId=${chatId}, messageId=${messageId}`);
+        } catch (err) {
+            logger.warn(`关闭清理: 删除定时消息失败 chatId=${chatId}, messageId=${messageId}: ${err.message}`);
+        }
+    }
 }
 
 /**
@@ -84,26 +109,46 @@ async function updateProcessingMessage(msg, processingMessageId, finalText, auto
 }
 
 /**
- * 判断当前群组消息是否为「频道转发」的媒体（关联频道自动转发或手动转发）
- * 通过 Telegram 转发来源标记识别：forward_origin.type==='channel'（新版 API）
- * 或 forward_from_chat（旧版 API）。识别为频道转发则完全跳过（不收录、不提示）。
+ * 识别当前群组消息是否为「频道转发」的媒体（关联频道自动转发或手动转发）
+ * 识别路径：
+ *   1. 转发来源标记：forward_origin.type==='channel'（新版 API）或 forward_from_chat（旧版 API）
+ *   2. 自动转发标记 msg.is_automatic_forward === true（Telegram 对"频道→绑定讨论群组"的
+ *      自动转发只给该标记、不一定带 forward_origin），结合绑定库 channel_group：
+ *      群组文档 { id, type:'group', bind_id } 的 bind_id 即绑定频道 ID
  * @param {Object} msg - 当前收到的群组消息
- * @returns {Promise<boolean>}
+ * @returns {Promise<{channelChatId: number|null, isAutoForward: boolean}|null>} 频道转发信息，非频道转发返回 null
  */
-async function isChannelForwardMessage(msg) {
+async function resolveChannelForwardInfo(msg) {
     try {
-        if (!['group', 'supergroup'].includes(msg.chat.type)) return false;
+        if (!['group', 'supergroup'].includes(msg.chat.type)) return null;
+
+        // 路径1：转发来源标记
         let originType = null;
+        let originChatId = null;
         if (msg.forward_origin && msg.forward_origin.type) {
             originType = msg.forward_origin.type;
+            if (msg.forward_origin.chat) originChatId = msg.forward_origin.chat.id;
         } else if (msg.forward_from_chat) {
             originType = msg.forward_from_chat.type;
+            originChatId = msg.forward_from_chat.id;
         }
-        // 转发来源为频道（channel 或超级频道）
-        return originType === 'channel';
+        if (originType === 'channel') {
+            return { channelChatId: originChatId, isAutoForward: !!msg.is_automatic_forward };
+        }
+
+        // 路径2：自动转发标记 + 绑定库定位频道
+        if (msg.is_automatic_forward) {
+            const channelGroupCol = getCollection(COLLECTIONS.CHANNEL_GROUP);
+            const groupDoc = await channelGroupCol.findOne({ id: msg.chat.id, type: 'group' });
+            if (groupDoc && groupDoc.bind_id) {
+                return { channelChatId: groupDoc.bind_id, isAutoForward: true };
+            }
+        }
+
+        return null;
     } catch (err) {
-        logger.error(`判断频道转发来源失败: ${err.message}`);
-        return false;
+        logger.error(`识别频道转发来源失败: ${err.message}`);
+        return null;
     }
 }
 
@@ -131,13 +176,15 @@ async function isChannelAutoForward(msg, existingMessage) {
             return true;
         }
 
-        // 方式二（放宽）：已收录媒体来自一个被管理的频道，且当前消息来自被管理的群组
-        // （不再要求 bind_id 相等，用户已在 channel 管理中互相绑定）
+        // 方式二：已收录媒体来自被管理的频道，且当前群组绑定了该频道
+        // （使用绑定库 channel_group 的 bind_id 精确判定频道↔群组关系）
         const channelGroupCol = getCollection(COLLECTIONS.CHANNEL_GROUP);
-        const channel = await channelGroupCol.findOne({ id: existingMessage.chat_id, type: 'channel' });
-        if (!channel) return false;
         const group = await channelGroupCol.findOne({ id: msg.chat.id, type: 'group' });
-        return !!group;
+        if (!group || !group.bind_id) return false;
+        if (existingMessage.chat_id === group.bind_id) return true;
+        // 放宽：已收录媒体的归属频道与当前群组都在管理库中（兼容 bind_id 未填写的旧绑定）
+        const channel = await channelGroupCol.findOne({ id: existingMessage.chat_id, type: 'channel' });
+        return !!channel;
     } catch (err) {
         logger.error(`判断频道转发失败: ${err.message}`);
         return false;
@@ -145,41 +192,72 @@ async function isChannelAutoForward(msg, existingMessage) {
 }
 
 /**
- * 频道转发媒体归属转移：群组收到频道转发的媒体时，
- * 将 message/media 记录归属更新为群组（chat_id/message_id 改为群组的），
- * 使机器人能在群组中回复该媒体。
+ * 频道转发媒体归属记录：群组收到频道转发的媒体时，
+ * 1. message 记录（有文本时）新增 channel_forward 项：标记为频道转发 + 频道源位置 + 群组位置
+ *    （不覆盖 chat_id/message_id，保持频道源位置）
+ * 2. media 记录写入双位置：group=群组位置、channel=频道位置（有则存），不再覆盖顶层 message_id
+ * 使回复操作时用户可选择回复在频道还是群组；给空媒体加注释时也能拿到双位置。
  * 媒体本身（media 记录与 group_id）保持频道收录时的归属，不重复收录。
+ * @param {Object} msg - 当前收到的群组消息
+ * @param {Object} mediaInfo - 媒体信息
+ * @param {Object} [channelForwardInfo] - resolveChannelForwardInfo 的返回值，可选（未传时从已有记录推导）
  */
-async function transferRecordToGroup(msg, mediaInfo) {
+async function transferRecordToGroup(msg, mediaInfo, channelForwardInfo) {
     try {
         const { fileUniqueId, caption, type } = mediaInfo;
         const messageCol = getCollection(COLLECTIONS.MESSAGE);
         const mediaCol = getCollection(COLLECTIONS.MEDIA);
 
-        const existing = await messageCol.findOne({ file_unique_id: fileUniqueId });
-        if (existing) {
-            const update = { chat_id: msg.chat.id, message_id: msg.message_id };
+        const existingMessage = await messageCol.findOne({ file_unique_id: fileUniqueId });
+        const existingMedia = await mediaCol.findOne({ file_unique_id: fileUniqueId });
+
+        // 频道源位置：优先取识别信息/已有 message 记录，均无则 null
+        const channelChatId = (channelForwardInfo && channelForwardInfo.channelChatId) ||
+            (existingMessage && existingMessage.chat_id) || null;
+        const channelMessageId = existingMessage ? existingMessage.message_id : null;
+
+        const channelForward = {
+            is_channel: true,
+            channel_chat_id: channelChatId,
+            channel_message_id: channelMessageId,
+            group_chat_id: msg.chat.id,
+            group_message_id: msg.message_id
+        };
+
+        if (existingMessage) {
+            // 已有记录（通常为频道侧收录）：保持 chat_id/message_id 为频道源位置，补充 channel_forward
+            const update = { channel_forward: channelForward };
             if (caption) update.text = removeLevelSuffix(caption);
             await messageCol.updateOne({ file_unique_id: fileUniqueId }, { $set: update });
         } else if (caption) {
-            // 媒体存在但无 message 记录（频道侧未收录文本），群组转发带文本则创建
-            const mediaDoc = await mediaCol.findOne({ file_unique_id: fileUniqueId });
+            // 无 message 记录（频道侧未收录文本），群组转发带文本则创建（位置为群组，频道源尽可能补全）
             await upsertMessage({
                 message_id: msg.message_id,
                 chat_id: msg.chat.id,
                 text: removeLevelSuffix(caption),
                 file_unique_id: fileUniqueId,
                 media_type: type,
-                group_id: mediaDoc ? mediaDoc.group_id : null
+                group_id: existingMedia ? existingMedia.group_id : null,
+                channel_forward: channelForward
             });
         }
 
-        // media 记录的 message_id 更新为群组消息（便于按群组消息定位）
-        await mediaCol.updateOne({ file_unique_id: fileUniqueId }, { $set: { message_id: msg.message_id } });
+        // media 记录：group/channel 双位置（不再覆盖顶层 message_id，保留首次收录位置）
+        if (existingMedia) {
+            const update = {
+                'group.chat_id': msg.chat.id,
+                'group.message_id': msg.message_id
+            };
+            if (channelChatId) {
+                update['channel.chat_id'] = channelChatId;
+                if (channelMessageId) update['channel.message_id'] = channelMessageId;
+            }
+            await mediaCol.updateOne({ file_unique_id: fileUniqueId }, { $set: update });
+        }
 
-        logger.info(`频道转发媒体归属转移至群组: file_unique_id=${fileUniqueId}, chat_id=${msg.chat.id}, message_id=${msg.message_id}`);
+        logger.info(`频道转发媒体记录双位置: file_unique_id=${fileUniqueId}, group=${msg.chat.id}/${msg.message_id}, channel=${channelChatId}/${channelMessageId}`);
     } catch (err) {
-        logger.error(`频道转发归属转移失败: ${err.message}`);
+        logger.error(`频道转发归属记录失败: ${err.message}`);
     }
 }
 
@@ -191,9 +269,10 @@ async function handleNewMediaMessage(msg) {
     if (!mediaInfo) return;
 
     // 频道→讨论群组自动转发（或手动转发）的频道媒体：不重复收录，
-    // 将记录归属转移为群组（chat_id/message_id 改为群组的），使机器人可在群组回复
-    if (await isChannelForwardMessage(msg)) {
-        await transferRecordToGroup(msg, mediaInfo);
+    // 记录 message.channel_forward + media 双位置（群组位置 + 频道位置），使回复时可选频道或群组
+    const channelForwardInfo = await resolveChannelForwardInfo(msg);
+    if (channelForwardInfo) {
+        await transferRecordToGroup(msg, mediaInfo, channelForwardInfo);
         return;
     }
 
@@ -307,6 +386,10 @@ async function handleNewMediaMessage(msg) {
         await upsertGroupList(groupId);
         operations.push({ type: 'groupList', groupId });
 
+        // 写入媒体位置：频道收录存 channel，群组收录存 group
+        const { buildMediaLocation } = require('../db/media');
+        const location = await buildMediaLocation(chatId, messageId, msg.chat.type);
+
         await insertMedia({
             group_id: groupId,
             subgroup: 1,
@@ -314,9 +397,10 @@ async function handleNewMediaMessage(msg) {
             file_unique_id: fileUniqueId,
             media_type: type,
             message_id: messageId,
-            video_time: videoTime
+            video_time: videoTime,
+            ...location
         });
-        logger.info(`media 插入: file_unique_id=${fileUniqueId}, type=${type}, message_id=${messageId}, group_id=${groupId}, subgroup=1${videoTime ? `, video_time=${videoTime}` : ''}`);
+        logger.info(`media 插入: file_unique_id=${fileUniqueId}, type=${type}, message_id=${messageId}, group_id=${groupId}, subgroup=1${videoTime ? `, video_time=${videoTime}` : ''}${location.group ? `, group=${location.group.chat_id}/${location.group.message_id}` : ''}${location.channel ? `, channel=${location.channel.chat_id}/${location.channel.message_id}` : ''}`);
         operations.push({ type: 'media', fileUniqueId, groupId });
 
         if (caption) {
@@ -519,5 +603,7 @@ async function handleGroupEditedMessage(editedMsg) {
 
 module.exports = {
     handleGroupMessage,
-    handleGroupEditedMessage
+    handleGroupEditedMessage,
+    scheduleDelete,
+    flushPendingDeletions
 };

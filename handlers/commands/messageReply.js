@@ -11,7 +11,16 @@ const { insertLog } = require('../../db/log');
 const { clearUserContext } = require('../modes/messageReplyMode');
 const { repeatModeMsg } = require('../../utils/reply');
 
-async function handleMessageReplyCommand(userId, msg) {
+/**
+ * 进入消息回复模式
+ * @param {number} userId - 用户ID
+ * @param {Object} msg - Telegram 消息
+ * @param {string|null} replyTarget - 指定回复位置：
+ *   null    = 定位后询问（频道转发消息时询问群组/频道）
+ *   'group' = 直接回复在群组（/message_reply_group）
+ *   'channel' = 直接回复在频道（/message_reply_channel）
+ */
+async function enterMessageReplyMode(userId, msg, replyTarget) {
     const state = getUserState(userId);
     if (state && state.mode === 'message_reply') {
         updateUserActivity(userId);
@@ -27,6 +36,7 @@ async function handleMessageReplyCommand(userId, msg) {
         mode: 'message_reply',
         lastActivity: Date.now(),
         step: 'waiting_for_target',
+        replyTarget: replyTarget || null,   // null=定位后询问, 'group'/'channel'=直接指定
         targetGroupId: null,
         targetChatId: null,
         targetMessageId: null,
@@ -46,9 +56,12 @@ async function handleMessageReplyCommand(userId, msg) {
         }
     });
 
-    logger.info(`用户 ${userId} 进入消息回复模式`);
+    logger.info(`用户 ${userId} 进入消息回复模式${replyTarget ? `（回复位置: ${replyTarget}）` : ''}`);
 
-    const welcomeMsg = `✅ 已进入消息回复模式\n\n请发送需要回复的媒体消息：`;
+    const targetHint = replyTarget === 'group'
+        ? '\n回复位置：群组'
+        : (replyTarget === 'channel' ? '\n回复位置：频道' : '');
+    const welcomeMsg = `✅ 已进入消息回复模式${targetHint}\n\n请发送需要回复的媒体消息：`;
     await bot.sendMessage(userId, welcomeMsg, {
         reply_to_message_id: msg.message_id,
         allow_sending_without_reply: true
@@ -57,4 +70,6 @@ async function handleMessageReplyCommand(userId, msg) {
     insertLog(13, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
 }
 
-module.exports = handleMessageReplyCommand;
+// /message_reply：定位后询问回复位置（频道转发消息时）
+module.exports = (userId, msg) => enterMessageReplyMode(userId, msg, null);
+module.exports.enterMessageReplyMode = enterMessageReplyMode;
