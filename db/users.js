@@ -48,6 +48,58 @@ async function updateLastSeen(userId) {
     }
 }
 
+// 操作锁（封禁/解封操作期间忽略该用户的 chat_member 事件）
+const userOperationLocks = new Set();
+
+// 最近被机器人解封的用户（userId -> 过期时间戳）：
+// 解封动作会在各聊天产生 left 状态更新（回显），若被 chat_member 处理器当作
+// "主动退群"会触发"退出即封禁"——导致"管理员刚解封，机器人立刻又封禁"。
+// 解封后在 TTL 内的 left/kicked 更新一律忽略（不触发退出封禁）。
+const recentlyUnbanned = new Map();
+const RECENT_UNBAN_TTL = 2 * 60 * 1000;
+
+// 定期清理过期的解封记录
+setInterval(() => {
+    const now = Date.now();
+    for (const [userId, expiry] of recentlyUnbanned.entries()) {
+        if (now > expiry) recentlyUnbanned.delete(userId);
+    }
+}, 60 * 1000);
+
+function markRecentlyUnbanned(userId) {
+    recentlyUnbanned.set(userId, Date.now() + RECENT_UNBAN_TTL);
+}
+
+function isRecentlyUnbanned(userId) {
+    const expiry = recentlyUnbanned.get(userId);
+    if (expiry === undefined) return false;
+    if (Date.now() > expiry) {
+        recentlyUnbanned.delete(userId);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * 获取需要执行封禁/解封的聊天 ID 集合：
+ * - 用户所在的全部群组/频道（user.group）
+ * - 管理库中记录的全部群组与频道（channel_group，含绑定的频道↔群组对）
+ * 两者并集去重，保证封禁/解封覆盖用户所在的全部聊天（含绑定关系两侧）。
+ */
+async function collectBanTargetChats(user) {
+    const ids = new Set(user.group || []);
+    try {
+        const channelGroupCol = getCollection(COLLECTIONS.CHANNEL_GROUP);
+        const all = await channelGroupCol.find({}).toArray();
+        for (const g of all) {
+            ids.add(g.id);
+        }
+    } catch (err) {
+        logger.error(`获取 channel_group 列表失败: ${err.message}`);
+    }
+    return [...ids];
+}
+
 async function banUserFully(userId, source = 'manual') {
     const col = getCol();
     const user = await col.findOne({ id: userId });
@@ -59,39 +111,19 @@ async function banUserFully(userId, source = 'manual') {
     await col.updateOne({ id: userId }, { $set: { state: 0 } });
     logger.info(`用户 ${userId} 已设置为封禁状态 (source=${source})`);
 
-    const groups = user.group || [];
+    const chatIds = await collectBanTargetChats(user);
     let banned = 0;
     let failed = 0;
-    const processedIds = new Set(groups);
 
-    for (const gId of groups) {
+    for (const chatId of chatIds) {
         try {
-            await safeApiCall(() => bot.banChatMember(gId, userId));
+            await safeApiCall(() => bot.banChatMember(chatId, userId));
             banned++;
-            logger.info(`已在频道 ${gId} 中封禁并踢出用户 ${userId}`);
+            logger.info(`已在聊天 ${chatId} 中封禁并踢出用户 ${userId}`);
         } catch (err) {
             failed++;
-            logger.warn(`在频道 ${gId} 中封禁用户 ${userId} 失败: ${err.message}`);
+            logger.warn(`在聊天 ${chatId} 中封禁用户 ${userId} 失败: ${err.message}`);
         }
-    }
-
-    try {
-        const channelGroupCol = getCollection(COLLECTIONS.CHANNEL_GROUP);
-        const allChannelGroups = await channelGroupCol.find({ type: 'group' }).toArray();
-        for (const g of allChannelGroups) {
-            if (!processedIds.has(g.id)) {
-                try {
-                    await bot.banChatMember(g.id, userId);
-                    banned++;
-                    logger.info(`已在 channel_group 群组 ${g.id} 中封禁并踢出用户 ${userId}`);
-                } catch (err) {
-                    failed++;
-                    logger.warn(`在 channel_group 群组 ${g.id} 中封禁用户 ${userId} 失败: ${err.message}`);
-                }
-            }
-        }
-    } catch (err) {
-        logger.error(`获取 channel_group 列表失败: ${err.message}`);
     }
 
     logger.info(`用户 ${userId} 封禁完成: 成功 ${banned}，失败 ${failed}`);
@@ -107,41 +139,23 @@ async function unbanUserFully(userId) {
     }
 
     await col.updateOne({ id: userId }, { $set: { state: 1 } });
+    // 标记最近解封：TTL 内忽略该用户的 left/kicked 状态更新，防止解封动作回显触发"退出即封禁"
+    markRecentlyUnbanned(userId);
     logger.info(`用户 ${userId} 已设置为解封状态`);
 
-    const groups = user.group || [];
+    const chatIds = await collectBanTargetChats(user);
     let unbanned = 0;
     let failed = 0;
-    const processedIds = new Set(groups);
 
-    for (const gId of groups) {
+    for (const chatId of chatIds) {
         try {
-            await bot.unbanChatMember(gId, userId);
+            await bot.unbanChatMember(chatId, userId);
             unbanned++;
-            logger.info(`已在频道 ${gId} 中解封用户 ${userId}`);
+            logger.info(`已在聊天 ${chatId} 中解封用户 ${userId}`);
         } catch (err) {
             failed++;
-            logger.warn(`在频道 ${gId} 中解封用户 ${userId} 失败: ${err.message}`);
+            logger.warn(`在聊天 ${chatId} 中解封用户 ${userId} 失败: ${err.message}`);
         }
-    }
-
-    try {
-        const channelGroupCol = getCollection(COLLECTIONS.CHANNEL_GROUP);
-        const allChannelGroups = await channelGroupCol.find({ type: 'group' }).toArray();
-        for (const g of allChannelGroups) {
-            if (!processedIds.has(g.id)) {
-                try {
-                    await bot.unbanChatMember(g.id, userId);
-                    unbanned++;
-                    logger.info(`已在 channel_group 群组 ${g.id} 中解封用户 ${userId}`);
-                } catch (err) {
-                    failed++;
-                    logger.warn(`在 channel_group 群组 ${g.id} 中解封用户 ${userId} 失败: ${err.message}`);
-                }
-            }
-        }
-    } catch (err) {
-        logger.error(`获取 channel_group 列表失败: ${err.message}`);
     }
 
     logger.info(`用户 ${userId} 解封完成: 成功 ${unbanned}，失败 ${failed}`);
@@ -191,9 +205,6 @@ async function getAllUsers() {
     }
 }
 
-// 操作锁
-const userOperationLocks = new Set();
-
 module.exports = {
     addUserToGroup,
     removeUserFromGroup,
@@ -204,5 +215,7 @@ module.exports = {
     setUserState,
     setUserWhite,
     getAllUsers,
-    userOperationLocks
+    userOperationLocks,
+    markRecentlyUnbanned,
+    isRecentlyUnbanned
 };

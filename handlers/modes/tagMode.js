@@ -12,7 +12,7 @@ const { findMediaByFileUniqueId } = require('../../db/media');
 const { findMessageByFileUniqueId } = require('../../db/message');
 const { getMediaByGroupIdSorted, sendMediaGroupAsReply } = require('../../media');
 const { addTagToGroup, removeTagFromGroup, getGroupTags } = require('../../db/message');
-const { getTags, sortTags, addTag, removeTag, renameTag, setTagImportant, tagUsed } = require('../../db/tags');
+const { getTags, sortTags, addTag, removeTag, renameTag, setTagPin, tagUsed } = require('../../db/tags');
 const { buildTagKeyboard, splitTagInput } = require('../../utils/tagUi');
 const { extractMediaFromMessage } = require('../../media');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
@@ -89,7 +89,7 @@ async function showGroupTagAction(userId, messageId, groupId, mode, page = 1) {
     if (mode === 'add') {
         available = tags.filter(t => !current.includes(t.name));
     } else {
-        available = current.map(n => ({ name: n, important: false, count: 0 }));
+        available = current.map(n => ({ name: n, pin: 0, count: 0 }));
     }
 
     const result = buildTagKeyboard(available, {
@@ -132,7 +132,7 @@ async function showEditTagMenu(userId, messageId) {
         ]
     };
     const tagText = tags.length
-        ? `📌 当前标签：\n${tags.map(t => `${t.important ? '⭐' : '·'} ${t.name}（${t.count}次）`).join('\n')}`
+        ? `📌 当前标签：\n${tags.map(t => `${t.pin > 0 ? `📍${t.pin}` : '·'} ${t.name}（${t.count}次）`).join('\n')}`
         : '📌 当前标签：（无）';
     await bot.editMessageText(`标签管理：\n${tagText}`, {
         chat_id: userId,
@@ -156,7 +156,7 @@ async function showTagPickList(userId, messageId, action, page = 1) {
     const titles = {
         rename: '✏️ 请选择要修改的标签：',
         del: '🗑️ 请选择要删除的标签：',
-        pin: '⭐ 请选择要固定/取消固定的标签：'
+        pin: '⭐ 请选择要固定置顶的标签：'
     };
     const result = buildTagKeyboard(tags, {
         prefix: 'tagedit:pick',
@@ -312,20 +312,16 @@ async function handleCallback(query) {
                     await bot.answerCallbackQuery(query.id, { text: result.error || '删除失败' });
                 }
             } else if (pendingAction === 'pin') {
-                const current = await getTags();
-                const t = current.find(x => x.name.toLowerCase() === tag.toLowerCase());
-                const nextImportant = t ? !t.important : false;
-                const result = await setTagImportant(tag, nextImportant);
-                if (result.ok) {
-                    await bot.editMessageText(`✅ 标签「${tag}」已${nextImportant ? '设为重要（固定置顶）' : '取消固定'}`, {
+                // 选择标签后：输入置顶位置（0=取消置顶，1起=按钮网格位置）
+                if (state) setUserState(userId, { ...state, step: 'pin_tag', pendingPinTag: tag, lastActivity: Date.now() });
+                await bot.editMessageText(
+                    `⭐ 请输入「${tag}」的置顶位置：\n0 = 取消置顶；1 起 = 按钮位置（每行 4 个，1 为左上第一个按钮，最大 40）`,
+                    {
                         chat_id: userId,
                         message_id: messageId
-                    });
-                    await bot.answerCallbackQuery(query.id, { text: nextImportant ? '已固定' : '已取消固定' });
-                    logger.info(`用户 ${userId} 设置标签固定: ${tag} -> ${nextImportant}`);
-                } else {
-                    await bot.answerCallbackQuery(query.id, { text: result.error || '操作失败' });
-                }
+                    }
+                );
+                await bot.answerCallbackQuery(query.id);
             } else {
                 await bot.answerCallbackQuery(query.id, { text: '❌ 请先选择操作' });
             }
@@ -380,7 +376,10 @@ async function handleTagMode(msg, state) {
             if (state.tagMsgId) {
                 await showGroupTagAction(userId, state.tagMsgId, state.groupId, state.groupTagMode);
             }
-            await bot.sendMessage(userId, `✅ 已${state.groupTagMode === 'add' ? '添加' : '移除'}标签：${names.join('、')}`, {
+            // 用新消息列出当前该媒体的全部标签
+            const currentTags = await getGroupTags(state.groupId);
+            const currentText = currentTags.length ? `\n📌 当前全部标签：${currentTags.join('、')}` : '\n📌 当前全部标签：（无）';
+            await bot.sendMessage(userId, `✅ 已${state.groupTagMode === 'add' ? '添加' : '移除'}标签：${names.join('、')}${currentText}`, {
                 reply_to_message_id: userMsgId
             });
         } else {
@@ -402,6 +401,28 @@ async function handleTagMode(msg, state) {
         });
         if (result.ok) logger.info(`用户 ${userId} 添加标签: ${name}`);
         if (state) setUserState(userId, { ...state, step: 'menu', lastActivity: Date.now() });
+        return true;
+    }
+
+    if (state.step === 'pin_tag') {
+        const raw = (msg.text || '').trim();
+        const num = parseInt(raw, 10);
+        if (isNaN(num) || num < 0 || String(num) !== raw) {
+            await bot.sendMessage(userId, '❌ 请输入 0 或正整数位置（0=取消置顶，1 起=按钮位置）', {
+                reply_to_message_id: userMsgId
+            });
+            return true;
+        }
+        const pin = Math.min(num, 40);
+        const result = await setTagPin(state.pendingPinTag, pin);
+        const row = pin > 0 ? `（第 ${Math.floor((pin - 1) / 4) + 1} 行第 ${((pin - 1) % 4) + 1} 个按钮）` : '';
+        await bot.sendMessage(userId, result.ok
+            ? `✅ 标签「${state.pendingPinTag}」${pin === 0 ? '已取消置顶' : `已置顶到位置 ${pin}${row}`}`
+            : `❌ ${result.error}`, {
+            reply_to_message_id: userMsgId
+        });
+        if (result.ok) logger.info(`用户 ${userId} 设置标签置顶: ${state.pendingPinTag} -> ${pin}`);
+        if (state) setUserState(userId, { ...state, step: 'menu', pendingPinTag: null, lastActivity: Date.now() });
         return true;
     }
 

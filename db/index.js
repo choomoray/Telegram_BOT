@@ -62,6 +62,10 @@ async function initCollections() {
         await subCollectionCol.createIndex({ id: 1 }, { unique: true });
         await subCollectionCol.createIndex({ collection_id: 1, updated_at: -1 });
 
+        // tags 集合索引（独立标签库）
+        const tagsCol = db.collection(COLLECTIONS.TAGS);
+        await tagsCol.createIndex({ name: 1 }, { unique: true });
+
         logger.success('数据库集合索引创建完成');
     } catch (err) {
         logger.error('初始化集合索引失败:', err.message);

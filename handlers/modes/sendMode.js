@@ -264,7 +264,10 @@ async function applyManualTags(userId, text, groupId, mode, tagMsgId) {
     if (tagMsgId) {
         await renderTagMessage(userId, tagMsgId, groupId, 1);
     }
-    await bot.sendMessage(userId, `✅ 已${mode === 'add' ? '添加' : '移除'}标签：${names.join('、')}`);
+    // 用新消息列出当前该媒体的全部标签
+    const currentTags = await getGroupTags(groupId);
+    const currentText = currentTags.length ? `\n📌 当前全部标签：${currentTags.join('、')}` : '\n📌 当前全部标签：（无）';
+    await bot.sendMessage(userId, `✅ 已${mode === 'add' ? '添加' : '移除'}标签：${names.join('、')}${currentText}`);
     logger.info(`用户 ${userId} 手动${mode === 'add' ? '添加' : '移除'}标签: ${names.join('、')}`);
 }
 
@@ -471,7 +474,9 @@ async function flushMediaGroup(userId, mediaGroupId, items, processingMsgId) {
         return recordSentMedia(sent, targetChatId, groupId, original, targetType);
     }));
     await upsertGroupList(groupId, newItems.length);
-    await setGroupDelete(groupId, 0);
+    // 与群组自动收录一致：无文本媒体组标记 is_delete=时间戳（可被 clean 清理），有文本标记 0
+    const hasCaption = newItems.some(item => item.caption && String(item.caption).trim());
+    await setGroupDelete(groupId, hasCaption ? 0 : Date.now());
 
     // 发送完成并已把注释还原到正确位置后，取"正确注释位置"（组内第一条带注释的媒体）的注释进入打标签流程
     const captionIndex = newItems.findIndex(item => item.caption && String(item.caption).trim());
@@ -647,9 +652,9 @@ async function handleSendMode(msg, state) {
     }
 
     await recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo, state.targetType || 'group');
-    // group_list 计数与删除标记（单条媒体，每组一次）
+    // group_list 计数与删除标记（单条媒体，每组一次；无文本媒体标记可清理）
     await upsertGroupList(groupId);
-    await setGroupDelete(groupId, 0);
+    await setGroupDelete(groupId, mediaInfo.caption && String(mediaInfo.caption).trim() ? 0 : Date.now());
     await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}`, groupId, mediaInfo.caption, processingMsgId);
     logger.info(`用户 ${userId} 发送单个媒体到 ${targetChatId}，group_id=${groupId}`);
     return true;

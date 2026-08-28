@@ -17,9 +17,8 @@ const DEFAULT_SETTINGS = {
     random_videos_num_video: 10,
     media_group_num: 10,
     article_sort: 'recent',
-    sub_article_sort: 'time_desc',
-    // 标签管理（message 集合的 tags 字段使用，数组存储标签名）
-    tags: []
+    sub_article_sort: 'time_desc'
+    // 标签已迁移至独立 tags 集合（db/tags.js），不再存储在 settings
 };
 
 // 允许更新的 key 列表

@@ -6,25 +6,26 @@ const { splitTagInput, matchTagsInText } = require('../utils/tagUi');
 
 // ---------------- sortTags（标签展示排序） ----------------
 
-test('重要标签固定置顶，其余按使用次数降序', () => {
+test('置顶标签（pin>0）按位置升序排最前，其余按使用次数降序', () => {
     const tags = [
         { name: '普通A', count: 10 },
-        { name: '重要B', important: true, count: 1 },
+        { name: '置顶B', pin: 2, count: 1 },
         { name: '普通B', count: 5 },
-        { name: '重要A', important: true, count: 3 }
+        { name: '置顶A', pin: 1, count: 3 }
     ];
     const sorted = sortTags(tags);
-    assert.deepStrictEqual(sorted.map(t => t.name), ['重要B', '重要A', '普通A', '普通B']);
+    assert.deepStrictEqual(sorted.map(t => t.name), ['置顶A', '置顶B', '普通A', '普通B']);
 });
 
-test('重要标签之间保持相对顺序不参与次数排序', () => {
+test('置顶标签按 pin 位置排序（1=左上第一个按钮），pin 为 0 视为不置顶', () => {
     const tags = [
-        { name: '重要2', important: true, count: 0 },
-        { name: '重要1', important: true, count: 99 },
-        { name: '普通', count: 50 }
+        { name: '置顶2', pin: 2, count: 0 },
+        { name: '普通', count: 50 },
+        { name: '置顶1', pin: 1, count: 99 },
+        { name: '未置顶', pin: 0, count: 30 }
     ];
     const sorted = sortTags(tags);
-    assert.deepStrictEqual(sorted.map(t => t.name), ['重要2', '重要1', '普通']);
+    assert.deepStrictEqual(sorted.map(t => t.name), ['置顶1', '置顶2', '普通', '未置顶']);
 });
 
 test('次数相同按名称排序', () => {

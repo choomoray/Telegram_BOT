@@ -5,7 +5,7 @@ const { connectDB, getClient, getDb } = require('./database');
 const { initCollections } = require('./db/index');
 const { loadSettings } = require('./db/settings');
 const { insertLog } = require('./db/log');
-const { addUserToGroup, removeUserFromGroup, updateLastSeen, banUserFully, userOperationLocks } = require('./db/users');
+const { addUserToGroup, removeUserFromGroup, updateLastSeen, banUserFully, userOperationLocks, isRecentlyUnbanned } = require('./db/users');
 const { upsertChannelGroup, getChannelGroupById } = require('./db/channelGroup');
 const { startHealthServer } = require('./healthServer');
 
@@ -44,6 +44,9 @@ async function start() {
         await initCollections().catch(err => {
             logger.error('初始化集合索引失败:', err.message);
         });
+        // 2.5 迁移旧标签数据（settings.tags -> 独立 tags 集合）
+        const { migrateTagsFromSettings } = require('./db/tags');
+        await migrateTagsFromSettings().catch(err => logger.error(`标签迁移失败: ${err.message}`));
         // 3. 加载动态设置
         await loadSettings(config);
         // test 模式：初始化临时日志（重置 test-log/log.log、error.log，仅启动时初始化）
@@ -107,6 +110,12 @@ async function start() {
                 await addUserToGroup(userId, userName, chat.id);
                 logger.info(`用户 ${userId} (${userName}) 加入群组 ${chat.id} (状态: ${newStatus})`);
             } else if (['left', 'kicked'].includes(newStatus)) {
+                // 解封动作回显：用户刚被机器人解封（unban 会产生 left 状态更新），
+                // 不视为主动退群，跳过"退出即封禁"，避免"管理员解封后机器人立刻又封禁"
+                if (isRecentlyUnbanned(userId)) {
+                    logger.info(`用户 ${userId} 刚被解封，忽略 left/kicked 状态更新，不做退出封禁`);
+                    return;
+                }
                 await removeUserFromGroup(userId, chat.id);
                 logger.info(`用户 ${userId} 离开群组 ${chat.id} (状态: ${newStatus})`);
             }

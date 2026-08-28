@@ -479,6 +479,7 @@ module.exports = {
 | `users` | `{state, white}` | 权限筛选 |
 | `log` | `time` (倒序) | 时间排序 |
 | `transport` | `chat_id` (唯一) | 搬运记录 |
+| `tags` | `name` (唯一) | 标签库（大写标签名） |
 
 #### db/settings.js — 全局设置（含缓存）
 
@@ -501,7 +502,8 @@ module.exports = {
 | `random_videos_num_text` | number | 15 | 随机视频文字列表数 |
 | `random_videos_num_video` | number | 10 | 随机视频实际发送数 |
 | `media_group_num` | number | 10 | 媒体合并默认数量 |
-| `tags` | object[] | [] | 消息标签列表（/tag 管理），元素 `{name, important, count}`：important=重要置顶、count=使用次数 |
+
+> 标签已迁移至**独立 `tags` 集合**（`db/tags.js`），不再存储于 settings：每标签一条 `{name, pin, count}`——`pin`=置顶位置（0 不置顶；>0 为按钮网格位置，每行 4 个、1 为左上第一个按钮），`count`=使用次数。
 
 #### db/media.js — 媒体文件记录
 
@@ -561,7 +563,8 @@ module.exports = {
 - 用户同时满足 `state: 1` 且 `white: 1` 才可使用私聊功能
 
 **封禁机制：**
-- `banUserFully(userId)` 不仅设置数据库状态，还主动将用户从所有管理群组中踢出
+- `banUserFully(userId)` 不仅设置数据库状态（state=0），还主动将用户从**全部管理群组与频道**（含绑定关系的频道↔群组两侧）中封禁踢出
+- `unbanUserFully(userId)` 同样覆盖全部群组与频道解封并恢复 state=1；解封后短暂标记"最近解封"，期间收到的 left/kicked 状态更新（解封动作回显）不会触发"退出即封禁"，避免"管理员刚解封、机器人立刻又封禁"
 - `removeUserFromGroup()` 在用户离开群组时触发自动封禁（用于防撤回退群）
 
 #### db/transport.js — 搬运链接
@@ -698,7 +701,7 @@ for (const file of commandFiles) {
 | `/manage` | manage.js | 管理面板 | 进入 manage 模式，显示管理主菜单 |
 | `/mark` | mark.js | 标记模式 | 进入标记菜单（开始标记/标记记录/退出），标记记录支持按次数或时间排序分页展示 |
 | `/send` | send.js | 发送模式 | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录；成功后可打标签（按钮/手动输入，文本自动识别勾选），打标签时可一键"回复该消息"自动进入回复模式 |
-| `/tag` | tag.js | 标签模式 | 修改消息标签（预览媒体组后添加/删除，按钮翻页+手动输入）；编辑标签（添加/改名/删除/固定置顶，同步 message） |
+| `/tag` | tag.js | 标签模式 | 修改消息标签（预览媒体组后添加/删除，按钮翻页+手动输入）；编辑标签（添加/改名/删除/固定置顶位置，同步 message） |
 | `/media_group [N]` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group；N=每组个数（1~10，退出时按 N 个一组打包发送） |
 | `/media_hide [N]` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide；N=每组个数（1~10） |
 | `/media_unhide [N]` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide；N=每组个数（1~10） |
@@ -967,7 +970,7 @@ handleGroupEditedMessage()
 | `/random_pictures [N]` | 随机获取图片（N 1~10 张） | commands/randomPictures.js |
 | `/mark` | 标记模式（开始标记/标记记录/退出） | modes/markMode.js |
 | `/send` | 发送模式（选择群组/频道发送并收录；发送后先显示"正在发送中"再刷新为结果，可打标签；媒体组注释不在第一条时自动还原到正确位置并对该媒体打标签） | modes/sendMode.js |
-| `/tag` | 标签模式（修改消息标签 / 编辑标签，同步 message） | modes/tagMode.js |
+| `/tag` | 标签模式（修改消息标签 / 编辑标签：添加、改名、删除、固定置顶位置，同步 message） | modes/tagMode.js |
 | `/edit` | 编辑消息文本或清空 | modes/editMode.js |
 | `/log` | 查看操作统计 | commands/log.js |
 | `/help` | 显示命令列表按钮 | commands/help.js |
@@ -1014,6 +1017,7 @@ handleGroupEditedMessage()
 | `log` | 操作审计日志 | 每次操作一条 |
 | `transport` | 搬运源链接 | 每个搬运源一条 |
 | `settings` | 全局设置（单文档） | 固定1条 |
+| `tags` | 标签库（`{name, pin, count}`：名称、置顶位置、使用次数） | 每个标签一条 |
 
 ---
 

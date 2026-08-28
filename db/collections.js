@@ -12,7 +12,8 @@ const COLLECTIONS = {
     ARTICLE: 'article',
     SUB_ARTICLE: 'sub_article',
     COLLECTION: 'collection',
-    SUB_COLLECTION: 'sub_collection'
+    SUB_COLLECTION: 'sub_collection',
+    TAGS: 'tags'
 };
 
 module.exports = COLLECTIONS;
