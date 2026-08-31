@@ -12,7 +12,7 @@ async function upsertMessage(data) {
         const { file_unique_id, ...rest } = data;
         const result = await col.updateOne(
             { file_unique_id },
-            { $set: { ...rest } },
+            { $set: { ...rest, updated_at: Date.now() } },
             { upsert: true }
         );
         logger.info(`message 记录 upsert: file_unique_id=${file_unique_id}, upserted=${result.upsertedCount}`);
@@ -65,6 +65,76 @@ async function findMessagesByGroupId(groupId) {
 }
 
 // ---------------- 标签操作 ----------------
+
+/**
+ * 给单条 message（按 file_unique_id）添加标签
+ * 标签按 message 独立、共存：只影响这一条，不影响组内其他 message
+ * @returns {Promise<number>} 修改的文档数
+ */
+async function addTagToMessage(fileUniqueId, tag) {
+    try {
+        const col = getCollection(COLLECTIONS.MESSAGE);
+        const result = await col.updateOne({ file_unique_id: fileUniqueId }, { $addToSet: { tags: tag } });
+        logger.info(`标签添加: file_unique_id=${fileUniqueId}, tag=${tag}, modified=${result.modifiedCount}`);
+        return result.modifiedCount;
+    } catch (err) {
+        logger.error(`添加单条消息标签失败: ${err.message}`);
+        return 0;
+    }
+}
+
+/**
+ * 移除单条 message（按 file_unique_id）的指定标签
+ * @returns {Promise<number>} 修改的文档数
+ */
+async function removeTagFromMessage(fileUniqueId, tag) {
+    try {
+        const col = getCollection(COLLECTIONS.MESSAGE);
+        const result = await col.updateOne({ file_unique_id: fileUniqueId }, { $pull: { tags: tag } });
+        logger.info(`标签移除: file_unique_id=${fileUniqueId}, tag=${tag}, modified=${result.modifiedCount}`);
+        return result.modifiedCount;
+    } catch (err) {
+        logger.error(`移除单条消息标签失败: ${err.message}`);
+        return 0;
+    }
+}
+
+/**
+ * 获取单条 message（按 file_unique_id）的标签
+ * @returns {Promise<string[]>}
+ */
+async function getMessageTags(fileUniqueId) {
+    try {
+        const col = getCollection(COLLECTIONS.MESSAGE);
+        const doc = await col.findOne({ file_unique_id: fileUniqueId });
+        return (doc && Array.isArray(doc.tags)) ? [...doc.tags] : [];
+    } catch (err) {
+        logger.error(`获取单条消息标签失败: ${err.message}`);
+        return [];
+    }
+}
+
+/**
+ * 获取媒体组内"最后新增/修改文本"的 message（按 updated_at，旧数据无该字段时按 message_id 兜底）
+ * @param {string} groupId
+ * @returns {Promise<Object|null>}
+ */
+async function findLatestTextMessageByGroupId(groupId) {
+    try {
+        const col = getCollection(COLLECTIONS.MESSAGE);
+        const docs = await col.find({ group_id: groupId, text: { $exists: true, $ne: '' } }).toArray();
+        if (!docs.length) return null;
+        docs.sort((a, b) => {
+            const ta = a.updated_at || a.message_id || 0;
+            const tb = b.updated_at || b.message_id || 0;
+            return tb - ta;
+        });
+        return docs[0];
+    } catch (err) {
+        logger.error(`查询组内最新文本 message 失败: ${err.message}`);
+        return null;
+    }
+}
 
 /**
  * 给媒体组的所有 message 添加标签（去重）
@@ -159,6 +229,10 @@ module.exports = {
     findMessageByFileUniqueId,
     deleteMessageByFileUniqueId,
     findMessagesByGroupId,
+    addTagToMessage,
+    removeTagFromMessage,
+    getMessageTags,
+    findLatestTextMessageByGroupId,
     addTagToGroup,
     removeTagFromGroup,
     getGroupTags,

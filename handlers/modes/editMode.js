@@ -147,11 +147,16 @@ async function handleEditMode(msg, state) {
                 targetFileUniqueId, targetMediaType, cleanText
             });
 
-            // 编辑为无文本媒体添加了文本 → 主动进入打标签流程
+            // 编辑为无文本媒体添加了文本 → 主动进入打标签流程（标签按 message 独立，只写这一条）
             if (!isClearing && cleanText && targetGroupId) {
                 const { sendSuccessWithTags } = require('./sendMode');
-                await sendSuccessWithTags(userId, '✅ 修改完毕（可为此媒体打标签）', targetGroupId, cleanText);
+                await sendSuccessWithTags(userId, '✅ 修改完毕（可为此媒体打标签）', targetGroupId, cleanText, null, targetFileUniqueId);
             } else {
+                // 清空文本 / 无组信息：该 message 的标签也清空（标签跟随文本）
+                if (isClearing && targetFileUniqueId) {
+                    const { clearMessageTags } = require('../../utils/tagSync');
+                    await clearMessageTags(targetFileUniqueId);
+                }
                 await bot.sendMessage(chatId, '✅ 修改完毕', {
                     reply_to_message_id: messageId
                 });
@@ -194,6 +199,127 @@ async function handleEditMode(msg, state) {
                 await bot.sendMessage(chatId, '❌ 修改失败，请稍后重试', {
                     reply_to_message_id: messageId
                 });
+                deleteUserState(userId);
+            }
+        }
+        return true;
+    }
+
+    // 步骤2.5：群组/频道内回复 /edit 后的第二步——管理员下一条文本即新描述
+    // （操作记录 1 分钟后全部删除：机器人的提示 + 管理员的 /edit 命令 + 这条输入文本）
+    if (state.step === 'waiting_for_group_text') {
+        if (!messageText) {
+            const errMsg = await bot.sendMessage(chatId, '❌ 请发送文本内容', {
+                reply_to_message_id: messageId
+            });
+            const { scheduleDelete } = require('../groupMessageHandlers');
+            scheduleDelete(chatId, errMsg.message_id);
+            return true;
+        }
+
+        const {
+            targetChatId,
+            targetMessageId,
+            targetGroupId,
+            targetFileUniqueId,
+            targetMediaType,
+            groupChatId,
+            groupCmdMsgId,
+            groupPromptMsgId
+        } = state;
+
+        const notifyChat = groupChatId || chatId;
+        const messageCol = getCollection(COLLECTIONS.MESSAGE);
+        const isClearing = (messageText.trim() === 'null');
+        const cleanText = removeLevelSuffix(messageText);
+        const { scheduleDelete } = require('../groupMessageHandlers');
+        const { reMatchMessageTags, clearMessageTags } = require('../../utils/tagSync');
+
+        const updateDbAndTags = async () => {
+            await updateMessageDb(messageCol, {
+                isClearing, targetChatId, targetMessageId, targetGroupId,
+                targetFileUniqueId, targetMediaType, cleanText
+            });
+            if (isClearing) {
+                await clearMessageTags(targetFileUniqueId);
+            } else if (cleanText) {
+                await reMatchMessageTags(targetFileUniqueId, cleanText);
+            }
+        };
+
+        const scheduleAllCleanup = (extraMsgId) => {
+            if (extraMsgId) scheduleDelete(notifyChat, extraMsgId);
+            if (groupCmdMsgId) scheduleDelete(notifyChat, groupCmdMsgId); // 管理员的 /edit 命令消息
+            if (groupPromptMsgId) scheduleDelete(notifyChat, groupPromptMsgId);
+            scheduleDelete(notifyChat, messageId); // 管理员输入的这条文本
+        };
+
+        try {
+            // 先尝试编辑 Telegram 消息的 caption（HTML 解析失败时降级纯文本）
+            if (isClearing) {
+                await bot.editMessageCaption('', {
+                    chat_id: targetChatId,
+                    message_id: targetMessageId
+                });
+            } else {
+                try {
+                    await bot.editMessageCaption(messageText, {
+                        chat_id: targetChatId,
+                        message_id: targetMessageId,
+                        parse_mode: 'HTML'
+                    });
+                } catch (capErr) {
+                    if ((capErr.message || '').includes('parse')) {
+                        await bot.editMessageCaption(messageText, {
+                            chat_id: targetChatId,
+                            message_id: targetMessageId
+                        });
+                    } else {
+                        throw capErr;
+                    }
+                }
+            }
+
+            await updateDbAndTags();
+
+            const okMsg = await bot.sendMessage(notifyChat, isClearing ? '✅ 已清空描述' : '✅ 修改完毕', {
+                reply_to_message_id: messageId,
+                allow_sending_without_reply: true
+            });
+            scheduleAllCleanup(okMsg.message_id);
+            deleteUserState(userId);
+            insertLog(23, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
+            logger.info(`用户 ${userId} 群组快捷编辑两步完成: ${targetChatId}/${targetMessageId}`);
+        } catch (err) {
+            const errMsg = err.message || '';
+            const isEditDenied = errMsg.includes("can't be edited") || errMsg.includes("Can't edit");
+
+            if (isEditDenied) {
+                // 超过 48 小时：仅更新数据库 + 重算标签
+                try {
+                    await updateDbAndTags();
+                    const warnMsg = await bot.sendMessage(notifyChat, '⚠️ 消息已超过编辑时效（48小时），已仅更新数据库中的描述', {
+                        reply_to_message_id: messageId,
+                        allow_sending_without_reply: true
+                    });
+                    scheduleAllCleanup(warnMsg.message_id);
+                    deleteUserState(userId);
+                } catch (dbErr) {
+                    logger.error(`群组快捷编辑两步仅更新数据库失败: ${dbErr.message}`);
+                    const failMsg = await bot.sendMessage(notifyChat, '❌ 更新失败，请稍后重试', {
+                        reply_to_message_id: messageId,
+                        allow_sending_without_reply: true
+                    });
+                    scheduleAllCleanup(failMsg.message_id);
+                    deleteUserState(userId);
+                }
+            } else {
+                logger.error(`群组快捷编辑两步失败: ${err.message}`);
+                const failMsg = await bot.sendMessage(notifyChat, '❌ 修改失败，请稍后重试', {
+                    reply_to_message_id: messageId,
+                    allow_sending_without_reply: true
+                });
+                scheduleAllCleanup(failMsg.message_id);
                 deleteUserState(userId);
             }
         }
@@ -256,7 +382,7 @@ async function updateMessageDb(messageCol, {
         }
     } else {
         if (existing) {
-            const update = { text: cleanText };
+            const update = { text: cleanText, updated_at: Date.now() };
             if (channelForward) update.channel_forward = channelForward;
             await messageCol.updateOne({ file_unique_id: targetFileUniqueId }, { $set: update });
             logger.info(`已更新消息文本: file_unique_id=${targetFileUniqueId}`);
@@ -268,6 +394,7 @@ async function updateMessageDb(messageCol, {
                 file_unique_id: targetFileUniqueId,
                 media_type: targetMediaType,
                 group_id: targetGroupId,
+                updated_at: Date.now(),
                 ...(channelForward ? { channel_forward: channelForward } : {})
             });
             logger.info(`已插入新消息记录: file_unique_id=${targetFileUniqueId}`);
@@ -277,3 +404,4 @@ async function updateMessageDb(messageCol, {
 }
 
 module.exports = handleEditMode;
+module.exports.updateMessageDb = updateMessageDb;

@@ -36,12 +36,17 @@ async function handleEditConfirmDbOnly(query) {
                     await setGroupDelete(targetGroupId, 0);
                 }
             }
+            // 标签跟随文本：清空该 message 的标签
+            if (targetFileUniqueId) {
+                const { clearMessageTags } = require('../../utils/tagSync');
+                await clearMessageTags(targetFileUniqueId);
+            }
         } else {
             const existing = await messageCol.findOne({ chat_id: targetChatId, message_id: targetMessageId });
             if (existing) {
                 await messageCol.updateOne(
                     { chat_id: targetChatId, message_id: targetMessageId },
-                    { $set: { text: cleanText } }
+                    { $set: { text: cleanText, updated_at: Date.now() } }
                 );
             } else {
                 await messageCol.insertOne({
@@ -50,10 +55,16 @@ async function handleEditConfirmDbOnly(query) {
                     text: cleanText,
                     file_unique_id: targetFileUniqueId,
                     media_type: targetMediaType,
-                    group_id: targetGroupId
+                    group_id: targetGroupId,
+                    updated_at: Date.now()
                 });
             }
             await setGroupDelete(targetGroupId, 0);
+            // 标签跟随文本：按新文本重算该 message 的标签
+            if (targetFileUniqueId) {
+                const { reMatchMessageTags } = require('../../utils/tagSync');
+                await reMatchMessageTags(targetFileUniqueId, cleanText);
+            }
         }
 
         await bot.editMessageText('✅ 数据库已更新', {

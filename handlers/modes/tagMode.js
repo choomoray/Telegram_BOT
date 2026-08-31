@@ -9,15 +9,45 @@
 const bot = require('../../bot');
 const logger = require('../../logger');
 const { findMediaByFileUniqueId } = require('../../db/media');
-const { findMessageByFileUniqueId } = require('../../db/message');
+const { findMessageByFileUniqueId, findMessagesByGroupId, findLatestTextMessageByGroupId } = require('../../db/message');
 const { getMediaByGroupIdSorted, sendMediaGroupAsReply } = require('../../media');
-const { addTagToGroup, removeTagFromGroup, getGroupTags } = require('../../db/message');
+const {
+    addTagToGroup,
+    removeTagFromGroup,
+    getGroupTags,
+    addTagToMessage,
+    removeTagFromMessage,
+    getMessageTags
+} = require('../../db/message');
 const { getTags, sortTags, addTag, removeTag, renameTag, setTagPin, tagUsed } = require('../../db/tags');
 const { buildTagKeyboard, splitTagInput } = require('../../utils/tagUi');
 const { extractMediaFromMessage } = require('../../media');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
 
 // ---------------- 菜单 ----------------
+
+/**
+ * 标签作用目标：优先"定位用的那条 message"（file_unique_id），无则整组操作
+ */
+function resolveTagTarget(state) {
+    return (state && state.locatedFileUniqueId) || null;
+}
+
+/**
+ * 列出该组所有带文本 message 的标签（每条一行：文本预览 → 它自己的标签）
+ * 标签按 message 独立共存，这里分别全部列出来
+ */
+async function buildGroupTagListText(groupId) {
+    const msgs = await findMessagesByGroupId(groupId);
+    const textMsgs = msgs.filter(m => m.text && String(m.text).trim());
+    if (!textMsgs.length) return '📌 该组暂无带文本的消息';
+    const lines = textMsgs.map((m, i) => {
+        const tags = (Array.isArray(m.tags) && m.tags.length) ? m.tags.join('、') : '（无）';
+        const preview = m.text.length > 20 ? `${m.text.slice(0, 20)}…` : m.text;
+        return `${i + 1}. ${preview} → ${tags}`;
+    });
+    return `📌 该组共 ${textMsgs.length} 条带文本消息：\n${lines.join('\n')}`;
+}
 
 async function showTagMenu(userId, messageId) {
     const keyboard = {
@@ -45,9 +75,8 @@ async function showTagMenu(userId, messageId) {
     }
 }
 
-/** 修改消息标签：请选择操作（添加/删除 + 现有标签展示），并记录按钮消息 ID */
+/** 修改消息标签：请选择操作（添加/删除 + 组内所有 message 标签分别列出），并记录按钮消息 ID */
 async function showGroupTagSelect(userId, messageId, groupId, asNew = false) {
-    const current = await getGroupTags(groupId);
     const keyboard = {
         inline_keyboard: [
             [
@@ -56,7 +85,7 @@ async function showGroupTagSelect(userId, messageId, groupId, asNew = false) {
             ]
         ]
     };
-    const tagText = current.length ? `📌 现有标签：${current.join('、')}` : '📌 现有标签：（无）';
+    const tagText = await buildGroupTagListText(groupId);
     const text = `已找到，请选择操作：\n${tagText}`;
     let tagMsgId = messageId;
     if (asNew) {
@@ -76,10 +105,13 @@ async function showGroupTagSelect(userId, messageId, groupId, asNew = false) {
     }
 }
 
-/** 添加/删除标签模式界面（标签按钮翻页 10 行/页，手动输入同样可用） */
+/** 添加/删除标签模式界面（标签按钮翻页 10 行/页，手动输入同样可用）
+ *  作用对象 = 定位用的那条 message（标签按 message 独立） */
 async function showGroupTagAction(userId, messageId, groupId, mode, page = 1) {
     const tags = sortTags(await getTags());
-    const current = await getGroupTags(groupId);
+    const st = getRawUserState(userId);
+    const fileUniqueId = resolveTagTarget(st);
+    const current = fileUniqueId ? await getMessageTags(fileUniqueId) : await getGroupTags(groupId);
 
     const title = mode === 'add'
         ? '➕ 正在添加标签（点击按钮或发送文本，空格/、分隔）'
@@ -109,9 +141,9 @@ async function showGroupTagAction(userId, messageId, groupId, mode, page = 1) {
         reply_markup: result
     }).catch(() => { });
 
-    const st = getRawUserState(userId);
-    if (st && st.mode === 'tag') {
-        setUserState(userId, { ...st, tagMsgId: messageId, lastActivity: Date.now() });
+    const stAfter = getRawUserState(userId);
+    if (stAfter && stAfter.mode === 'tag') {
+        setUserState(userId, { ...stAfter, tagMsgId: messageId, lastActivity: Date.now() });
     }
 }
 
@@ -246,15 +278,24 @@ async function handleCallback(query) {
         if (action === 'tag') {
             const tag = decodeURIComponent(parts[2]);
             const mode = state && state.groupTagMode ? state.groupTagMode : 'add';
+            const fileUniqueId = resolveTagTarget(state);
             if (mode === 'add') {
-                await addTagToGroup(groupId, tag);
+                if (fileUniqueId) {
+                    await addTagToMessage(fileUniqueId, tag);
+                } else {
+                    await addTagToGroup(groupId, tag);
+                }
                 await tagUsed(tag, 1);
             } else {
-                await removeTagFromGroup(groupId, tag);
+                if (fileUniqueId) {
+                    await removeTagFromMessage(fileUniqueId, tag);
+                } else {
+                    await removeTagFromGroup(groupId, tag);
+                }
                 await tagUsed(tag, -1);
             }
             await bot.answerCallbackQuery(query.id, { text: `标签「${tag}」已${mode === 'add' ? '添加' : '移除'}` });
-            logger.info(`用户 ${userId} 修改消息标签: ${mode} ${tag} -> group=${groupId}`);
+            logger.info(`用户 ${userId} 修改消息标签: ${mode} ${tag} -> group=${groupId}${fileUniqueId ? `, file=${fileUniqueId}` : ''}`);
             // 操作后刷新
             await showGroupTagAction(userId, messageId, groupId, mode);
             return;
@@ -355,20 +396,30 @@ async function handleTagMode(msg, state) {
     const userMsgId = msg.message_id;
 
     // 修改消息标签的添加/删除模式：手动输入标签（空格/、分隔）
+    // 作用对象 = 定位用的那条 message（标签按 message 独立）
     if (state.groupId && state.groupTagMode && msg.text &&
         !msg.photo && !msg.video && !msg.audio && !msg.document) {
         const names = splitTagInput(msg.text);
         if (names.length) {
             const allTags = await getTags();
+            const fileUniqueId = resolveTagTarget(state);
             for (const rawName of names) {
                 const name = rawName.toUpperCase(); // 标签名统一大写
                 const exists = allTags.some(t => t.name.toLowerCase() === name.toLowerCase());
                 if (!exists) await addTag(name);
                 if (state.groupTagMode === 'add') {
-                    await addTagToGroup(state.groupId, name);
+                    if (fileUniqueId) {
+                        await addTagToMessage(fileUniqueId, name);
+                    } else {
+                        await addTagToGroup(state.groupId, name);
+                    }
                     await tagUsed(name, 1);
                 } else {
-                    await removeTagFromGroup(state.groupId, name);
+                    if (fileUniqueId) {
+                        await removeTagFromMessage(fileUniqueId, name);
+                    } else {
+                        await removeTagFromGroup(state.groupId, name);
+                    }
                     await tagUsed(name, -1);
                 }
             }
@@ -376,9 +427,9 @@ async function handleTagMode(msg, state) {
             if (state.tagMsgId) {
                 await showGroupTagAction(userId, state.tagMsgId, state.groupId, state.groupTagMode);
             }
-            // 用新消息列出当前该媒体的全部标签
-            const currentTags = await getGroupTags(state.groupId);
-            const currentText = currentTags.length ? `\n📌 当前全部标签：${currentTags.join('、')}` : '\n📌 当前全部标签：（无）';
+            // 用新消息列出当前该 message 的全部标签
+            const currentTags = fileUniqueId ? await getMessageTags(fileUniqueId) : await getGroupTags(state.groupId);
+            const currentText = currentTags.length ? `\n📌 当前该消息标签：${currentTags.join('、')}` : '\n📌 当前该消息标签：（无）';
             await bot.sendMessage(userId, `✅ 已${state.groupTagMode === 'add' ? '添加' : '移除'}标签：${names.join('、')}${currentText}`, {
                 reply_to_message_id: userMsgId
             });
@@ -484,6 +535,16 @@ async function handleTagMode(msg, state) {
                 return true;
             }
 
+            // 标签作用目标：定位用的那条媒体对应的 message（file_unique_id）；
+            // 若该媒体本身无 message 记录（无文本），回退到组内最后新增文本的 message
+            let locatedFileUniqueId = mediaInfo.fileUniqueId;
+            const locatedMsg = await findMessageByFileUniqueId(mediaInfo.fileUniqueId);
+            if (!locatedMsg) {
+                const latest = await findLatestTextMessageByGroupId(groupId);
+                locatedFileUniqueId = latest ? latest.file_unique_id : null;
+                logger.info(`用户 ${userId} 定位媒体无 message 记录，回退到组内最新文本: ${locatedFileUniqueId}`);
+            }
+
             // 预览媒体组（只展示第一组 subgroup=1 的媒体）
             const allMediaList = await getMediaByGroupIdSorted(groupId);
             const mediaList = allMediaList.filter(m => m.subgroup === 1);
@@ -500,7 +561,7 @@ async function handleTagMode(msg, state) {
             }
 
             if (state) {
-                setUserState(userId, { ...state, groupId, groupTagMode: null, lastActivity: Date.now() });
+                setUserState(userId, { ...state, groupId, groupTagMode: null, locatedFileUniqueId, lastActivity: Date.now() });
             }
 
             await bot.editMessageText('✅ 已找到媒体组', {

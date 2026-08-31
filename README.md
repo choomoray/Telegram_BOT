@@ -2,7 +2,7 @@
 
 一个功能丰富的 Telegram Bot，基于 Node.js 开发，用于群组/频道媒体消息的自动收录、检索、回复与管理，并集成群组管理和用户权限控制。
 
-**版本:** 0.5.2 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
+**版本:** 0.5.3 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
 
 ---
 
@@ -694,18 +694,18 @@ for (const file of commandFiles) {
 | `/clean` | clean.js | 数据库清理模式 | 扫描空数据的 group_list，批量删除 |
 | `/delete` | delete.js | 删除单一媒体 | 进入 delete 模式，等待用户发送媒体或链接 |
 | `/delete_group` | deleteGroup.js | 删除整个媒体组 | 进入 deleteGroup 模式，等待用户操作 |
-| `/edit` | edit.js | 编辑消息文本 | 进入 edit 模式，等待用户选择要编辑的消息 |
+| `/edit` | edit.js | 编辑消息文本 | 进入 edit 模式，等待用户选择要编辑的消息；群组/频道中管理员**回复**一条媒体消息并发送 `/edit [新描述]`（也支持 `/edit@机器人用户名 [新描述]`）可跳过定位直接修改该媒体（带文字一步完成；不带文字时群组内等管理员下一条文本；频道仅支持带文字）。修改后 1 分钟自动删除全部操作记录（机器人提示 + 管理员的命令消息） |
 | `/exit` | exit.js | 退出当前模式 | 调用 deleteUserState 清理状态 |
 | `/help` | help.js | 显示命令按钮 | 发送带所有命令的内联键盘 |
 | `/log` | log.js | 操作统计 | 从 log 集合聚合统计并展示 |
 | `/manage` | manage.js | 管理面板 | 进入 manage 模式，显示管理主菜单 |
 | `/mark` | mark.js | 标记模式 | 进入标记菜单（开始标记/标记记录/退出），标记记录支持按次数或时间排序分页展示 |
 | `/send` | send.js | 发送模式 | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录；成功后可打标签（按钮/手动输入，文本自动识别勾选），打标签时可一键"回复该消息"自动进入回复模式 |
-| `/tag` | tag.js | 标签模式 | 修改消息标签（预览媒体组后添加/删除，按钮翻页+手动输入）；编辑标签（添加/改名/删除/固定置顶位置，同步 message） |
+| `/tag` | tag.js | 标签模式 | 修改消息标签（预览媒体组后添加/删除，按钮翻页+手动输入；标签按 message 独立——只作用于定位的那条媒体，定位界面会把组内所有带文本 message 的标签分别列出）；编辑标签（添加/改名/删除/固定置顶位置，同步 message） |
 | `/media_group [N]` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group；N=每组个数（1~10，退出时按 N 个一组打包发送） |
 | `/media_hide [N]` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide；N=每组个数（1~10） |
 | `/media_unhide [N]` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide；N=每组个数（1~10） |
-| `/message_reply [N]` | messageReply.js | 消息回复 | 进入 messageReply 模式，定位到频道转发消息时可选择回复在群组/频道；N>=2 时媒体按 N 个为一组打包为媒体组回复 |
+| `/message_reply [N]` | messageReply.js | 消息回复 | 进入 messageReply 模式，定位到频道转发消息时可选择回复在群组/频道；N>=2 时媒体按 N 个为一组打包为媒体组回复（满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出） |
 | `/message_reply_group` | messageReplyGroup.js | 消息回复（群组） | 直接回复在群组中（频道转发消息用群组位置，非转发消息用消息自身位置） |
 | `/message_reply_channel` | messageReplyChannel.js | 消息回复（频道） | 直接回复在频道中（无频道位置时回退消息自身位置） |
 | `/password` | password.js | 媒体密码 | 进入 password 模式，设置/更新媒体访问密码 |
@@ -959,7 +959,7 @@ handleGroupEditedMessage()
 | `/media_group [N]` | 媒体合并模式（N=每组个数 1~10，退出时按 N 个一组打包发送） | modes/mediaCollectMode.js |
 | `/media_hide [N]` | 媒体遮罩模式（Spoiler，N=每组个数 1~10） | modes/mediaCollectMode.js |
 | `/media_unhide [N]` | 媒体去遮罩模式（N=每组个数 1~10） | modes/mediaCollectMode.js |
-| `/message_reply [N]` | 在群组/频道中回复指定消息（频道转发消息可先选择回复位置；N>=2 时媒体按 N 个一组打包为媒体组回复） | modes/messageReplyMode.js |
+| `/message_reply [N]` | 在群组/频道中回复指定消息（频道转发消息可先选择回复位置；N>=2 时媒体按 N 个一组打包为媒体组回复——满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出） | modes/messageReplyMode.js |
 | `/message_reply_group [N]` | 在群组中回复指定消息（支持 N 打包） | modes/messageReplyMode.js |
 | `/message_reply_channel [N]` | 在频道中回复指定消息（支持 N 打包） | modes/messageReplyMode.js |
 | `/search` | 进入搜索模式 | modes/searchMode.js |
@@ -970,8 +970,8 @@ handleGroupEditedMessage()
 | `/random_pictures [N]` | 随机获取图片（N 1~10 张） | commands/randomPictures.js |
 | `/mark` | 标记模式（开始标记/标记记录/退出） | modes/markMode.js |
 | `/send` | 发送模式（选择群组/频道发送并收录；发送后先显示"正在发送中"再刷新为结果，可打标签；媒体组注释不在第一条时自动还原到正确位置并对该媒体打标签） | modes/sendMode.js |
-| `/tag` | 标签模式（修改消息标签 / 编辑标签：添加、改名、删除、固定置顶位置，同步 message） | modes/tagMode.js |
-| `/edit` | 编辑消息文本或清空 | modes/editMode.js |
+| `/tag` | 标签模式（修改消息标签 / 编辑标签：添加、改名、删除、固定置顶位置，同步 message）。标签按 message 独立：新增/修改文本只打该条 message 的标签；修改消息标签时只作用于定位的那条媒体，并把组内所有带文本 message 的标签分别列出 | modes/tagMode.js |
+| `/edit` | 编辑消息文本或清空（私聊定位后编辑；群组/频道中管理员回复一条媒体消息并发送 `/edit [新描述]` 可跳过定位直接修改，支持 `/edit@机器人用户名`，操作记录 1 分钟后自动删除） | modes/editMode.js、handlers/groupReplyEdit.js |
 | `/log` | 查看操作统计 | commands/log.js |
 | `/help` | 显示命令列表按钮 | commands/help.js |
 | `/setting` | 全局设置面板 | modes/settingMode.js |
@@ -980,7 +980,7 @@ handleGroupEditedMessage()
 | `/manage` | 管理面板（群组/用户/白名单） | modes/manage/ |
 | `/exit` | 退出当前模式 | commands/exit.js |
 
-> **标签展示时机：** 媒体组标签（📌）不会出现在查询结果列表里，而是在**查看媒体时**展示——发送的媒体组注释下方；在"媒体过多询问是否发送/选择查看方式"的询问界面中，会在标签**上方**先展示该组的**媒体描述**（描述/标签缺一即省略对应行），格式如下：
+> **标签展示时机：** 媒体组标签（📌）不会出现在查询结果列表里，而是在**查看媒体时**展示——发送的媒体组注释下方；在"媒体过多询问是否发送/选择查看方式"的询问界面中，会在标签**上方**先展示该组的**媒体描述**（描述/标签缺一即省略对应行），且**标签与显示的文本配对**（显示哪条文本就配哪条的标签，各 message 标签独立共存），格式如下：
 >
 > ```
 > 该组共有 9 个媒体，分为 3 组。
@@ -997,6 +997,7 @@ handleGroupEditedMessage()
 | 媒体自动收录 | 群组/频道媒体自动入库（去重），带文本的媒体同步写入 message |
 | 频道转发双位置 | 频道转发至群组的媒体（含 `is_automatic_forward` 自动转发识别）在 message 记录新增 `channel_forward`、media 记录写入 `group`/`channel` 双位置，回复时可选回复在频道或群组 |
 | 编辑同步 | 消息编辑/删除后自动同步数据库 |
+| 回复 `/edit` 快捷编辑 | 管理员回复一条媒体消息并发送 `/edit [新描述]`（支持 `/edit@机器人用户名`）可直接修改该媒体：改 Telegram caption + 同步数据库 + 按新文本重算该媒体标签；超 48 小时自动降级为仅更新数据库；**1 分钟后自动删除全部操作记录**（机器人提示 + 管理员的命令消息） |
 | 关键字查询 | 管理员在群组中发送文本自动搜索 |
 | 成员记录 | 加入/退出自动记录，可配置封禁策略 |
 | 入群审批 | 关联频道的用户自动通过加群申请 |
@@ -1056,34 +1057,25 @@ handleGroupEditedMessage()
 
 ## 版本历史
 
-### v0.5.1（当前）
+### v0.5.3（当前）
+- **固定数量回复（`/message_reply N` 打包）**：删除"3 秒静默自动冲刷余量"逻辑——满 N 个立即作为媒体组回复，不足 N 的余量一直留在缓冲等待补满下一组，只有退出（/exit、超时、切换模式）时才冲刷发出。
+- **标签按 message 独立（共存）**：
+  - 发送/回复时自动识别出的标签只写入**新收录那条 message**（新增 `addTagToMessage` / `removeTagFromMessage` / `getMessageTags`），不再广播到整组；
+  - 查看/预览媒体组时"📌 标签"与**显示的文本配对**（显示哪条文本就配哪条的标签）；
+  - `/tag` 修改消息标签只作用于**定位用的那条 message**（无记录时回退组内最后新增文本那条），定位界面把组内**所有带文本 message 的标签分别列出**；
+  - 编辑 caption（私聊 edit、群内直接编辑、回复 `/edit`）后按新文本**重算该 message 自己的标签**；
+  - 修复：回复**媒体组**时只取第一条 caption 导致文本在非首条媒体上漏打标签；
+  - 打标签后点"🔁 回复该消息"：回复目标改为**刚打标签的那条 message**。
+- **新增：群组/频道回复 `/edit` 快捷编辑**（`handlers/groupReplyEdit.js`）：
+  - 管理员**回复一条媒体消息**并发送 `/edit [新描述]`（支持 `/edit@机器人用户名`）直接修改该媒体，跳过"重新发送媒体"步骤；
+  - 带文字一步完成；不带文字时群组内等管理员下一条文本（频道仅支持带文字）；
+  - 修改 = 改 Telegram caption（HTML 解析失败自动降级）+ 同步数据库 + 按新文本重算标签；超 48 小时自动降级为仅更新数据库；
+  - **1 分钟后自动删除全部操作记录**（机器人提示 + 管理员的 `/edit` 命令消息 + 两步流程的输入文本）。
+- **指令兼容 `@机器人用户名` 后缀**：所有指令（/edit、/search、/message_reply 等）均可带 `@botname` 使用。
+- message 记录新增 `updated_at` 时间戳，用于"组内最后新增/修改文本"判定。
 
-**发送模式 `/send`**
-- 发送媒体后先回复"♻️ 正在发送中，请耐心等待..."，完成后刷新同一条消息为结果（成功+标签界面 / 失败提示）
-- 媒体组注释不在第一条时，发送后自动编辑回正确位置（不再放临时文本再清空），并**对正确注释位置的媒体进入打标签流程**；注释同时在首条与其他位置时全部还原
-- 媒体组收集防重复/防丢失：3 秒收集窗口（覆盖 Telegram 分批发货）、定时器同步设置（根除双定时器竞态导致的重复发送/覆盖标签界面）、文件级守卫 + 组内去重 + 同用户 flush 串行化
+### v0.5.2
+- 落库并行化（媒体组逐条并发写入，显著提速）、回复位置切换按钮、数字参数指令（/media_group N 等）、标签展示优化。
 
-**消息回复 `/message_reply`**
-- 频道转发双位置：message 记录新增 `channel_forward`（`is_channel` + 频道源位置 + 群组位置），
-  识别含 `is_automatic_forward` + 绑定库 `channel_group`；media 记录新增 `group`/`channel` 双位置
-- 定位到**频道转发消息**时弹出"👥 回复在群组 / 📢 回复在频道"选择；非转发消息直接用消息自身位置
-- 新增 `/message_reply_group`（直接回复在群组）、`/message_reply_channel`（直接回复在频道）
-- 回复收录新消息后自动进入打标签流程
-- 修复退出/切换模式/超时未删除"💬 正在回复该消息"提示（`_onExit` 全链路保留 + `cleanPreviousMode` 调用 `_onExit`）
-
-**标签 / 编辑**
-- 手动添加标签自动生成并统一大写（已有）；重命名标签也统一转大写
-- 给空媒体/频道转发媒体补注释时，从 media 双位置自动补全 `channel_forward`，补完立即可选回复位置
-
-**日志系统**
-- 年/月/周（ISO 周号，周一为周起始）分级目录 + 按天拆文件：`logs/<年>/<月>/<周>/<日>.log`
-- **test 模式**（`node index test`）：启动 Web UI 且日志额外复制到 `test-log/log.log`、`test-log/error.log`（启动时重置）
-- **关闭清理**：收到关闭信号时立即删除定时删除消息与遗留提示消息，日志队列刷盘后再退出
-
-### v0.5.0
-
-- 标签系统重构：翻页展示 / 重要置顶 / 使用次数排序 / 手动输入 / 文本自动识别勾选
-- `/send` 发送模式：选择群组/频道发送并收录，发送后可打标签；媒体组文本合并到首条
-- `/tag` 标签模式：修改消息标签（预览第一组）+ 编辑标签（添加/改名/删除/固定置顶，同步 message）
-- 频道转发媒体归属转移至群组；媒体组文本位置还原
-- Web UI 管理面板（AI 翻译数据库操作、实时日志 SSE）
+### v0.5.1
+- 发送/回复/日志多项优化：发送媒体组注释位置还原、群组自动收录去重兜底、操作日志完善等。

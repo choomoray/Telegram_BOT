@@ -61,7 +61,8 @@ const WHITELIST_ALLOWED_COMMANDS = new Set(['/search', '/exit']);
  * @returns {Promise<string>} 'executed' | 'forbidden' | 'not_found'
  */
 async function executeCommand(fullCommandText, userId, msg) {
-    const normalized = fullCommandText.trim();
+    // 兼容 Telegram 指令的 @机器人用户名 后缀（如 /edit@MyBot 参数 → /edit 参数）
+    const normalized = fullCommandText.trim().replace(/^(\/[^\s@]+)@[\w]+/, '$1');
     const shortCommand = normalized.split(' ')[0];
 
     // 精确匹配完整命令，降级匹配短命令（去掉参数）

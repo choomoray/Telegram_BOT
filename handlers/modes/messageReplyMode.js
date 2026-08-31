@@ -70,8 +70,8 @@ async function resolveChatType(chatId) {
 // ---------- 用户隔离上下文 ----------
 const userContexts = new Map();
 
-// 打包模式（/message_reply N）安静窗口：最后一条媒体后等这么久冲刷余量
-const PACK_FLUSH_DELAY = 3000;
+// 打包模式（/message_reply N）：余量不再自动冲刷——满 N 个立即回复一组，
+// 不足 N 的余量一直留在缓冲中等后续媒体补满下一组，只有退出（/exit 或超时）时才冲刷发出
 
 // 定期清理已退出模式的用户上下文
 setInterval(() => {
@@ -319,18 +319,26 @@ async function enterReplyReadyState(userId, messageDoc, processingMsgId, replyTa
 
 /**
  * 打标签完成后"回复该消息"：完成打标签后自动进入消息回复模式，
- * 回复目标就是打标签的这个媒体（跳过用户重新发送媒体的定位步骤）。
+ * 回复目标优先为"刚打标签的那条 message"（file_unique_id），无则回退为该组第一条 message
+ * （跳过用户重新发送媒体的定位步骤）。
  * 频道转发消息（有双位置）直接进入"选择回复至频道/群组"界面，其余直接进入就绪状态。
  * @param {number} userId - 用户ID
  * @param {string} groupId - 打标签的媒体组 ID
  * @param {number} baseMsgId - 当前标签消息 ID（将被编辑为回复模式界面）
+ * @param {string|null} [fileUniqueId] - 刚打标签的 message 的 file_unique_id
  * @returns {Promise<{ok: boolean, error?: string}>}
  */
-async function autoEnterReplyFromTag(userId, groupId, baseMsgId) {
+async function autoEnterReplyFromTag(userId, groupId, baseMsgId, fileUniqueId = null) {
     try {
         // 打标签的媒体必然带文本（无文本不进入打标签流程），因此一定有 message 记录
         const messageCol = getCollection(COLLECTIONS.MESSAGE);
-        const messageDoc = await messageCol.findOne({ group_id: groupId }, { sort: { message_id: 1 } });
+        let messageDoc = null;
+        if (fileUniqueId) {
+            messageDoc = await messageCol.findOne({ file_unique_id: fileUniqueId });
+        }
+        if (!messageDoc) {
+            messageDoc = await messageCol.findOne({ group_id: groupId }, { sort: { message_id: 1 } });
+        }
         if (!messageDoc) {
             return { ok: false, error: '❌ 未找到该媒体的消息记录，无法回复' };
         }
@@ -516,7 +524,8 @@ async function flushPackGroup(userId, state, items, userMsgId) {
 
 /**
  * 打包模式收集：所有媒体（含相册成员）进入打包缓冲，
- * 满 packSize 立即作为媒体组回复；最后一条媒体后安静 PACK_FLUSH_DELAY 冲刷余量
+ * 满 packSize 立即作为媒体组回复；不足 packSize 的余量留在缓冲中等待补满下一组，
+ * 仅在退出（/exit 或超时）时由 flushPackOnExit 冲刷余量
  */
 async function handlePackMedia(userId, msg, mediaInfo, state, userMsgId) {
     const ctx = getContext(userId);
@@ -531,32 +540,12 @@ async function handlePackMedia(userId, msg, mediaInfo, state, userMsgId) {
     buffer.items.push({ ...mediaInfo, message_id: msg.message_id });
     logger.info(`用户 ${userId} 打包模式收集媒体 ${buffer.items.length}/${packSize}`);
 
-    // 重新武装安静窗口定时器（最后一条消息后 PACK_FLUSH_DELAY 冲刷余量）
-    clearTimeout(buffer.timer);
-    buffer.timer = setTimeout(() => {
-        const items = buffer.items.splice(0);
-        if (items.length > 0) {
-            flushPackGroup(userId, state, items, userMsgId).catch(err =>
-                logger.error(`打包模式静默冲刷失败: ${err.message}`));
-        }
-    }, PACK_FLUSH_DELAY);
-
-    // 满 packSize：立即冲刷一组，余量由重新武装的定时器继续等待
+    // 满 packSize：立即冲刷一组；余量保留在缓冲中，等后续媒体补满下一组再冲刷，
+    // 直到退出（/exit 或超时）时由 flushPackOnExit 把余量一次发出
     while (buffer.items.length >= packSize) {
-        clearTimeout(buffer.timer);
-        buffer.timer = null;
         const chunk = buffer.items.splice(0, packSize);
         await flushPackGroup(userId, state, chunk, userMsgId);
-        if (buffer.items.length > 0) {
-            clearTimeout(buffer.timer);
-            buffer.timer = setTimeout(() => {
-                const items = buffer.items.splice(0);
-                if (items.length > 0) {
-                    flushPackGroup(userId, state, items, userMsgId).catch(err =>
-                        logger.error(`打包模式余量冲刷失败: ${err.message}`));
-                }
-            }, PACK_FLUSH_DELAY);
-        }
+        logger.info(`用户 ${userId} 打包模式已冲刷一组，缓冲剩余 ${buffer.items.length} 个媒体（等待补满下一组）`);
     }
 }
 
@@ -665,9 +654,10 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
     // 回复成功后移除就绪消息上的切换按钮（避免进入打标签流程后按钮失效）
     await removeReadySwitchButtons(userId);
 
-    // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）
+    // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）；
+    // 标签按 message 独立：传入本媒体 file_unique_id，只写这一条 message 的标签
     const { sendSuccessWithTags } = require('./sendMode');
-    await sendSuccessWithTags(userId, '✅ 已回复', targetGroupId, caption);
+    await sendSuccessWithTags(userId, '✅ 已回复', targetGroupId, caption, null, mediaInfo.fileUniqueId);
 
     logger.info(`用户 ${userId} 已回复媒体到群组 ${targetChatId}/${targetMessageId}，新 subgroup=${newSubgroup}`);
 }
@@ -767,10 +757,14 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
         // 回复成功后移除就绪消息上的切换按钮（避免进入打标签流程后按钮失效）
         await removeReadySwitchButtons(userId);
 
-        // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）
-        const firstCaption = newItems.length ? (newItems[0].caption || '') : '';
+        // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）。
+        // 取组内第一个带 caption 的媒体（Telegram 媒体组注释可能不在第一条），
+        // 并带上它的 file_unique_id（标签按 message 独立，只写这一条）
+        const captionIndex = newItems.findIndex(item => item.caption && String(item.caption).trim());
+        const firstCaption = captionIndex >= 0 ? newItems[captionIndex].caption : '';
+        const captionFileUniqueId = captionIndex >= 0 ? newItems[captionIndex].fileUniqueId : null;
         const { sendSuccessWithTags } = require('./sendMode');
-        await sendSuccessWithTags(userId, `✅ 已回复媒体组 (${newItems.length} 个)`, targetGroupId, firstCaption);
+        await sendSuccessWithTags(userId, `✅ 已回复媒体组 (${newItems.length} 个)`, targetGroupId, firstCaption, null, captionFileUniqueId);
     }
 
     logger.info(`用户 ${userId} 已回复媒体组到群组 ${targetChatId}/${targetMessageId}，新 subgroup=${newSubgroup}，共 ${newItems.length} 个媒体`);
@@ -1073,7 +1067,7 @@ async function handleMessageReplyMode(msg, state) {
         }
 
         // 打包模式（/message_reply N，N >= 2）：所有媒体进入打包缓冲，
-        // 满 N 个立即作为媒体组回复；安静窗口/退出时冲刷余量
+        // 满 N 个立即作为媒体组回复；不足 N 的余量等待补满下一组，退出（/exit 或超时）时冲刷
         if (state.packSize && state.packSize >= 2) {
             await handlePackMedia(userId, msg, mediaInfo, state, userMsgId);
             updateUserActivity(userId);

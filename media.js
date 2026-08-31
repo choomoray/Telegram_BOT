@@ -1,6 +1,5 @@
 // media.js
 const { getCollection, COLLECTIONS } = require('./db/getCollection');
-const { getGroupTags } = require('./db/message');
 const { escapeHTML } = require('./utils/sanitize');
 const logger = require('./logger');
 const bot = require('./bot');
@@ -221,16 +220,18 @@ async function sendMediaSubgroup(chatId, groupId, subgroup) {
     const messageCol = getCollection(COLLECTIONS.MESSAGE);
     const msgDocs = await messageCol.find({ file_unique_id: { $in: fileUniqueIds } }).sort({ message_id: 1 }).toArray();
     let caption = '';
+    let captionDoc = null;
     for (const doc of msgDocs) {
         if (doc.text) {
             caption = doc.text;
+            captionDoc = doc;
             break;
         }
     }
 
-    // 注释最下面单独列出该媒体组的标签（无注释或没有标签时保持原样）
-    if (caption) {
-        const tags = await getGroupTags(groupId);
+    // 标签按 message 独立：底部"📌 标签"与显示的文本配对（显示哪条文本就配哪条的标签）
+    if (caption && captionDoc) {
+        const tags = (Array.isArray(captionDoc.tags) && captionDoc.tags.length) ? captionDoc.tags : [];
         if (tags.length > 0) {
             caption += `\n\n📌 标签：${escapeHTML(tags.join('、'))}`;
         }

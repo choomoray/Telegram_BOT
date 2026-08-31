@@ -3,7 +3,6 @@ const bot = require('../../bot');
 const logger = require('../../logger');
 const { getSession, getPageResults } = require('../../utils/queryCache');
 const { findMediaByFileUniqueId } = require('../../db/media');
-const { getGroupTags } = require('../../db/message');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { sendMediaGroup } = require('../../media');
 const { generateMessageLink } = require('../../utils/chatIdConverter');
@@ -72,9 +71,9 @@ async function handleMediaCallback(query) {
             ]
         };
 
-        // 媒体描述 + 标签展示在询问界面（描述在上，标签在下）
+        // 媒体描述 + 标签展示在询问界面（描述在上，标签在下；标签与显示的文本配对）
         const desc = firstMessage && firstMessage.text ? removeLevelSuffix(firstMessage.text) : '';
-        const tags = await getGroupTags(groupId);
+        const tags = (firstMessage && Array.isArray(firstMessage.tags) && firstMessage.tags.length) ? firstMessage.tags : [];
         const tagLine = tags.length > 0 ? `\n📌 标签：${escapeHTML(tags.join('、'))}` : '';
 
         let promptText = `该组共有 ${totalMedia} 个媒体，分为 ${subgroupCount} 组。`;

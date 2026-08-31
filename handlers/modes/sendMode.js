@@ -12,7 +12,14 @@ const { getAllChannelGroups } = require('../../db/channelGroup');
 const { findMediaByFileUniqueId, insertMedia, buildMediaLocation } = require('../../db/media');
 const { upsertMessage } = require('../../db/message');
 const { upsertGroupList, setGroupDelete } = require('../../db/groupList');
-const { addTagToGroup, removeTagFromGroup, getGroupTags } = require('../../db/message');
+const {
+    addTagToGroup,
+    removeTagFromGroup,
+    getGroupTags,
+    addTagToMessage,
+    removeTagFromMessage,
+    getMessageTags
+} = require('../../db/message');
 const { getTags, sortTags, tagUsed, addTag } = require('../../db/tags');
 const { buildTagKeyboard, splitTagInput, matchTagsInText } = require('../../utils/tagUi');
 const { extractMediaFromMessage, restoreMediaGroupCaptions } = require('../../media');
@@ -141,9 +148,19 @@ async function handleCallback(query) {
 
 // ---------------- 标签按钮（发送成功后的打标签操作） ----------------
 
-async function renderTagKeyboard(userId, messageId, groupId, page = 1) {
+/**
+ * 标签按钮键盘构建
+ * @param {number} userId
+ * @param {number|null} messageId
+ * @param {string} groupId
+ * @param {number} [page=1]
+ * @param {string|null} [fileUniqueId] 指定则展示/勾选该条 message 自己的标签（标签按 message 独立）
+ */
+async function renderTagKeyboard(userId, messageId, groupId, page = 1, fileUniqueId = null) {
     const tags = sortTags(await getTags());
-    const current = await getGroupTags(groupId);
+    const current = fileUniqueId
+        ? await getMessageTags(fileUniqueId)
+        : await getGroupTags(groupId);
     const currentSet = new Set(current);
     const result = buildTagKeyboard(tags, {
         prefix: 'sendtag',
@@ -176,13 +193,14 @@ async function handleTagCallback(query) {
         return;
     }
 
-    // 完成打标签并自动进入回复模式，回复目标为当前打标签的媒体组
+    // 完成打标签并自动进入回复模式，回复目标为当前打标签的媒体组（优先刚打标签的那条 message）
     if (data === 'sendtag_reply') {
         const groupId = rawState ? rawState.lastGroupId : null;
         if (!groupId) {
             await bot.answerCallbackQuery(query.id, { text: '❌ 缺少媒体组信息' });
             return;
         }
+        const fileUniqueId = rawState ? rawState.lastFileUniqueId : null;
         await bot.answerCallbackQuery(query.id, { text: '🔁 正在进入回复模式...' });
         await bot.editMessageText('🔁 已完成标签操作，正在进入回复模式...', {
             chat_id: userId,
@@ -192,11 +210,11 @@ async function handleTagCallback(query) {
             deleteUserState(userId);
         }
         const { autoEnterReplyFromTag } = require('../modes/messageReplyMode');
-        const result = await autoEnterReplyFromTag(userId, groupId, query.message.message_id);
+        const result = await autoEnterReplyFromTag(userId, groupId, query.message.message_id, fileUniqueId);
         if (!result.ok) {
             await bot.sendMessage(userId, result.error).catch(() => { });
         }
-        logger.info(`用户 ${userId} 打标签后点击回复该消息: group_id=${groupId}`);
+        logger.info(`用户 ${userId} 打标签后点击回复该消息: group_id=${groupId}${fileUniqueId ? `, file=${fileUniqueId}` : ''}`);
         return;
     }
 
@@ -220,26 +238,40 @@ async function handleTagCallback(query) {
             await bot.answerCallbackQuery(query.id, { text: '❌ 缺少媒体组信息' });
             return;
         }
-        const current = await getGroupTags(groupId);
+        // 标签按 message 独立：优先作用于最后操作的那条 message（file_unique_id），
+        // 无该信息时（旧状态）退化为整组操作
+        const fileUniqueId = rawState ? rawState.lastFileUniqueId : null;
+        const current = fileUniqueId
+            ? await getMessageTags(fileUniqueId)
+            : await getGroupTags(groupId);
         if (current.includes(tag)) {
-            await removeTagFromGroup(groupId, tag);
+            if (fileUniqueId) {
+                await removeTagFromMessage(fileUniqueId, tag);
+            } else {
+                await removeTagFromGroup(groupId, tag);
+            }
             await tagUsed(tag, -1);
         } else {
-            await addTagToGroup(groupId, tag);
+            if (fileUniqueId) {
+                await addTagToMessage(fileUniqueId, tag);
+            } else {
+                await addTagToGroup(groupId, tag);
+            }
             await tagUsed(tag, 1);
         }
         await bot.answerCallbackQuery(query.id, { text: `标签「${tag}」已更新` });
         // 刷新：文本中的已选标签 + 按钮状态
         await renderTagMessage(userId, query.message.message_id, groupId);
-        logger.info(`用户 ${userId} 发送模式切换标签: ${tag} -> group=${groupId}`);
+        logger.info(`用户 ${userId} 发送模式切换标签: ${tag} -> group=${groupId}${fileUniqueId ? `, file=${fileUniqueId}` : ''}`);
         return;
     }
 }
 
 /**
  * 手动输入标签（空格/、分隔）：不存在则自动创建后打上
+ * 标签按 message 独立：传 fileUniqueId 时只作用于该条 message，否则退化为整组
  */
-async function applyManualTags(userId, text, groupId, mode, tagMsgId) {
+async function applyManualTags(userId, text, groupId, mode, tagMsgId, fileUniqueId = null) {
     const names = splitTagInput(text);
     if (!names.length) {
         await bot.sendMessage(userId, '❌ 未识别到标签');
@@ -253,10 +285,18 @@ async function applyManualTags(userId, text, groupId, mode, tagMsgId) {
             await addTag(name);
         }
         if (mode === 'add') {
-            await addTagToGroup(groupId, name);
+            if (fileUniqueId) {
+                await addTagToMessage(fileUniqueId, name);
+            } else {
+                await addTagToGroup(groupId, name);
+            }
             await tagUsed(name, 1);
         } else {
-            await removeTagFromGroup(groupId, name);
+            if (fileUniqueId) {
+                await removeTagFromMessage(fileUniqueId, name);
+            } else {
+                await removeTagFromGroup(groupId, name);
+            }
             await tagUsed(name, -1);
         }
     }
@@ -264,9 +304,9 @@ async function applyManualTags(userId, text, groupId, mode, tagMsgId) {
     if (tagMsgId) {
         await renderTagMessage(userId, tagMsgId, groupId, 1);
     }
-    // 用新消息列出当前该媒体的全部标签
-    const currentTags = await getGroupTags(groupId);
-    const currentText = currentTags.length ? `\n📌 当前全部标签：${currentTags.join('、')}` : '\n📌 当前全部标签：（无）';
+    // 用新消息列出当前该 message 的全部标签
+    const currentTags = fileUniqueId ? await getMessageTags(fileUniqueId) : await getGroupTags(groupId);
+    const currentText = currentTags.length ? `\n📌 当前标签：${currentTags.join('、')}` : '\n📌 当前标签：（无）';
     await bot.sendMessage(userId, `✅ 已${mode === 'add' ? '添加' : '移除'}标签：${names.join('、')}${currentText}`);
     logger.info(`用户 ${userId} 手动${mode === 'add' ? '添加' : '移除'}标签: ${names.join('、')}`);
 }
@@ -478,10 +518,12 @@ async function flushMediaGroup(userId, mediaGroupId, items, processingMsgId) {
     const hasCaption = newItems.some(item => item.caption && String(item.caption).trim());
     await setGroupDelete(groupId, hasCaption ? 0 : Date.now());
 
-    // 发送完成并已把注释还原到正确位置后，取"正确注释位置"（组内第一条带注释的媒体）的注释进入打标签流程
+    // 发送完成并已把注释还原到正确位置后，取"正确注释位置"（组内第一条带注释的媒体）的注释进入打标签流程，
+    // 并带上该媒体的 file_unique_id（标签只写这一条 message）
     const captionIndex = newItems.findIndex(item => item.caption && String(item.caption).trim());
     const caption = captionIndex >= 0 ? newItems[captionIndex].caption : '';
-    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}（媒体组 ${newItems.length} 个）`, groupId, caption, processingMsgId || null);
+    const captionFileUniqueId = captionIndex >= 0 ? newItems[captionIndex].fileUniqueId : null;
+    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}（媒体组 ${newItems.length} 个）`, groupId, caption, processingMsgId || null, captionFileUniqueId);
 }
 
 // ---------------- 发送成功回复 + 标签按钮 ----------------
@@ -493,8 +535,9 @@ async function flushMediaGroup(userId, mediaGroupId, items, processingMsgId) {
  * @param {string} groupId - 媒体组 ID
  * @param {string} caption - 媒体注释（用于自动识别标签；空则只提示不进入标签流程）
  * @param {number|null} [editMessageId] - 传入则编辑该消息（"正在发送中"消息刷新为结果），不传则发送新消息
+ * @param {string|null} [fileUniqueId] - 该文本所在的 message（标签按 message 独立，只写这一条）
  */
-async function sendSuccessWithTags(userId, text, groupId, caption, editMessageId = null) {
+async function sendSuccessWithTags(userId, text, groupId, caption, editMessageId = null, fileUniqueId = null) {
     // 无文本的媒体没有 message 记录，打标签是无效操作 → 不进入标签流程
     if (!caption || !String(caption).trim()) {
         if (editMessageId) {
@@ -505,25 +548,40 @@ async function sendSuccessWithTags(userId, text, groupId, caption, editMessageId
         return;
     }
 
-    // 自动识别媒体文本中出现的标签，并自动打上（勾选）
+    // 自动识别媒体文本中出现的标签：标签按 message 独立——
+    // 只写入该条 message（file_unique_id），并替换它原有的标签（新消息原标签为空，等价于直接打上）；
+    // 不传 file_unique_id（旧调用兜底）时退化为整组添加
     const allTags = await getTags();
     const matched = matchTagsInText(caption, allTags);
-    for (const tag of matched) {
-        await addTagToGroup(groupId, tag);
-        await tagUsed(tag, 1);
+    if (fileUniqueId) {
+        const prev = await getMessageTags(fileUniqueId);
+        for (const tag of prev) {
+            await removeTagFromMessage(fileUniqueId, tag);
+            await tagUsed(tag, -1);
+        }
+        for (const tag of matched) {
+            await addTagToMessage(fileUniqueId, tag);
+            await tagUsed(tag, 1);
+        }
+    } else {
+        for (const tag of matched) {
+            await addTagToGroup(groupId, tag);
+            await tagUsed(tag, 1);
+        }
     }
 
-    // 已选标签展示在消息文本中
-    const current = await getGroupTags(groupId);
+    // 已选标签展示在消息文本中（该 message 自己的标签）
+    const current = fileUniqueId ? await getMessageTags(fileUniqueId) : await getGroupTags(groupId);
     const finalText = text + (current.length ? `\n\n📌 已选标签：${current.join('、')}` : '');
 
-    const keyboard = await renderTagKeyboard(userId, null, groupId);
+    const keyboard = await renderTagKeyboard(userId, null, groupId, 1, fileUniqueId);
     // 进入标签阶段（可从任意模式切入：覆盖为 send 标签状态）
     const rawState = getRawUserState(userId);
     setUserState(userId, {
         ...(rawState || {}),
         mode: 'send',
         lastGroupId: groupId,
+        lastFileUniqueId: fileUniqueId,
         step: 'tagging',
         tagBaseText: text,
         lastActivity: Date.now()
@@ -547,12 +605,14 @@ async function sendSuccessWithTags(userId, text, groupId, caption, editMessageId
 
 /**
  * 刷新标签消息（文本中展示已选标签 + 键盘），每次标签操作后调用
+ * 标签按 message 独立：展示最后操作那条 message 的标签
  */
 async function renderTagMessage(userId, messageId, groupId, page = 1) {
     const st = getRawUserState(userId);
     const baseText = (st && st.tagBaseText) || '✅ 发送成功';
-    const current = await getGroupTags(groupId);
-    const keyboard = await renderTagKeyboard(userId, messageId, groupId, page);
+    const fileUniqueId = st ? st.lastFileUniqueId : null;
+    const current = fileUniqueId ? await getMessageTags(fileUniqueId) : await getGroupTags(groupId);
+    const keyboard = await renderTagKeyboard(userId, messageId, groupId, page, fileUniqueId);
     const text = baseText + (current.length ? `\n\n📌 已选标签：${current.join('、')}` : '');
     await bot.editMessageText(text, {
         chat_id: userId,
@@ -570,7 +630,7 @@ async function handleSendMode(msg, state) {
 
     // 标签阶段（发送成功后）：文本消息作为手动标签输入（空格/、分隔），不发送到群组
     if (state.lastGroupId && msg.text && !msg.photo && !msg.video && !msg.audio && !msg.document) {
-        await applyManualTags(userId, msg.text, state.lastGroupId, 'add', state.tagMsgId);
+        await applyManualTags(userId, msg.text, state.lastGroupId, 'add', state.tagMsgId, state.lastFileUniqueId);
         return true;
     }
 
@@ -655,7 +715,7 @@ async function handleSendMode(msg, state) {
     // group_list 计数与删除标记（单条媒体，每组一次；无文本媒体标记可清理）
     await upsertGroupList(groupId);
     await setGroupDelete(groupId, mediaInfo.caption && String(mediaInfo.caption).trim() ? 0 : Date.now());
-    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}`, groupId, mediaInfo.caption, processingMsgId);
+    await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}`, groupId, mediaInfo.caption, processingMsgId, mediaInfo.fileUniqueId);
     logger.info(`用户 ${userId} 发送单个媒体到 ${targetChatId}，group_id=${groupId}`);
     return true;
 }

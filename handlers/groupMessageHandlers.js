@@ -530,6 +530,9 @@ async function handleEditedMessage(msg) {
                 });
             }
             await setGroupDelete(groupId, 0);
+            // 标签按 message 独立：编辑后按新文本重算该 message 自己的标签（不影响组内其他 message）
+            const { reMatchMessageTags } = require('../utils/tagSync');
+            await reMatchMessageTags(fileUniqueId, cleanText);
             await updateProcessingMessage(msg, processingMsg.message_id, '✅ 编辑成功', true);
             insertLog(2).catch(err => logger.error(`记录日志失败: ${err.message}`));
         } else {
@@ -554,6 +557,18 @@ async function handleGroupMessage(msg) {
     if (!['group', 'supergroup', 'channel'].includes(msg.chat.type)) return;
 
     const hasMedia = SUPPORTED_MEDIA_TYPES.some(type => msg[type]);
+
+    // 群组/频道：管理员回复媒体 + /edit（支持 /edit@机器人用户名 形式）快捷编辑
+    // （频道帖子无 from，须在身份校验前拦截；群组内非管理员会由 handleReplyEditCommand 返回 false 走原逻辑）
+    const isReplyEdit = !!msg.reply_to_message && /^\/edit(?:@\w+)?(\s|$)/i.test((msg.text || '').trim());
+    if (isReplyEdit && !hasMedia) {
+        const { handleReplyEditCommand } = require('./groupReplyEdit');
+        const handled = await handleReplyEditCommand(msg, (msg.text || '').trim());
+        if (handled) {
+            logger.info(`[群组] 回复 /edit 快捷编辑已处理: chatId=${msg.chat.id}, messageId=${msg.message_id}`);
+            return;
+        }
+    }
 
     if (hasMedia) {
         logger.info(`[群组媒体消息] 收到: chatId=${msg.chat.id}, messageId=${msg.message_id}, mediaGroupId=${msg.media_group_id || '单条'}`);
