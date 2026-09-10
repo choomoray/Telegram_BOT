@@ -6,7 +6,6 @@ const {
     updateUserActivity
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
-const { insertLog } = require('../../db/log');
 
 /**
  * 标记模式菜单键盘
@@ -37,8 +36,6 @@ async function handleMarkCommand(userId, msg) {
         allow_sending_without_reply: true,
         reply_markup: MARK_MENU_KEYBOARD
     }).catch(err => logger.error('发送标记模式菜单失败:', err.message));
-
-    insertLog(20, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
 }
 
 module.exports = handleMarkCommand;

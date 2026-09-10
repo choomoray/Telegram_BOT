@@ -1,6 +1,7 @@
 // handlers/commands/help.js
 const bot = require('../../bot');
 const logger = require('../../logger');
+const { logOperation } = require('../../utils/opLog');
 
 async function handleHelpCommand(userId, msg) {
     const chatId = msg.chat.id;
@@ -46,6 +47,15 @@ async function handleHelpCommand(userId, msg) {
         reply_to_message_id: messageId,
         reply_markup: keyboard
     }).catch(err => logger.error('发送帮助消息失败:', err.message));
+
+    // /help 查看留痕（私聊为 private，群组/频道内触发为 group）
+    logOperation({
+        action: 'help',
+        source: ['group', 'supergroup', 'channel'].includes(msg.chat.type) ? 'group' : 'private',
+        userId,
+        chatId,
+        messageId
+    }).catch(() => { });
 }
 
 module.exports = handleHelpCommand;

@@ -10,6 +10,7 @@ const {
 const { setUserState, getRawUserState, deleteUserState } = require('../../states');
 const { paginationRow, safeEditText } = require('../../utils/reply');
 const { escapeHTML } = require('../../utils/sanitize');
+const { logOperation } = require('../../utils/opLog');
 
 const MODE_NAME = 'article';
 const PAGE_SIZE = 20;
@@ -399,7 +400,16 @@ async function handleCallback(query) {
 
     // 确认删除文章
     if (data.startsWith('article:delete_confirm:')) {
-        await deleteArticle(parseInt(parts[2]));
+        const deletedId = parseInt(parts[2]);
+        await deleteArticle(deletedId);
+        logOperation({
+            action: 'article_delete',
+            source: 'private',
+            userId,
+            target: { type: 'article', id: deletedId },
+            counts: { articles: 1 },
+            detail: { via: 'manage' }
+        }).catch(() => { });
         await sendNewMessage(chatId, '✅ 文章已删除');
         await bot.answerCallbackQuery(query.id, { text: '已删除' });
         return true;
@@ -483,6 +493,14 @@ async function handleArticleMessage(msg, state) {
     if (state.step === 'waiting_link') {
         if (!text) { return true; }
         const article = await createArticle({ title: state.title, link: text });
+        logOperation({
+            action: 'article_save',
+            source: 'private',
+            userId,
+            target: { type: 'article', id: article.id },
+            counts: { articles: 1 },
+            detail: { via: 'create', title: article.title }
+        }).catch(() => { });
         await sendNewMessage(chatId, `✅ 文章已创建：<a href="${escapeHTML(article.link)}">${escapeHTML(article.title)}</a>`);
         const newMenu = await bot.sendMessage(chatId, '⏳');
         await showMainMenu(userId, newMenu.message_id);
@@ -511,6 +529,14 @@ async function handleArticleMessage(msg, state) {
     if (state.step === 'waiting_edit_title') {
         if (!text) { return true; }
         await updateArticle(state.articleId, { title: text });
+        logOperation({
+            action: 'article_save',
+            source: 'private',
+            userId,
+            target: { type: 'article', id: state.articleId },
+            counts: { edits: 1 },
+            detail: { via: 'edit_title', title: text }
+        }).catch(() => { });
         await sendNewMessage(chatId, `✅ 标题已更新为：${escapeHTML(text)}`);
         const newMenu = await bot.sendMessage(chatId, '⏳');
         await showArticleDetail(userId, newMenu.message_id, state.articleId);
@@ -521,6 +547,14 @@ async function handleArticleMessage(msg, state) {
     if (state.step === 'waiting_edit_link') {
         if (!text) { return true; }
         await updateArticle(state.articleId, { link: text });
+        logOperation({
+            action: 'article_save',
+            source: 'private',
+            userId,
+            target: { type: 'article', id: state.articleId },
+            counts: { edits: 1 },
+            detail: { via: 'edit_link' }
+        }).catch(() => { });
         await sendNewMessage(chatId, '✅ 链接已更新');
         const newMenu = await bot.sendMessage(chatId, '⏳');
         await showArticleDetail(userId, newMenu.message_id, state.articleId);

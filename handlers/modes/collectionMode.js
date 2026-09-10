@@ -8,6 +8,7 @@ const {
 const { setUserState, getRawUserState, deleteUserState } = require('../../states');
 const { paginationRow, safeEditText } = require('../../utils/reply');
 const { escapeHTML } = require('../../utils/sanitize');
+const { logOperation } = require('../../utils/opLog');
 
 const MODE_NAME = 'collection';
 const PAGE_SIZE = 50;
@@ -360,6 +361,14 @@ async function handleCallback(query) {
     if (data.startsWith('collection:delete_confirm:')) {
         const cid = parseInt(parts[3]);
         await deleteCollection(cid);
+        logOperation({
+            action: 'collection_delete',
+            source: 'private',
+            userId,
+            target: { type: 'collection', id: cid },
+            counts: { collections: 1 },
+            detail: { via: 'manage' }
+        }).catch(() => { });
         await sendNew(chatId, '✅ 已删除');
         await bot.answerCallbackQuery(query.id, { text: '已删除' });
         return true;
@@ -415,6 +424,14 @@ async function handleCallback(query) {
     if (data.startsWith('collection:sub_delete_confirm:')) {
         const sid = parseInt(parts[4]);
         await deleteSubCollection(sid);
+        logOperation({
+            action: 'collection_delete',
+            source: 'private',
+            userId,
+            target: { type: 'collection', id: sid },
+            counts: { collections: 1 },
+            detail: { via: 'sub_delete' }
+        }).catch(() => { });
         await sendNew(chatId, '✅ 子合集已删除');
         await bot.answerCallbackQuery(query.id, { text: '已删除' });
         return true;
@@ -435,6 +452,14 @@ async function handleCollectionMessage(msg, state) {
     if (state.step === 'waiting_name') {
         if (!text) return true;
         await createCollection({ name: text, type: state.addType });
+        logOperation({
+            action: 'collection_save',
+            source: 'private',
+            userId,
+            target: { type: 'collection', id: text },
+            counts: { collections: 1 },
+            detail: { via: 'create', name: text, collectionType: state.addType }
+        }).catch(() => { });
         const typeLabel = TYPE_LABELS[state.addType] || state.addType;
         await sendNew(chatId, `✅ ${typeLabel}已创建：${escapeHTML(text)}`);
         const newMenu = await bot.sendMessage(chatId, '⏳');
@@ -453,7 +478,15 @@ async function handleCollectionMessage(msg, state) {
     // 等待输入子合集链接
     if (state.step === 'waiting_sub_link') {
         if (!text) return true;
-        await createSubCollection({ collection_id: state.collectionId, name: state.subName, link: text });
+        const sub = await createSubCollection({ collection_id: state.collectionId, name: state.subName, link: text });
+        logOperation({
+            action: 'collection_save',
+            source: 'private',
+            userId,
+            target: { type: 'collection', id: sub.id },
+            counts: { collections: 1 },
+            detail: { via: 'sub_create', name: state.subName, parentId: state.collectionId }
+        }).catch(() => { });
         await sendNew(chatId, '✅ 子合集已创建');
         const newMenu = await bot.sendMessage(chatId, '⏳');
         await showSubList(userId, newMenu.message_id, state.listType, state.collectionId);
@@ -464,6 +497,14 @@ async function handleCollectionMessage(msg, state) {
     if (state.step === 'waiting_edit_name') {
         if (!text) return true;
         await updateCollection(state.collectionId, { name: text });
+        logOperation({
+            action: 'collection_save',
+            source: 'private',
+            userId,
+            target: { type: 'collection', id: state.collectionId },
+            counts: { edits: 1 },
+            detail: { via: 'edit_name', name: text }
+        }).catch(() => { });
         await sendNew(chatId, `✅ 名称已更新：${escapeHTML(text)}`);
         const newMenu = await bot.sendMessage(chatId, '⏳');
         await showSubList(userId, newMenu.message_id, state.addType, state.collectionId);
@@ -474,6 +515,14 @@ async function handleCollectionMessage(msg, state) {
     if (state.step === 'waiting_sub_edit_name') {
         if (!text) return true;
         await updateSubCollection(state.subId, { name: text });
+        logOperation({
+            action: 'collection_save',
+            source: 'private',
+            userId,
+            target: { type: 'collection', id: state.subId },
+            counts: { edits: 1 },
+            detail: { via: 'sub_edit_name', name: text, parentId: state.collectionId }
+        }).catch(() => { });
         await sendNew(chatId, `✅ 名称已更新：${escapeHTML(text)}`);
         const newMenu = await bot.sendMessage(chatId, '⏳');
         await showSubEdit(userId, newMenu.message_id, state.addType, state.collectionId, state.subId);
@@ -484,6 +533,14 @@ async function handleCollectionMessage(msg, state) {
     if (state.step === 'waiting_sub_edit_link') {
         if (!text) return true;
         await updateSubCollection(state.subId, { link: text });
+        logOperation({
+            action: 'collection_save',
+            source: 'private',
+            userId,
+            target: { type: 'collection', id: state.subId },
+            counts: { edits: 1 },
+            detail: { via: 'sub_edit_link', parentId: state.collectionId }
+        }).catch(() => { });
         await sendNew(chatId, '✅ 链接已更新');
         const newMenu = await bot.sendMessage(chatId, '⏳');
         await showSubEdit(userId, newMenu.message_id, state.addType, state.collectionId, state.subId);

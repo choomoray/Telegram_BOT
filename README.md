@@ -41,8 +41,17 @@
 4. **运行单元测试：**
 
    ```bash
-   npm test               # 使用 node:test 内置框架，覆盖工具函数层
+   npm test               # 使用 node:test 内置框架
    ```
+
+   - 工具函数层：`chatIdConverter` / `groupGenerator` / `helpers` / `levelExtractor` / `markFormatter` /
+     `modeNames` / `queryParser` / `sanitize` / `tags`
+   - 写库链路回归：`tests/recordMedia.test.js`（媒体收录 + `group_list.is_delete` 语义），
+     借助 `tests/helpers/memoryDb.js`（内存 Mongo 桩 + bot/logger 打桩）离线驱动，无需真实数据库与 Telegram
+   - Web UI API 与写操作：`tests/webui.test.js`（含标签筛选/改描述/改标签/用户与聊天增删改/操作日志/统计报表）
+   - Web UI 前端静态一致性：`tests/uiStatic.test.js`（元素 id、`data-action` 处理分支、双主题令牌、既有文案）
+
+   > 单文件直接跑（`node tests/recordMedia.test.js`）也可；`node --test` 需要能 spawn 子进程的环境。
 
 5. **（可选）启动 Web UI 管理面板：**
 
@@ -420,6 +429,18 @@ function generateGroupIdFromMessage(msg) { ... }
 - `<` → `&lt;`
 - `>` → `&gt;`
 
+#### opLog.js — 操作日志（schema v2）
+
+| 导出 | 功能 |
+|------|------|
+| `logOperation(entry)` | **唯一写入入口**：规范化 `action`/`category`/`result`/`source`/`target`/`counts`/`detail`，写入 `date`+`time`，失败只记日志不抛错 |
+| `insertLog(type, userId, extra)` | 兼容旧编号的包装（旧调用无需改动，自动映射成动作键） |
+| `ACTIONS` / `CATEGORIES` / `ACTION_BY_TYPE` | 动作目录、大类名称、旧编号反查表 |
+| `getCatalog()` | 动作目录（WebUI `/api/oplogs` 与 `/api/stats` 返回给前端做标签展示） |
+| `actionLabel(action)` / `categoryLabel(category)` | 展示用中文名 |
+
+详见 [db/log.js — 操作日志（schema v2）](#dblogjs--操作日志schema-v2)。
+
 #### sendMedia.js — 通用媒体组发送
 
 封装 `bot.sendMediaGroup()`，处理媒体组发送的边界情况：
@@ -536,14 +557,78 @@ module.exports = {
 > **channel_forward 字段：** `{ is_channel: true, channel_chat_id, channel_message_id, group_chat_id, group_message_id }`，
 > 标记消息为频道转发并记录群组中该消息的位置，回复时可选频道或群组。
 
+#### db/log.js — 操作日志（schema v2）
+
+**实现已迁移到 `utils/opLog.js`**，`db/log.js` 只保留旧编号常量与兼容包装（`insertLog(type, userId, extra)` → 自动映射成动作键）。
+
+日志文档结构（面向月表 / 年终统计设计）：
+
+| 字段 | 说明 |
+|------|------|
+| `action` | 稳定动作键（如 `media_save`、`send_media`、`reply_media`、`query_keyword`、`media_clean_execute`、`tag_add`、`user_ban`、`chat_bind`、`setting_update`、`bot_start`…） |
+| `actionLabel` | 动作中文名（冗余存储，改文案不影响历史数据） |
+| `category` | 大类：`media`/`send`/`reply`/`query`/`clean`/`tag`/`user`/`chat`/`setting`/`content`/`transport`/`webui`/`system` |
+| `result` / `error` | `ok` \| `fail`，失败时带错误信息（可统计失败率） |
+| `source` | 发生位置：`private`/`group`/`channel`/`webui`/`system` |
+| `date` / `time` | `date` 为 BSON 日期（`$year`/`$month`/`$dateToString` 聚合用），`time` 为毫秒时间戳（兼容旧数据） |
+| `userId` / `chatId` / `messageId` | 操作者与触发上下文 |
+| `target` | 操作对象 `{ type, id }`（`media`/`media_group`/`tag`/`user`/`chat`/`setting`/`article`/`collection`） |
+| `counts` | 产出量数值：`{ media, groups, users, tags, edits, queries, results, texts, chats, articles, collections … }` |
+| `detail` | 结构化细节：`{ query, mediaType, videoTime, tags, hasCaption, scope, via, status, name, before, after … }` |
+| `durationMs` | 可选耗时 |
+| `type` | 旧编号（0=启动,1=收录,2=修改,3=删除,11/12=随机,13=回复,14/15/21=合并/遮罩,16=帮助,17=查找,18=清理,19=删除模式,20=标记,22=查询,23=修改,24=设置,25=发送,26=标签,27=控制台登录,28=控制台数据操作,29-32=用户,33=群组频道,34/35=文章合集,36=搬运），继续保留以兼容历史统计 |
+
+**唯一写入入口：** `logOperation({ action, category, result, source, userId, chatId, target, counts, detail, error, durationMs })`
+—— 写入失败只记 `logger.error`，绝不影响业务流程。
+
+**已接线的动作（节选）：**
+
+| 大类 | 动作 |
+|------|------|
+| media | `media_save`（收录）/`media_save_duplicate`（重复命中）/`media_save_fail`（收录失败回滚）/`channel_forward`（频道转发归属，区分新收录与补位置）/`media_edit`（描述修改：私聊、群内两步、回复 `/edit`、控制台）`media_delete`（清空描述）/`media_delete_one`/`media_delete_group`/`mark`/`media_merge`/`media_hide`/`media_unhide`/`media_password` |
+| send / reply | `send_media`/`send_text`/`send_fail`/`reply_media`/`reply_fail`（含打包模式、目标频道/群组、媒体类型与时长合计） |
+| query | `query_keyword`（含命中条数）/`search`/`help`/`log_view`/`random_video`/`random_picture` |
+| clean | `media_clean_scan`（扫描）/`media_clean_execute`（实际删除的组数与媒体数） |
+| tag | `tag_add`/`tag_remove`/`tag_create`/`tag_rename`/`tag_delete`/`tag_pin`（自动识别打标签记 `tag_add` + `detail.auto=true`） |
+| user | `user_create`/`user_update`/`user_delete`/`user_ban`/`user_unban`/`user_whitelist_add`/`user_whitelist_remove`/`user_join`/`user_leave`/`user_join_request`（含审批结论与原因） |
+| chat / setting / content | `chat_create`/`chat_update`/`chat_delete`/`chat_bind`/`chat_unbind`/`setting_update`/`article_save`/`article_delete`/`collection_save`/`collection_delete` |
+| system / webui | `bot_start`（版本、数据库、运行模式）/`bot_stop`（信号、运行时长）/`webui_login`/`webui_login_fail`/`webui_db_execute`（控制台原始增删改） |
+
+**查看统计的两种方式：**
+- 机器人内 `/log`：近 7 天明细（大类 → 动作）+ 本月 / 本年汇总 + 活跃时段条形图（时间口径按北京时间，兼容无 `action` 的历史数据）
+- Web UI「统计报表」：月报 / 年报（环比、每日趋势、动作明细、大类分布、活跃用户、失败统计）+ 可筛选的操作日志明细表
+
+**索引**（`db/index.js`）：`time -1`、`date -1`、`{action,date}`、`{category,date}`、`{userId,date}`、`{result,date}`
+
 #### db/groupList.js — 媒体组汇总
 
 | 函数 | 功能 |
 |------|------|
 | `upsertGroupList(groupId, increment)` | 原子增加 `is_group` 计数（$inc） |
-| `setGroupDelete(groupId, timestamp)` | 设置删除标记 |
+| `syncGroupDeleteByText(groupId)` | **按组内是否还有文本重算 `is_delete`**（唯一判定入口，见下） |
+| `setGroupDelete(groupId, timestamp)` | 直接设置删除标记（仅 `syncGroupDeleteByText` 与回滚使用） |
 | `findGroupList(groupId)` | 查询组信息 |
 | `deleteGroupList(groupId)` | 删除组记录 |
+
+> **`group_list.is_delete` 语义（全项目统一）：**
+>
+> | 值 | 含义 |
+> |----|------|
+> | `0` | 组内存在文本（`message` 记录），**保留**，`/clean` 不清理 |
+> | `> 0` 时间戳 | 组内没有任何描述（空描述媒体组），**可被 `/clean` 清理** |
+> | `null` | 刚建组、尚未判定（收录流程会立刻重算，不会长期停留） |
+>
+> 判定统一由 `syncGroupDeleteByText(groupId)` 完成：`message` 集合中该 `group_id` 还有记录 → `0`；
+> 否则 → 当前时间戳。**所有会改变「组内文本」的写路径都调用它**，而不是各自判断后写死：
+>
+> - 收录：`groupMessageHandlers.handleNewMediaMessage`（空描述媒体组照常录入 `media`，只把标记记为时间戳）
+> - 发送：`sendMode`（单条 + 媒体组）、回复：`messageReplyMode`（单条 + 媒体组）
+> - 编辑：`editMode.updateMessageDb`（补/改文本 → 0；清空描述 → 时间戳）、`editConfirmDbOnly`（仅更新数据库）、
+>   `groupReplyEdit`（群内回复 `/edit`）
+> - 删除：`deleteMode`（删除有文本的媒体后重算）、`groupMessageHandlers.handleEditedMessage`（群内直接清空描述）
+>
+> 因此「空描述媒体组照常被收录 → 可清理；后续补/改描述 → 自动变为无需清理；再清空 → 又可清理」，
+> 且与媒体组内各条消息的到达顺序无关。
 
 #### db/channelGroup.js — 频道/群组
 
@@ -805,20 +890,36 @@ node index.js webui       # 或 npm run start:webui
 - 除 `/api/login` 外的所有 API 均需携带 `Authorization: Bearer <token>`
 - 登录成功返回 token，前端存储在 localStorage，会话有效期 12 小时
 
-**布局：左右两栏（窄屏自动上下排列）**
+**界面结构：左侧导航 + 主区 + 右侧实时日志坞（窄屏自动折叠为单列）**
 
-- **左栏上 2/3 — 后端实时日志**：SSE 推送运行日志（时间戳 + 级别着色），自动滚动
-- **左栏下 1/3 — 数据库操作**：
-  - 第一行：`[选择数据库]`（默认"全部"，跨集合浏览）+ `[已选中/未选中]` 按钮 + 自然语言输入栏 + `[AI 翻译]` `[执行]` 按钮
-  - 第二行：📤 执行结果（AI 翻译的操作 JSON 可编辑，执行结果输出）
-- **右栏 — 数据浏览**：文档卡片列表（可滚动），点击选中高亮（再次点击或点选中按钮取消），选中后 AI 翻译会用其主键精确定位
+| 视图 | 内容 |
+|------|------|
+| 📊 概览 | 媒体 / 有描述 / 可清理组 / 用户 / 标签 / 聊天 / 日志 统计卡片、媒体类型分布、最近操作、最新媒体组（可点开详情）、快捷入口 |
+| 🖼 媒体库 | 以 `group_list` 为单位的媒体组卡片：**图片与视频封面缩略图**（服务端代理 Telegram `getFile`）、描述摘要（空描述标为「可清理」）、标签、类型/组数/位置；筛选「全部 / 有描述 / 可清理」+ 顶部搜索（按 `message.text`）+ **标签筛选**（从「标签」视图点进来，可用胶囊清除）+ 分页；点开为详情对话框 |
+| 📋 媒体详情 | 媒体缩略图条、**一键「↗ 跳转 Telegram 查看」**（在「复制 group_id」之前，按群组位置/频道位置生成 `t.me/c/…` 链接）、**在线改描述**（保存会同步 Telegram caption，超 48 小时只改库并提示）、**在线增删标签**（逐条 media 或整组批量，可新建标签，自动维护标签库计数）、一键「标记为可清理 / 保留」（改写 `group_list.is_delete`） |
+| 🧹 清理中心 | 按「一周前 / 一个月前 / 全部」给出**精确**的待清理组数与媒体数（`POST /api/clean` 预览），确认后执行与机器人 `/clean` 相同的删除逻辑；下方为可清理组预览 |
+| 🏷 标签 | 标签库卡片：置顶位置、使用次数（`message.tags` 统计）、计数，按使用量排序 + 搜索过滤；**点击标签直接跳到该标签下的全部媒体组** |
+| 👥 用户 | 用户表（名称 / ID / 状态 / 白名单 / 所在群组数 / 最近活跃），筛选「全部 / 白名单 / 已封禁」+ 搜索（名称或纯数字 ID）+ 分页；**支持新增 / 编辑（名称、状态、白名单、所在群组）/ 删除** |
+| 📢 群组 / 频道 | `channel_group` 记录与频道↔群组绑定关系（含绑定对象名称解析）；**支持新增 / 编辑 / 删除，绑定为双向写入**（改绑会清理旧对端，删除会解除对端绑定） |
+| 📈 统计报表 | **月报 / 年报**：操作总数、媒体产出、媒体组产出、活跃天数、失败次数（带环比）、每日柱状趋势、动作明细 Top15、大类分布、活跃用户，以及可筛选（大类 / 结果 / 关键词）的操作日志明细表 —— 面向"月表和年终统计"设计 |
+| 🗂 原始数据 | 原「数据库浏览」能力：单集合分页浏览 / 「全部数据库」跨集合概览、文档 JSON 就地修改与删除、插入模板 |
+| 📡 实时日志 | SSE 日志全屏视图，级别筛选（信息 / 成功 / 警告 / 错误）、暂停与清空 |
 
-**AI 操作翻译（DeepSeek）：**
-- 输入自然语言（如"把标记次数超过5的组全部标记为已删除"、"把用户 12345 设为白名单"），点【AI 翻译】
-- DeepSeek 将其翻译为完整数据库操作 JSON（`action/collection/filter/data`），显示在执行结果区**可编辑**
-- 点【执行】才真正执行；删除操作会二次确认。**AI 只翻译、不直接操作数据库**
-- 已选中右侧文档时，AI 翻译会自动以其主键定位（支持"把这条删掉"这类表述）
+**AI 操作台（Ctrl/⌘ + K 或左下角「AI 翻译」）：**
+- 输入自然语言，或点面板里的示例胶囊快速套用；点【翻译为操作】
+- DeepSeek 将其翻译为完整数据库操作 JSON（`action/collection/filter/data`），展示为**可编辑**文本框
+- 点【执行操作】才真正执行；删除类操作二次确认；`query` 结果会直接渲染到「原始数据」视图。**AI 只翻译、不直接操作数据库**
+- 提示词（`webui/db-guide.md`）内置**意图 → 集合**路由表、更新到 schema v2 的表结构与 9 个跨场景示例，
+  并在服务端校验 `action`/`collection` 合法性（模型输出占位文字或白名单外集合会直接报错并可展开原始返回，便于排查）
 - 数据库表结构与 AI 提示词位于 `webui/db-guide.md`
+
+**交互细节：**
+- **主题跟随系统**：默认 `自动`，按 `prefers-color-scheme` 实时切换（首屏不闪白）；点「🌗 跟随系统」按钮可在 自动 → 浅色 → 深色 间循环并记住选择
+- 快捷键：`/` 聚焦搜索、`Ctrl/⌘ + K` 打开 AI 操作台、`R` 刷新、`Esc` 关闭浮层；`Ctrl/⌘ + Enter` 在操作台内翻译
+- 顶部「自动」开关每 5 秒刷新当前视图（页面隐藏时暂停）
+- 缩略图懒加载 + 获取失败自动退化为类型图标，不会出现破图
+- 所有写操作（改描述/标签、清理、用户与聊天增删改、AI 执行）都会写入操作日志，来源标记为 `webui`
+
 
 **API 一览：**
 
@@ -830,6 +931,20 @@ node index.js webui       # 或 npm run start:webui
 | `POST /api/db/execute` | 执行操作（`{ operation, confirm }`，delete 必须 confirm 且 filter 非空） |
 | `POST /api/ai/plan` | AI 将自然语言翻译为完整操作计划（支持选中文档，不执行） |
 | `GET /api/logs/stream` | SSE 实时日志流（token 经 query 传递） |
+| `GET /api/overview` | 概览统计（各集合计数、媒体类型分布、最近操作、最新媒体组） |
+| `GET /api/media` | 媒体组列表（`scope=all\|cleanable\|kept`、`q` 按描述搜索、分页），带首个媒体预览与描述/标签 |
+| `GET /api/media/detail` | 单个媒体组详情（`groupId`）：媒体条目 + 描述与标签 + `group_list` 状态 |
+| `POST /api/clean` | 清理空数据（`{ scope: week\|month\|all, confirm }`；不带 `confirm` 只返回待清理数量） |
+| `GET /api/tags` | 标签库（含 `message` 中的实际使用次数） |
+| `GET /api/users` | 用户列表（`scope=all\|white\|banned`、`q` 名称或 ID、分页） |
+| `GET /api/groups` | 管理的群组/频道及绑定关系 |
+| `GET /api/thumb` | 图片/视频封面缩略图代理（服务端调用 Telegram `getFile`，图片用自身 `file_id`，视频/文档/音频用收录时保存的 `thumb_file_id`；token 经 query 传递，内存缓存） |
+| `POST /api/media/tags` | 给单条 media（`fileUniqueId`）或整个媒体组（`groupId`）增删标签（`{ add, remove }`），自动建标签并维护 `tags.count` |
+| `POST /api/media/description` | 修改媒体描述（`{ fileUniqueId, text, editTelegram }`）：落库 + 重算 `is_delete` + 重算标签 + 同步 Telegram caption（失败只回报不回滚） |
+| `GET /api/oplogs` | 操作日志列表（按 `category`/`action`/`result`/`userId`/时间范围/关键词筛选，分页；兼容只有 `type` 的历史数据） |
+| `GET /api/stats` | 月报 / 年报（`period=month|year&year=&month=`）：汇总、环比、每日趋势、动作/大类/用户分布、失败统计 |
+| `POST /api/users/create` \| `update` \| `delete` | 用户增 / 改（名称、状态、白名单、所在群组）/ 删（需 `confirm: true`） |
+| `POST /api/groups/create` \| `update` \| `delete` | 群组/频道增 / 改（含绑定，双向写入）/ 删（需 `confirm: true`，同时解除对端绑定） |
 
 **实现要点：**
 - 使用 Node 内置 `http` 模块，无新增 npm 依赖（DeepSeek 调用使用 Node 内置 fetch）
@@ -1057,7 +1172,60 @@ handleGroupEditedMessage()
 
 ## 版本历史
 
-### v0.5.3（当前）
+### v0.5.5（当前）
+- **操作日志全面重构（schema v2，面向月表 / 年终统计）**：
+  - 新增统一写入入口 `utils/opLog.js`：`logOperation({ action, category, result, source, userId, chatId, target, counts, detail, error, durationMs })`，
+    文档含 `action`（稳定动作键）、`actionLabel`、`category`、`result/error`、`source`、`date`（BSON 日期，供聚合）、`target`、`counts`（产出量）、`detail`（结构化细节）；
+    旧的 `insertLog(type, ...)` 保留为兼容包装（旧编号自动映射成动作键），历史数据仍可统计。
+  - **补齐此前完全没有日志的功能**：用户封禁/解封/白名单增删、入群/退群/入群审批、群组频道增删改与绑定（管理面板与控制台）、文章与合集的保存删除、
+    媒体密码、`/help`、`/log` 自身、机器人启动/关闭、控制台登录（含失败）与控制台原始数据增删改。
+  - **细化已有日志**：收录（媒体类型/时长/是否有描述/位置/是否媒体组）、重复命中、收录失败回滚、频道转发归属（新收录 or 仅补位置）、
+    发送/回复（目标频道或群组、数量、类型分布、视频时长合计、打包模式、失败原因）、查询（查询词、命中条数）、
+    随机视频/图片（模式与时长筛选）、标记（组 ID 与新标记值）、清理（扫描 vs 实际删除的组数与媒体数）、标签（标签名、自动识别标记、改名/置顶/删除同步条数）、
+    编辑描述（改前改后、是否超 48 小时降级、来源）等。
+  - 删除"进入某模式"的重复入口日志（发送/回复/合并/遮罩/删除/标签模式），避免与真实操作重复计数。
+  - `/log` 重写：按大类 → 动作聚合 + 产出量 + 近 7 天/本月/本年三个口径 + 北京时间活跃时段；无 `action` 的旧数据按 `type` 归类回退。
+  - `db/index.js` 新增 `date` / `{action,date}` / `{category,date}` / `{userId,date}` / `{result,date}` 索引。
+- **WebUI 新增/增强**：
+  - **主题跟随系统**：默认「自动」（CSS `prefers-color-scheme`，首屏不闪白），可在 自动/浅色/深色 间循环切换并记住；
+  - **标签 → 媒体组**：标签视图点击任意标签即筛选出该标签下的全部媒体组（可一键清除筛选）；
+  - **媒体详情可编辑**：新增「↗ 跳转 Telegram 查看」（按群组/频道位置生成 `t.me/c/…` 链接，位于「复制 group_id」之前）、
+    在线修改描述（同步 Telegram caption，超 48 小时自动降级为仅改库并提示）、逐条或整组增删标签（可新建标签并自动维护标签库计数）；
+  - **视频/文档/音频封面**：收录时保存 Telegram 缩略图 `thumb_file_id`，媒体库与详情页可显示封面（老数据无封面时退化为类型图标）；
+  - **用户与群组频道可增删改**：用户（名称/状态/白名单/所在群组）与聊天（名称/类型/绑定）均支持新增、编辑、删除；绑定为双向写入，改绑会清理旧对端、删除会解除对端绑定；
+  - **新增「统计报表」视图**：月报/年报（操作总数、媒体与媒体组产出、活跃天数、失败次数、环比、每日柱状趋势、动作 Top15、大类分布、活跃用户）
+    + 可筛选的操作日志明细表（新增 `GET /api/oplogs`、`GET /api/stats`）；
+  - 新增 `POST /api/media/tags`、`POST /api/media/description`、`POST /api/users/create|update|delete`、`POST /api/groups/create|update|delete`，`GET /api/media` 支持 `tag` 参数。
+- **AI 翻译提示词重写**（`webui/db-guide.md`）：新增"意图 → 集合"路由表、更新到 schema v2 的表结构（含 `log` 新字段、`tags` 集合、`is_delete` 语义、`thumb_file_id`）、
+  9 个覆盖不同集合与动作的示例，并强制要求按当次需求作答；服务端新增 `action`/`collection` 合法性校验，非法时返回可展开的原始返回便于排查。
+- 修复：`webui/server.js` 改聊天/改用户时原先依赖 `findOne` 返回副本，改为显式快照后再更新（避免"先读旧值、更新后再读旧值"读到新值）；
+  测试假集合的 `findOne` 改为返回活引用，长期防住这类问题。
+
+### v0.5.4
+- **空描述媒体必须照常收录（修复数据丢失）**：
+  - 频道转发到讨论群组的媒体，若媒体库中没有对应记录（频道侧未收录、或记录已被 `/clean` 清理），
+    原实现只补一条没有 `media` 的 `message`——**描述为空时则什么都写不进去，媒体彻底丢失**。
+    现在改为**照常收录**：新建 `group_list` + `media`（群组位置，频道位置在已知频道消息 ID 时一并记录），
+    有描述再写 `message`（`group_id` 指向新建的组）。
+  - `group_list.is_delete` 语义全项目统一为**唯一入口** `db/groupList.js: syncGroupDeleteByText(groupId)`：
+    组内还有 `message`（文本）→ `0`（保留）；已无文本 → 时间戳（可被 `/clean` 清理）。
+    收录 / 发送 / 回复 / 编辑 / 清空描述 / 删除全部改走该函数，修复了此前多处写死 `is_delete=0`
+    或写死时间戳导致的不一致（消息回复模式无描述时不可清理、群内直接清空描述后仍标记为保留等）。
+  - 群组自动收录、`/send` 不再依赖"是否新建组"判断标记，改为按实际文本状态重算，与媒体组内消息到达顺序无关。
+  - `/send` 媒体组落库失败不再静默吞掉：会明确提示"已发送但入库失败"，避免用户误以为已收录。
+  - 新增回归测试 `tests/recordMedia.test.js`（10 项）+ 内存 Mongo 桩 `tests/helpers/memoryDb.js`，
+    离线覆盖收录 / 频道转发兜底 / `/send` / 清空描述等写库链路。
+- **Web UI 全新界面**（简洁 / 高效 / 优雅，围绕机器人功能组织）：
+  - 左侧导航 + 主区 + 右侧实时日志坞；深色/浅色双主题（同一套设计令牌）、响应式窄屏折叠；
+  - 新增 **概览**（统计卡片 + 类型分布 + 最近操作 + 最新媒体组）、**媒体库**（媒体组卡片 + Telegram 图片缩略图代理 +
+    描述/标签/位置 + 全部/有描述/可清理筛选 + 搜索分页 + 详情对话框）、**清理中心**（精确待清理数量 + 一键清理，
+    与 `/clean` 同逻辑）、**标签**、**用户**、**群组/频道** 视图；原「原始数据」与「AI 翻译」能力保留并重新设计；
+  - 快捷键（`/`、`Ctrl/⌘+K`、`R`、`Esc`）、自动刷新开关、缩略图懒加载与失败降级、Toast 与确认对话框。
+  - 新增后端接口：`/api/overview`、`/api/media`、`/api/media/detail`、`/api/clean`、`/api/tags`、`/api/users`、
+    `/api/groups`、`/api/thumb`（服务端代理 Telegram `getFile`，带内存缓存），原有接口与鉴权保持不变。
+  - 新增前端静态一致性测试 `tests/uiStatic.test.js`（选择器、动作分支、主题令牌、既有文案）。
+
+### v0.5.3
 - **固定数量回复（`/message_reply N` 打包）**：删除"3 秒静默自动冲刷余量"逻辑——满 N 个立即作为媒体组回复，不足 N 的余量一直留在缓冲等待补满下一组，只有退出（/exit、超时、切换模式）时才冲刷发出。
 - **标签按 message 独立（共存）**：
   - 发送/回复时自动识别出的标签只写入**新收录那条 message**（新增 `addTagToMessage` / `removeTagFromMessage` / `getMessageTags`），不再广播到整组；

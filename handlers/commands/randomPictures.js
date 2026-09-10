@@ -4,7 +4,7 @@ const logger = require('../../logger');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { getSettings } = require('../../db/settings');
 const { sendMediaGroup } = require('../../utils/sendMedia');
-const { insertLog } = require('../../db/log');
+const { logOperation } = require('../../utils/opLog');
 const { getNumberArg } = require('../../utils/commandArgs');
 
 async function handleRandomPicturesCommand(userId, msg) {
@@ -137,7 +137,15 @@ async function handleRandomPicturesCommand(userId, msg) {
                 logger.warn(`编辑处理中消息失败: ${editErr.message}`);
             }
 
-            insertLog(12, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
+            logOperation({
+                action: 'random_picture',
+                source: 'private',
+                userId,
+                chatId,
+                messageId,
+                counts: { media: mediaItems.length },
+                detail: { mode: 'button', num: pictureCount, timeFilter: 'all', mediaSource: source === 1 ? 'media' : 'message' }
+            }).catch(() => { });
             logger.success(`用户 ${userId} /random_pictures 成功发送 ${mediaItems.length} 张图片`);
         } catch (err) {
             logger.error(`用户 ${userId} /random_pictures 处理失败: ${err.message}`);

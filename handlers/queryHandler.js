@@ -7,7 +7,7 @@ const { getSettings } = require('../db/settings');
 const { parseQuery } = require('../utils/queryParser');
 const { formatQueryResults, buildFoldKeyboard, buildNumberKeyboard } = require('../utils/queryFormatter');
 const { createSession } = require('../utils/queryCache');
-const { insertLog } = require('../db/log');
+const { logOperation } = require('../utils/opLog');
 
 function buildQuery(parsed) {
     const { keyword, tags, tagsAll } = parsed;
@@ -120,9 +120,26 @@ async function handleQuery(msg) {
             const total = allResults.length;
             logger.info(`查询到 ${total} 条数据`);
 
-            insertLog(22, userId, { queryText: text }).catch(err => logger.error(`记录日志失败: ${err.message}`));
+            // 查询完成留痕（命中 0 条也照记；0 会被 counts 过滤，故同时写入 detail.results）
+            const queryDetail = {
+                query: text,
+                parseMode: parsed.tagsAll && parsed.tagsAll.length ? 'strict' : (parsed.tags && parsed.tags.length ? 'loose' : 'keyword'),
+                keywords: keyword || undefined,
+                tags: parsed.tags && parsed.tags.length ? parsed.tags : undefined,
+                strictTags: parsed.tagsAll && parsed.tagsAll.length ? parsed.tagsAll : undefined,
+                random: sortRules.some(rule => rule[0] === '$sample')
+            };
 
             if (total === 0) {
+                logOperation({
+                    action: 'query_keyword',
+                    source: 'private',
+                    userId,
+                    chatId,
+                    messageId,
+                    counts: { queries: 1 },
+                    detail: { ...queryDetail, results: 0 }
+                }).catch(() => { });
                 await bot.editMessageText(`🔍 没有找到匹配的数据`, {
                     chat_id: chatId,
                     message_id: processingMsg.message_id,
@@ -139,6 +156,16 @@ async function handleQuery(msg) {
                 keyword,
                 { query, sortRules, parsed, settings, pageSize: 15 }
             );
+
+            logOperation({
+                action: 'query_keyword',
+                source: 'private',
+                userId,
+                chatId,
+                messageId,
+                counts: { queries: 1, results: total },
+                detail: { ...queryDetail, results: total, sessionId }
+            }).catch(() => { });
 
             const pageSize = 15;
             const totalPages = Math.ceil(total / pageSize);

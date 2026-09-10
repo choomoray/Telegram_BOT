@@ -1,6 +1,7 @@
 // db/users.js
 const { getCollection, COLLECTIONS } = require('./getCollection');
 const { safeApiCall } = require('../utils/safeApiCall');
+const { logOperation } = require('../utils/opLog');
 const logger = require('../logger');
 const bot = require('../bot');
 
@@ -127,6 +128,13 @@ async function banUserFully(userId, source = 'manual') {
     }
 
     logger.info(`用户 ${userId} 封禁完成: 成功 ${banned}，失败 ${failed}`);
+    logOperation({
+        action: 'user_ban',
+        source: source === 'auto' ? 'system' : 'private',
+        target: { type: 'user', id: userId },
+        counts: { users: 1, chats: chatIds.length },
+        detail: { source, name: user.name, banned, failed, chatCount: chatIds.length }
+    }).catch(() => { });
     return { success: true, banned, failed };
 }
 
@@ -159,6 +167,13 @@ async function unbanUserFully(userId) {
     }
 
     logger.info(`用户 ${userId} 解封完成: 成功 ${unbanned}，失败 ${failed}`);
+    logOperation({
+        action: 'user_unban',
+        source: 'private',
+        target: { type: 'user', id: userId },
+        counts: { users: 1, chats: chatIds.length },
+        detail: { name: user.name, unbanned, failed, chatCount: chatIds.length }
+    }).catch(() => { });
     return { success: true, unbanned, failed };
 }
 

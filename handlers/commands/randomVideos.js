@@ -6,7 +6,7 @@ const { getSettings } = require('../../db/settings');
 const { createSession } = require('../../utils/queryCache');
 const { formatResultLine } = require('../../utils/queryFormatter');
 const { sendMediaGroup } = require('../../utils/sendMedia');
-const { insertLog } = require('../../db/log');
+const { logOperation } = require('../../utils/opLog');
 const { getNumberArg } = require('../../utils/commandArgs');
 
 const TIME_FILTERS = {
@@ -28,6 +28,7 @@ async function handleRandomVideosCommand(userId, msg) {
     let textCount = 15;
     let videoCount = 10;
     let timeFilter = null;
+    let timeFilterKey = 'all'; // 时长筛选原始设置值（仅用于日志 detail）
 
     try {
         const settings = await getSettings();
@@ -51,6 +52,7 @@ async function handleRandomVideosCommand(userId, msg) {
             const filter = TIME_FILTERS[timeKey];
             if (filter) {
                 timeFilter = filter;
+                timeFilterKey = timeKey;
             }
         }
     } catch (err) {
@@ -109,7 +111,15 @@ async function handleRandomVideosCommand(userId, msg) {
                     chat_id: chatId,
                     message_id: processingMsg.message_id
                 });
-                insertLog(11, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
+                logOperation({
+                    action: 'random_video',
+                    source: 'private',
+                    userId,
+                    chatId,
+                    messageId,
+                    counts: { media: mediaItems.length },
+                    detail: { mode: 'button', num: videoCount, timeFilter: timeFilterKey }
+                }).catch(() => { });
                 logger.success(`用户 ${userId} /random_videos (视频模式) 成功发送 ${mediaItems.length} 个视频`);
             } else {
                 const messageCol = getCollection(COLLECTIONS.MESSAGE);
@@ -162,7 +172,15 @@ async function handleRandomVideosCommand(userId, msg) {
                     parse_mode: 'HTML',
                     reply_markup: keyboard
                 });
-                insertLog(11, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
+                logOperation({
+                    action: 'random_video',
+                    source: 'private',
+                    userId,
+                    chatId,
+                    messageId,
+                    counts: { media: total },
+                    detail: { mode: 'text', num: textCount, timeFilter: timeFilterKey, sessionId }
+                }).catch(() => { });
                 logger.success(`用户 ${userId} /random_videos (文字模式) 结果已发送，会话ID: ${sessionId}`);
             }
         } catch (err) {

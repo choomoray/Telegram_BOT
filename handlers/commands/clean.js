@@ -9,7 +9,7 @@ const {
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
-const { insertLog } = require('../../db/log');
+const { logOperation } = require('../../utils/opLog');
 const { repeatModeMsg } = require('../../utils/reply');
 
 async function handleCleanCommand(userId, msg) {
@@ -43,8 +43,6 @@ async function handleCleanCommand(userId, msg) {
     });
 
     logger.info(`用户 ${userId} 进入数据库清理模式，等待消息ID: ${processingMsg.message_id}`);
-
-    insertLog(18, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
 
     (async () => {
         try {
@@ -82,6 +80,14 @@ async function handleCleanCommand(userId, msg) {
             });
 
             logger.info(`用户 ${userId} 空数据查询完成，总数: ${total}, 一周: ${weekCount}, 一月: ${monthCount}`);
+            // 扫描完成留痕（真正执行的清理在 cleanCallback.executeClean 记录）
+            logOperation({
+                action: 'media_clean_scan',
+                source: 'private',
+                userId,
+                counts: { groups: total },
+                detail: { week: weekCount, month: monthCount, custom: total }
+            }).catch(() => { });
         } catch (err) {
             logger.error(`用户 ${userId} 查询空数据失败: ${err.message}`);
             await bot.editMessageText('❌ 查询失败，请稍后重试', {

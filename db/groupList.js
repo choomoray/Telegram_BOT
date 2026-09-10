@@ -59,6 +59,31 @@ async function setGroupDelete(groupId, deleteTimestamp) {
 }
 
 /**
+ * 按「组内是否还有文本消息」重算 is_delete（全项目唯一判定入口）：
+ *   - 组内还有 message 记录（= 仍有文本媒体） → 0，表示无需清理
+ *   - 组内已无 message 记录（= 空描述媒体组） → 当前时间戳，表示可被 /clean 清理
+ *
+ * 任何会改变「组内文本」的写路径（收录 / 发送 / 回复 / 编辑 / 清空描述 / 删除）
+ * 都应调用本函数，而不是各自判断后写死 0 或时间戳：这样后续补文本、改文本会变 0，
+ * 清空文本又会变回时间戳，且与媒体组内各条消息的到达顺序无关。
+ *
+ * @param {string} groupId - 媒体组 ID
+ * @returns {Promise<number>} 写入的 is_delete 值（0 或时间戳）
+ */
+async function syncGroupDeleteByText(groupId) {
+    try {
+        const messageCol = getCollection(COLLECTIONS.MESSAGE);
+        const textCount = await messageCol.countDocuments({ group_id: groupId });
+        const deleteTimestamp = textCount > 0 ? 0 : Date.now();
+        await setGroupDelete(groupId, deleteTimestamp);
+        return deleteTimestamp;
+    } catch (err) {
+        logger.error(`按文本重算 is_delete 失败: group_id=${groupId}, ${err.message}`);
+        throw err;
+    }
+}
+
+/**
  * 查询 group_list
  */
 async function findGroupList(groupId) {
@@ -127,6 +152,7 @@ async function getMarkedGroups() {
 module.exports = {
     upsertGroupList,
     setGroupDelete,
+    syncGroupDeleteByText,
     findGroupList,
     deleteGroupList,
     incrementMark,

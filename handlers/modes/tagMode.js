@@ -23,6 +23,7 @@ const { getTags, sortTags, addTag, removeTag, renameTag, setTagPin, tagUsed } = 
 const { buildTagKeyboard, splitTagInput } = require('../../utils/tagUi');
 const { extractMediaFromMessage } = require('../../media');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
+const { logOperation } = require('../../utils/opLog');
 
 // ---------------- 菜单 ----------------
 
@@ -31,6 +32,37 @@ const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = r
  */
 function resolveTagTarget(state) {
     return (state && state.locatedFileUniqueId) || null;
+}
+
+/**
+ * 标签添加/移除留痕（按钮与手动输入共用）
+ * @param {number} userId - 操作者
+ * @param {'add'|'del'} mode - 操作模式
+ * @param {string[]} tags - 本次操作的标签名
+ * @param {string|null} fileUniqueId - 目标 message 的 file_unique_id（null=整组）
+ * @param {string} groupId - 媒体组 ID
+ * @param {'button'|'manual'} via - 触发方式
+ */
+async function logTagChange(userId, mode, tags, fileUniqueId, groupId, via) {
+    if (!tags || tags.length === 0) return;
+    // 受影响 message 数：定位到单条为 1；整组操作时取组内带文本消息数
+    let messages = fileUniqueId ? 1 : undefined;
+    if (!fileUniqueId && groupId) {
+        try {
+            const msgs = await findMessagesByGroupId(groupId);
+            messages = msgs.filter(m => m.text && String(m.text).trim()).length || undefined;
+        } catch (err) {
+            messages = undefined;
+        }
+    }
+    logOperation({
+        action: mode === 'add' ? 'tag_add' : 'tag_remove',
+        source: 'private',
+        userId,
+        target: { type: fileUniqueId ? 'media' : 'media_group', id: fileUniqueId || groupId },
+        counts: { tags: tags.length, messages },
+        detail: { tags, target: fileUniqueId || groupId, mode: via }
+    }).catch(() => { });
 }
 
 /**
@@ -295,6 +327,7 @@ async function handleCallback(query) {
                 await tagUsed(tag, -1);
             }
             await bot.answerCallbackQuery(query.id, { text: `标签「${tag}」已${mode === 'add' ? '添加' : '移除'}` });
+            logTagChange(userId, mode, [tag], fileUniqueId, groupId, 'button');
             logger.info(`用户 ${userId} 修改消息标签: ${mode} ${tag} -> group=${groupId}${fileUniqueId ? `, file=${fileUniqueId}` : ''}`);
             // 操作后刷新
             await showGroupTagAction(userId, messageId, groupId, mode);
@@ -348,6 +381,14 @@ async function handleCallback(query) {
                         message_id: messageId
                     });
                     await bot.answerCallbackQuery(query.id, { text: '已删除' });
+                    logOperation({
+                        action: 'tag_delete',
+                        source: 'private',
+                        userId,
+                        target: { type: 'tag', id: tag },
+                        counts: { tags: 1 },
+                        detail: { tag, synced: result.synced || 0 }
+                    }).catch(() => { });
                     logger.info(`用户 ${userId} 删除标签: ${tag}`);
                 } else {
                     await bot.answerCallbackQuery(query.id, { text: result.error || '删除失败' });
@@ -433,6 +474,8 @@ async function handleTagMode(msg, state) {
             await bot.sendMessage(userId, `✅ 已${state.groupTagMode === 'add' ? '添加' : '移除'}标签：${names.join('、')}${currentText}`, {
                 reply_to_message_id: userMsgId
             });
+            // 手动输入标签留痕（按钮路径在回调中记录）
+            logTagChange(userId, state.groupTagMode, names.map(n => n.toUpperCase()), fileUniqueId, state.groupId, 'manual');
         } else {
             await bot.sendMessage(userId, '❌ 未识别到标签', { reply_to_message_id: userMsgId });
         }
@@ -450,7 +493,17 @@ async function handleTagMode(msg, state) {
         await bot.sendMessage(userId, result.ok ? `✅ 标签「${name}」已添加` : `❌ ${result.error}`, {
             reply_to_message_id: userMsgId
         });
-        if (result.ok) logger.info(`用户 ${userId} 添加标签: ${name}`);
+        if (result.ok) {
+            logOperation({
+                action: 'tag_create',
+                source: 'private',
+                userId,
+                target: { type: 'tag', id: name },
+                counts: { tags: 1 },
+                detail: { tag: name, pin: 0 }
+            }).catch(() => { });
+            logger.info(`用户 ${userId} 添加标签: ${name}`);
+        }
         if (state) setUserState(userId, { ...state, step: 'menu', lastActivity: Date.now() });
         return true;
     }
@@ -472,7 +525,17 @@ async function handleTagMode(msg, state) {
             : `❌ ${result.error}`, {
             reply_to_message_id: userMsgId
         });
-        if (result.ok) logger.info(`用户 ${userId} 设置标签置顶: ${state.pendingPinTag} -> ${pin}`);
+        if (result.ok) {
+            logOperation({
+                action: 'tag_pin',
+                source: 'private',
+                userId,
+                target: { type: 'tag', id: state.pendingPinTag },
+                counts: { tags: 1 },
+                detail: { tag: state.pendingPinTag, pin }
+            }).catch(() => { });
+            logger.info(`用户 ${userId} 设置标签置顶: ${state.pendingPinTag} -> ${pin}`);
+        }
         if (state) setUserState(userId, { ...state, step: 'menu', pendingPinTag: null, lastActivity: Date.now() });
         return true;
     }
@@ -490,7 +553,17 @@ async function handleTagMode(msg, state) {
             : `❌ ${result.error}`, {
             reply_to_message_id: userMsgId
         });
-        if (result.ok) logger.info(`用户 ${userId} 重命名标签: ${oldName} -> ${newName}`);
+        if (result.ok) {
+            logOperation({
+                action: 'tag_rename',
+                source: 'private',
+                userId,
+                target: { type: 'tag', id: newName },
+                counts: { tags: 1 },
+                detail: { from: oldName, to: newName, synced: result.synced || 0 }
+            }).catch(() => { });
+            logger.info(`用户 ${userId} 重命名标签: ${oldName} -> ${newName}`);
+        }
         if (state) setUserState(userId, { ...state, step: 'menu', pendingRenameTag: null, lastActivity: Date.now() });
         return true;
     }

@@ -9,10 +9,10 @@ const {
     buildMediaLocation
 } = require('../../db/media');
 const { upsertMessage } = require('../../db/message');
-const { upsertGroupList, setGroupDelete } = require('../../db/groupList');
+const { upsertGroupList, syncGroupDeleteByText } = require('../../db/groupList');
 const { extractMediaFromMessage, sendMediaAsReply, sendMediaGroupAsReply } = require('../../media');
 const { removeLevelSuffix } = require('../../utils/levelExtractor');
-const { insertLog } = require('../../db/log');
+const { logOperation } = require('../../utils/opLog');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
 
 // ---------- 图标常量（与选择按钮/群组列表保持一致） ----------
@@ -360,7 +360,6 @@ async function autoEnterReplyFromTag(userId, groupId, baseMsgId, fileUniqueId = 
 
         // 直接定位目标：频道转发消息进入"选择回复至频道/群组"界面，其余直接进入就绪状态
         await enterReplyReadyState(userId, messageDoc, baseMsgId, null);
-        insertLog(13, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
         logger.info(`用户 ${userId} 打标签后自动进入回复模式: group_id=${groupId}`);
         return { ok: true };
     } catch (err) {
@@ -601,6 +600,16 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
     const existing = await findMediaByFileUniqueId(fileUniqueId);
     if (existing) {
         logger.info(`用户发送的媒体已存在 media 集合，跳过收录: file_unique_id=${fileUniqueId}`);
+        logOperation({
+            action: 'reply_fail',
+            result: 'fail',
+            source: 'private',
+            userId,
+            target: { type: 'media_group', id: targetGroupId },
+            counts: { media: 1 },
+            detail: { reason: 'duplicate', mediaType: type, fileName: fileUniqueId },
+            error: '媒体已存在'
+        }).catch(() => { });
         await bot.sendMessage(userId, '❌ 该媒体已存在，无法再次添加', {
             reply_to_message_id: userMsgId
         });
@@ -615,6 +624,16 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         sentMsg = await sendMediaAsReply(targetChatId, targetMessageId, { type, fileId, caption, has_spoiler });
     } catch (err) {
         logger.error(`回复单个媒体到群组失败: ${err.message}`);
+        logOperation({
+            action: 'reply_fail',
+            result: 'fail',
+            source: 'private',
+            userId,
+            target: { type: 'media_group', id: targetGroupId },
+            counts: { media: 1 },
+            detail: { mediaType: type, fileName: fileUniqueId, targetChatId, targetMessageId },
+            error: err.message
+        }).catch(() => { });
         await bot.sendMessage(userId, '❌ 回复媒体失败，请重试', {
             reply_to_message_id: userMsgId
         });
@@ -632,18 +651,17 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         media_type: type,
         message_id: sentMsg.message_id,
         video_time: videoTime,
+        thumb_file_id: mediaInfo.thumbFileId,
         ...location
     });
 
-    // 并行更新：group_list 计数/删除标记 + message 收录（不同集合、互不依赖）
-    const updates = [
-        upsertGroupList(targetGroupId),
-        setGroupDelete(targetGroupId, 0)
-    ];
+    // 先写 message（有文本时），再按组内文本状态统一重算 is_delete：
+    // 无描述 → 时间戳（可被 /clean 清理）；有描述 → 0
+    await upsertGroupList(targetGroupId);
     if (caption) {
-        updates.push(recordReplyMessage(sentMsg, targetGroupId));
+        await recordReplyMessage(sentMsg, targetGroupId);
     }
-    await Promise.all(updates);
+    await syncGroupDeleteByText(targetGroupId);
 
     const countKey = `${targetGroupId}:${fileUniqueId}`;
     if (!ctx.countedMediaSet.has(countKey)) {
@@ -653,6 +671,25 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
 
     // 回复成功后移除就绪消息上的切换按钮（避免进入打标签流程后按钮失效）
     await removeReadySwitchButtons(userId);
+
+    logOperation({
+        action: 'reply_media',
+        source: 'private',
+        userId,
+        chatId: targetChatId,
+        messageId: sentMsg.message_id,
+        target: { type: 'media_group', id: targetGroupId },
+        counts: { media: 1, groups: 1, captions: caption ? 1 : 0 },
+        detail: {
+            mediaType: type,
+            videoTime: videoTime || undefined,
+            hasCaption: !!caption,
+            targetChatType: (location && location.channel) ? 'channel' : 'group',
+            replyToMessageId: targetMessageId,
+            subgroup: newSubgroup,
+            isMediaGroup: false
+        }
+    }).catch(() => { });
 
     // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）；
     // 标签按 message 独立：传入本媒体 file_unique_id，只写这一条 message 的标签
@@ -691,6 +728,16 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
     }
 
     if (newItems.length === 0) {
+        logOperation({
+            action: 'reply_fail',
+            result: 'fail',
+            source: 'private',
+            userId,
+            target: { type: 'media_group', id: targetGroupId },
+            counts: { media: sortedItems.length },
+            detail: { reason: 'duplicate', isMediaGroup: true },
+            error: '所有媒体均已存在'
+        }).catch(() => { });
         await bot.sendMessage(userId, '❌ 所有媒体均已存在，无法添加', {
             reply_to_message_id: userMsgId
         });
@@ -705,6 +752,16 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
         sentMessages = await sendMediaGroupAsReply(targetChatId, targetMessageId, newItems);
     } catch (err) {
         logger.error(`回复媒体组到群组失败: ${err.message}`);
+        logOperation({
+            action: 'reply_fail',
+            result: 'fail',
+            source: 'private',
+            userId,
+            target: { type: 'media_group', id: targetGroupId },
+            counts: { media: newItems.length },
+            detail: { isMediaGroup: true, mediaTypes: [...new Set(newItems.map(i => i.type))] },
+            error: err.message
+        }).catch(() => { });
         await bot.sendMessage(userId, '❌ 回复媒体组失败，请重试', {
             reply_to_message_id: userMsgId
         });
@@ -730,6 +787,7 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
             media_type: originalItem.type,
             message_id: sentMsg.message_id,
             video_time: originalItem.videoTime,
+            thumb_file_id: originalItem.thumbFileId,
             ...location
         });
 
@@ -743,9 +801,31 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
         }
     }));
 
-    // group_list 统一计数（一次 +N，替代原 N 次串行 upsert）
+    // group_list 统一计数（一次 +N，替代原 N 次串行 upsert）＋按组内文本状态重算 is_delete
     await upsertGroupList(targetGroupId, newItems.length);
-    await setGroupDelete(targetGroupId, 0);
+    await syncGroupDeleteByText(targetGroupId);
+
+    logOperation({
+        action: 'reply_media',
+        source: 'private',
+        userId,
+        chatId: targetChatId,
+        target: { type: 'media_group', id: targetGroupId },
+        counts: {
+            media: newItems.length,
+            groups: 1,
+            captions: newItems.filter(i => i.caption).length
+        },
+        detail: {
+            isMediaGroup: true,
+            mode: options.withTagging === false ? 'pack' : 'album',
+            targetChatType: chatType === 'channel' ? 'channel' : 'group',
+            replyToMessageId: targetMessageId,
+            subgroup: newSubgroup,
+            mediaTypes: [...new Set(newItems.map(i => i.type))],
+            videoSeconds: newItems.reduce((sum, i) => sum + (i.videoTime || 0), 0) || undefined
+        }
+    }).catch(() => { });
 
     if (options.withTagging === false) {
         // 打包模式/退出冲刷：仅提示，不进入打标签流程（避免打断打包会话）

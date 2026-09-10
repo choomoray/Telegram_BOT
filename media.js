@@ -22,6 +22,15 @@ function extractMediaFromMessage(msg) {
                 fileUniqueId = msg[type].file_unique_id;
             }
 
+            // 视频/文档/音频自带的封面（Telegram thumbnail）：
+            // 图片走自身 file_id，其余类型只有拿到封面 file_id 才能在 Web 控制台展示缩略图
+            let thumbFileId = null;
+            if (type !== 'photo') {
+                const media = msg[type];
+                const thumb = media.thumbnail || media.thumb || null;
+                thumbFileId = (thumb && thumb.file_id) || null;
+            }
+
             // 音频文件无注释时，自动用标题和艺术家生成搜索用文本
             let caption = msg.caption || '';
             if (!caption && type === 'audio') {
@@ -39,7 +48,8 @@ function extractMediaFromMessage(msg) {
                 fileUniqueId,
                 caption,
                 has_spoiler: msg.has_media_spoiler || false,
-                videoTime
+                videoTime,
+                thumbFileId
             };
         }
     }
@@ -177,6 +187,10 @@ async function clearMediaGroupState(userId, sendCollected = true, rawState = nul
 
     const mode = state.mode;
     if (['media_group', 'media_hide', 'media_unhide'].includes(mode)) {
+        // 退出即真正发送收集的媒体：发送成功/失败各记一条操作日志
+        // （action 按模式区分：合并 / 加遮罩 / 去遮罩）
+        const { logOperation } = require('./utils/opLog');
+        const modeAction = mode === 'media_group' ? 'media_merge' : (mode === 'media_hide' ? 'media_hide' : 'media_unhide');
         if (sendCollected && state.mediaItems && state.mediaItems.length > 0) {
             let processedItems = [...state.mediaItems];
             if (state.spoilerAction === 'add') {
@@ -189,9 +203,34 @@ async function clearMediaGroupState(userId, sendCollected = true, rawState = nul
             if (state.groupSize) {
                 groupSize = state.groupSize;
             }
-            await sendMediaGroupAsReply(userId, null, processedItems, groupSize).catch(err => {
+            try {
+                await sendMediaGroupAsReply(userId, null, processedItems, groupSize);
+                logOperation({
+                    action: modeAction,
+                    source: 'private',
+                    userId,
+                    counts: {
+                        media: processedItems.length,
+                        groups: Math.ceil(processedItems.length / groupSize)
+                    },
+                    detail: {
+                        groupSize,
+                        spoilerAction: state.spoilerAction || undefined,
+                        mode
+                    }
+                }).catch(() => { });
+            } catch (err) {
                 logger.error(`发送收集的媒体失败: ${err.message}`);
-            });
+                logOperation({
+                    action: modeAction,
+                    result: 'fail',
+                    source: 'private',
+                    userId,
+                    counts: { media: processedItems.length },
+                    detail: { groupSize, spoilerAction: state.spoilerAction || undefined, mode },
+                    error: err.message
+                }).catch(() => { });
+            }
         }
         deleteUserState(userId);
         logger.info(`用户 ${userId} ${mode} 状态已清理`);

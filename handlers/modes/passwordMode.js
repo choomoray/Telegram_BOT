@@ -4,6 +4,7 @@ const logger = require('../../logger');
 const { findMediaByFileUniqueId, updateMediaPassword } = require('../../db/media');
 const { extractMediaFromMessage } = require('../../media');
 const { getRawUserState, setUserState, deleteUserState, updateUserActivity } = require('../../states');
+const { logOperation } = require('../../utils/opLog');
 
 /**
  * 处理更新密码流程（等待用户发送媒体）
@@ -82,6 +83,21 @@ async function processPasswordInput(userId, password, state, msg) {
     } else {
         await bot.sendMessage(userId, '❌ 保存失败，请重试', { reply_to_message_id: msg.message_id });
     }
+    // 设置/清除媒体密码留痕（密码为空字符串表示清除）
+    logOperation({
+        action: 'media_password',
+        result: success ? 'ok' : 'fail',
+        source: 'private',
+        userId,
+        chatId: msg.chat ? msg.chat.id : undefined,
+        messageId: msg.message_id,
+        target: { type: 'media', id: pendingFileUniqueId },
+        detail: {
+            hasPassword: !!(success && password),
+            value: success && password ? String(password).slice(0, 100) : undefined
+        },
+        error: success ? undefined : '保存失败'
+    }).catch(() => { });
     deleteUserState(userId);
 }
 

@@ -3,8 +3,8 @@ const bot = require('../../bot');
 const logger = require('../../logger');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { findMediaByFileUniqueId } = require('../../db/media');
-const { setGroupDelete } = require('../../db/groupList');
-const { insertLog } = require('../../db/log');
+const { syncGroupDeleteByText } = require('../../db/groupList');
+const { logOperation } = require('../../utils/opLog');
 const { deleteUserState, setUserState } = require('../../states');
 const { extractMediaFromMessage } = require('../../media');
 const { removeLevelSuffix } = require('../../utils/levelExtractor');
@@ -162,7 +162,24 @@ async function handleEditMode(msg, state) {
                 });
                 deleteUserState(userId);
             }
-            insertLog(23, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
+            logOperation({
+                action: 'media_edit',
+                source: 'private',
+                userId,
+                chatId,
+                messageId,
+                target: { type: 'media', id: targetFileUniqueId },
+                counts: { edits: 1 },
+                detail: {
+                    via: 'private_edit',
+                    mediaType: targetMediaType,
+                    groupId: targetGroupId,
+                    targetChatId,
+                    targetMessageId,
+                    after: cleanText,
+                    textLength: cleanText ? cleanText.length : 0
+                }
+            }).catch(() => { });
             logger.info(`用户 ${userId} 成功编辑消息 ${targetChatId}/${targetMessageId}`);
         } catch (err) {
             const errMsg = err.message || '';
@@ -196,6 +213,18 @@ async function handleEditMode(msg, state) {
                 logger.info(`用户 ${userId} 编辑消息超时，已询问是否仅更新数据库`);
             } else {
                 logger.error(`编辑失败: ${err.message}`);
+                // 失败也留痕：区分「48 小时降级（仅更新数据库）」与真正的失败
+                logOperation({
+                    action: 'media_edit',
+                    result: 'fail',
+                    source: 'private',
+                    userId,
+                    chatId,
+                    messageId,
+                    target: { type: 'media', id: targetFileUniqueId },
+                    detail: { via: 'private_edit', over48h: !!isEditDenied, mediaType: targetMediaType },
+                    error: err.message
+                }).catch(() => { });
                 await bot.sendMessage(chatId, '❌ 修改失败，请稍后重试', {
                     reply_to_message_id: messageId
                 });
@@ -288,7 +317,23 @@ async function handleEditMode(msg, state) {
             });
             scheduleAllCleanup(okMsg.message_id);
             deleteUserState(userId);
-            insertLog(23, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
+            logOperation({
+                action: 'media_edit',
+                source: 'group',
+                userId,
+                chatId: notifyChat,
+                target: { type: 'media', id: targetFileUniqueId },
+                counts: { edits: 1 },
+                detail: {
+                    via: 'group_two_step',
+                    groupId: targetGroupId,
+                    targetChatId,
+                    targetMessageId,
+                    mediaType: targetMediaType,
+                    clearing: isClearing,
+                    after: cleanText || undefined
+                }
+            }).catch(() => { });
             logger.info(`用户 ${userId} 群组快捷编辑两步完成: ${targetChatId}/${targetMessageId}`);
         } catch (err) {
             const errMsg = err.message || '';
@@ -298,6 +343,21 @@ async function handleEditMode(msg, state) {
                 // 超过 48 小时：仅更新数据库 + 重算标签
                 try {
                     await updateDbAndTags();
+                    logOperation({
+                        action: 'media_edit',
+                        source: 'group',
+                        userId,
+                        chatId: notifyChat,
+                        target: { type: 'media', id: targetFileUniqueId },
+                        counts: { edits: 1 },
+                        detail: {
+                            via: 'group_two_step',
+                            groupId: targetGroupId,
+                            over48h: true,
+                            clearing: isClearing,
+                            after: cleanText || undefined
+                        }
+                    }).catch(() => { });
                     const warnMsg = await bot.sendMessage(notifyChat, '⚠️ 消息已超过编辑时效（48小时），已仅更新数据库中的描述', {
                         reply_to_message_id: messageId,
                         allow_sending_without_reply: true
@@ -306,6 +366,16 @@ async function handleEditMode(msg, state) {
                     deleteUserState(userId);
                 } catch (dbErr) {
                     logger.error(`群组快捷编辑两步仅更新数据库失败: ${dbErr.message}`);
+                    logOperation({
+                        action: 'media_edit',
+                        source: 'group',
+                        result: 'fail',
+                        userId,
+                        chatId: notifyChat,
+                        target: { type: 'media', id: targetFileUniqueId },
+                        detail: { via: 'group_two_step', over48h: true },
+                        error: dbErr.message
+                    }).catch(() => { });
                     const failMsg = await bot.sendMessage(notifyChat, '❌ 更新失败，请稍后重试', {
                         reply_to_message_id: messageId,
                         allow_sending_without_reply: true
@@ -315,6 +385,16 @@ async function handleEditMode(msg, state) {
                 }
             } else {
                 logger.error(`群组快捷编辑两步失败: ${err.message}`);
+                logOperation({
+                    action: 'media_edit',
+                    source: 'group',
+                    result: 'fail',
+                    userId,
+                    chatId: notifyChat,
+                    target: { type: 'media', id: targetFileUniqueId },
+                    detail: { via: 'group_two_step' },
+                    error: err.message
+                }).catch(() => { });
                 const failMsg = await bot.sendMessage(notifyChat, '❌ 修改失败，请稍后重试', {
                     reply_to_message_id: messageId,
                     allow_sending_without_reply: true
@@ -372,13 +452,9 @@ async function updateMessageDb(messageCol, {
             await messageCol.deleteOne({ file_unique_id: targetFileUniqueId });
             logger.info(`已删除消息记录: file_unique_id=${targetFileUniqueId}`);
 
-            const otherMessages = await messageCol.countDocuments({ group_id: targetGroupId });
-            if (otherMessages === 0) {
-                await setGroupDelete(targetGroupId, Date.now());
-                logger.info(`组内无其他文本，设置 is_delete 为时间戳: group_id=${targetGroupId}`);
-            } else {
-                await setGroupDelete(targetGroupId, 0);
-            }
+            // 描述清空后按组内剩余文本统一重算：
+            // 组内还有其他文本 → 0（无需清理）；已无文本 → 时间戳（可被 /clean 清理）
+            if (targetGroupId) await syncGroupDeleteByText(targetGroupId);
         }
     } else {
         if (existing) {
@@ -399,7 +475,8 @@ async function updateMessageDb(messageCol, {
             });
             logger.info(`已插入新消息记录: file_unique_id=${targetFileUniqueId}`);
         }
-        await setGroupDelete(targetGroupId, 0);
+        // 补/改文本后组内必然有文本 → is_delete=0（无需清理）
+        if (targetGroupId) await syncGroupDeleteByText(targetGroupId);
     }
 }
 

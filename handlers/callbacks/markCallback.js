@@ -5,7 +5,6 @@ const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { getMarkedGroups } = require('../../db/groupList');
 const { createSession, getSession, getPageResults } = require('../../utils/queryCache');
 const { deleteUserState, updateUserActivity } = require('../../states');
-const { insertLog } = require('../../db/log');
 const {
     sortMarkRecords,
     formatMarkRecords,
@@ -102,7 +101,6 @@ async function handleMarkMenuCallback(query) {
                 message_id: messageId
             });
             await bot.answerCallbackQuery(query.id, { text: '开始标记' });
-            insertLog(20, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
             logger.info(`用户 ${userId} 通过菜单开始标记`);
             break;
         }

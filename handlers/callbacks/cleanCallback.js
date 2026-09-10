@@ -4,6 +4,7 @@ const logger = require('../../logger');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { deleteUserState, setUserState, getRawUserState } = require('../../states');
 const { sendNextBatch } = require('../cleanHelpers');
+const { logOperation } = require('../../utils/opLog');
 
 /**
  * 执行实际的清理操作
@@ -49,6 +50,9 @@ async function executeClean(action, query, userId, chatId, messageId) {
             return;
         }
 
+        // 先按 group_id 统计待删除的媒体条数（删除后无法再统计，用于日志产出量）
+        const mediaCount = await mediaCol.countDocuments({ group_id: { $in: groupIds } });
+
         if (groupIds.length > 0) {
             await mediaCol.deleteMany({ group_id: { $in: groupIds } });
         }
@@ -60,9 +64,24 @@ async function executeClean(action, query, userId, chatId, messageId) {
         });
 
         deleteUserState(userId);
+        logOperation({
+            action: 'media_clean_execute',
+            source: 'private',
+            userId,
+            counts: { groups: count, media: mediaCount },
+            detail: { scope: action, timeText }
+        }).catch(() => { });
         logger.info(`用户 ${userId} 清理空数据成功: ${timeText}, 删除 ${count} 组`);
     } catch (err) {
         logger.error(`清理空数据失败: ${err.message}`);
+        logOperation({
+            action: 'media_clean_execute',
+            result: 'fail',
+            source: 'private',
+            userId,
+            detail: { scope: action, timeText },
+            error: err.message
+        }).catch(() => { });
         await bot.editMessageText('❌ 清理失败，请稍后重试', {
             chat_id: chatId,
             message_id: messageId

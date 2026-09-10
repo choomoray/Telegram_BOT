@@ -61,8 +61,6 @@ async function enterMessageReplyMode(userId, msg, replyTarget) {
         reply_to_message_id: msg.message_id,
         allow_sending_without_reply: true
     }).catch(err => logger.error('发送消息失败:', err.message));
-
-    insertLog(13, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
 }
 
 // /message_reply：定位后询问回复位置（频道转发消息时）

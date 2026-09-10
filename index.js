@@ -4,7 +4,7 @@ const config = require('./config');
 const { connectDB, getClient, getDb } = require('./database');
 const { initCollections } = require('./db/index');
 const { loadSettings } = require('./db/settings');
-const { insertLog } = require('./db/log');
+const { logOperation } = require('./utils/opLog');
 const { addUserToGroup, removeUserFromGroup, updateLastSeen, banUserFully, userOperationLocks, isRecentlyUnbanned } = require('./db/users');
 const { upsertChannelGroup, getChannelGroupById } = require('./db/channelGroup');
 const { startHealthServer } = require('./healthServer');
@@ -109,6 +109,15 @@ async function start() {
                 }
                 await addUserToGroup(userId, userName, chat.id);
                 logger.info(`用户 ${userId} (${userName}) 加入群组 ${chat.id} (状态: ${newStatus})`);
+                logOperation({
+                    action: 'user_join',
+                    source: 'system',
+                    userId,
+                    chatId: chat.id,
+                    target: { type: 'user', id: userId },
+                    counts: { users: 1 },
+                    detail: { userName, status: newStatus, chatName: chat.title || chat.username || undefined }
+                }).catch(() => { });
             } else if (['left', 'kicked'].includes(newStatus)) {
                 // 解封动作回显：用户刚被机器人解封（unban 会产生 left 状态更新），
                 // 不视为主动退群，跳过"退出即封禁"，避免"管理员解封后机器人立刻又封禁"
@@ -118,6 +127,15 @@ async function start() {
                 }
                 await removeUserFromGroup(userId, chat.id);
                 logger.info(`用户 ${userId} 离开群组 ${chat.id} (状态: ${newStatus})`);
+                logOperation({
+                    action: 'user_leave',
+                    source: 'system',
+                    userId,
+                    chatId: chat.id,
+                    target: { type: 'user', id: userId },
+                    counts: { users: 1 },
+                    detail: { userName, status: newStatus, autoBanned: true, chatName: chat.title || chat.username || undefined }
+                }).catch(() => { });
             }
         }));
 
@@ -144,6 +162,16 @@ async function start() {
             const { chat, from } = update;
             const userId = from.id;
             const chatId = chat.id;
+            const userName = from.username || `${from.first_name || ''} ${from.last_name || ''}`.trim() || `User${userId}`;
+            const logRequest = (decision, reason) => logOperation({
+                action: 'user_join_request',
+                source: 'system',
+                userId,
+                chatId,
+                target: { type: 'user', id: userId },
+                counts: { users: 1 },
+                detail: { decision, reason, userName, chatName: chat.title || chat.username || undefined }
+            }).catch(() => { });
             try {
                 const { getCollection, COLLECTIONS } = require('./db/getCollection');
                 const usersCol = getCollection(COLLECTIONS.USERS);
@@ -151,6 +179,7 @@ async function start() {
                 if (!user || user.state === 0) {
                     await bot.declineChatJoinRequest(chatId, userId);
                     logger.info(`自动拒绝加入请求：用户 ${userId} 封禁或不在记录中 (群组 ${chatId})`);
+                    await logRequest('decline', user ? 'banned' : 'unknown_user');
                     return;
                 }
                 const groupInfo = await getChannelGroupById(chatId);
@@ -159,18 +188,39 @@ async function start() {
                     if (!userGroups.includes(groupInfo.bind_id)) {
                         await bot.declineChatJoinRequest(chatId, userId);
                         logger.info(`自动拒绝加入请求：用户 ${userId} 未加入关联频道 ${groupInfo.bind_id} (群组 ${chatId})`);
+                        await logRequest('decline', 'not_in_bound_channel');
                         return;
                     }
                 }
                 await bot.approveChatJoinRequest(chatId, userId);
                 logger.info(`自动批准加入请求：用户 ${userId} 加入群组 ${chatId}`);
+                await logRequest('approve', 'allowed');
             } catch (err) {
                 logger.error(`处理加入请求失败: ${err.message}`);
+                await logOperation({
+                    action: 'user_join_request',
+                    result: 'fail',
+                    source: 'system',
+                    userId,
+                    chatId,
+                    target: { type: 'user', id: userId },
+                    detail: { userName },
+                    error: err.message
+                }).catch(() => { });
             }
         }));
 
-        // 记录启动日志
-        await insertLog(0);
+        // 记录启动日志（schema v2：带版本/数据库/模式，便于年终统计与排障）
+        await logOperation({
+            action: 'bot_start',
+            source: 'system',
+            detail: {
+                version: require('./package.json').version,
+                dbName: require('./database').getDatabaseName(),
+                mode: process.argv.includes('test') ? 'test' : (process.argv.includes('webui') ? 'webui' : 'normal'),
+                node: process.version
+            }
+        }).catch(() => { });
 
         // 启动健康检查 HTTP 服务
         startHealthServer(9699, async () => {
@@ -243,6 +293,13 @@ async function gracefulShutdown(signal) {
             await withTimeout(new Promise(resolve => webServer.close(resolve)), 3000);
             logger.info('Web UI 服务已关闭');
         }
+
+        // 关闭日志必须在断开数据库之前写入（否则连不上库，日志会丢）
+        await logOperation({
+            action: 'bot_stop',
+            source: 'system',
+            detail: { signal, uptimeSec: Math.round(process.uptime()) }
+        }).catch(() => { });
 
         // 3. 关闭 MongoDB 连接（最多等待 3 秒）
         const client = getClient();

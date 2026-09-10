@@ -8,6 +8,7 @@ const {
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
 const { repeatModeMsg } = require('../../utils/reply');
+const { logOperation } = require('../../utils/opLog');
 
 async function handleSearchCommand(userId, msg) {
     const state = getUserState(userId);
@@ -34,7 +35,13 @@ async function handleSearchCommand(userId, msg) {
         allow_sending_without_reply: true
     }).catch(err => logger.error('发送查找模式提示失败:', err.message));
 
-    insertLog(17, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
+    // /search 本身只是进入查找模式（真正的查找媒体操作在 searchMode 内完成）
+    logOperation({
+        action: 'search',
+        source: 'private',
+        userId,
+        detail: { mode: 'enter_search_mode' }
+    }).catch(() => { });
 }
 
 module.exports = handleSearchCommand;

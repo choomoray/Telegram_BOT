@@ -9,9 +9,10 @@ const bot = require('../../bot');
 const logger = require('../../logger');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { getAllChannelGroups } = require('../../db/channelGroup');
+const { logOperation } = require('../../utils/opLog');
 const { findMediaByFileUniqueId, insertMedia, buildMediaLocation } = require('../../db/media');
 const { upsertMessage } = require('../../db/message');
-const { upsertGroupList, setGroupDelete } = require('../../db/groupList');
+const { upsertGroupList, syncGroupDeleteByText } = require('../../db/groupList');
 const {
     addTagToGroup,
     removeTagFromGroup,
@@ -331,7 +332,7 @@ async function sendSingleMediaToChat(chatId, mediaInfo) {
  * 避免媒体组内各条媒体并发 upsert 同一 group_id 触发唯一索引冲突
  */
 async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo, targetType) {
-    const { fileUniqueId, type, caption, videoTime } = mediaInfo;
+    const { fileUniqueId, type, caption, videoTime, thumbFileId } = mediaInfo;
 
     // 写入媒体位置：目标为频道存 channel，目标为群组存 group
     const location = await buildMediaLocation(targetChatId, sentMsg.message_id, targetType);
@@ -344,6 +345,7 @@ async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo, target
         media_type: type,
         message_id: sentMsg.message_id,
         video_time: videoTime,
+        thumb_file_id: thumbFileId,
         ...location
     });
 
@@ -497,6 +499,16 @@ async function flushMediaGroup(userId, mediaGroupId, items, processingMsgId) {
         sentMessages = await sendMediaGroupToChat(targetChatId, newItems);
     } catch (err) {
         logger.error(`发送媒体组失败: ${err.message}`);
+        logOperation({
+            action: 'send_fail',
+            result: 'fail',
+            source: 'private',
+            userId,
+            target: { type: 'chat', id: targetChatId },
+            counts: { media: newItems.length },
+            detail: { targetName, targetType, isMediaGroup: true, mediaTypes: [...new Set(newItems.map(i => i.type))] },
+            error: err.message
+        }).catch(() => { });
         const text = '❌ 发送媒体组失败，请重试';
         if (processingMsgId) {
             await bot.editMessageText(text, { chat_id: userId, message_id: processingMsgId }).catch(() => { });
@@ -508,15 +520,49 @@ async function flushMediaGroup(userId, mediaGroupId, items, processingMsgId) {
 
     // 并行落库：每条媒体独立插入（media + message），全部完成后统一更新 group_list（一次 +N）
     // 相比逐条串行 await（每条 3~4 次 DB 往返），媒体组越大提速越明显
-    await Promise.all(sentMessages.map((sent, i) => {
-        const original = newItems[i];
-        if (!original) return null;
-        return recordSentMedia(sent, targetChatId, groupId, original, targetType);
-    }));
-    await upsertGroupList(groupId, newItems.length);
-    // 与群组自动收录一致：无文本媒体组标记 is_delete=时间戳（可被 clean 清理），有文本标记 0
-    const hasCaption = newItems.some(item => item.caption && String(item.caption).trim());
-    await setGroupDelete(groupId, hasCaption ? 0 : Date.now());
+    try {
+        await Promise.all(sentMessages.map((sent, i) => {
+            const original = newItems[i];
+            if (!original) return null;
+            return recordSentMedia(sent, targetChatId, groupId, original, targetType);
+        }));
+        await upsertGroupList(groupId, newItems.length);
+        // 与群组自动收录一致：按组内是否还有文本重算 is_delete
+        // （有文本 → 0；整组都无描述 → 时间戳，表示可被 /clean 清理）
+        const isDelete = await syncGroupDeleteByText(groupId);
+        logger.info(`发送媒体组 group_list 文本状态重算: group_id=${groupId}, is_delete=${isDelete}`);
+        // 发送成功日志：一次媒体组 = 一条日志（counts 带媒体数量，便于月表统计产出量）
+        logOperation({
+            action: 'send_media',
+            source: 'private',
+            userId,
+            target: { type: 'chat', id: targetChatId },
+            counts: {
+                media: newItems.length,
+                groups: 1,
+                captions: newItems.filter(i => i.caption && String(i.caption).trim()).length
+            },
+            detail: {
+                targetName,
+                targetType,
+                isMediaGroup: true,
+                mediaGroupId: mediaGroupId || undefined,
+                mediaTypes: [...new Set(newItems.map(i => i.type))],
+                videoSeconds: newItems.reduce((sum, i) => sum + (i.videoTime || 0), 0) || undefined,
+                groupId
+            }
+        }).catch(() => { });
+    } catch (err) {
+        // 落库失败必须让用户看到（否则媒体已发到群里却没入库，用户以为已收录）
+        logger.error(`发送媒体组落库失败: group_id=${groupId}, ${err.message}`);
+        const failText = `⚠️ 已发送到 ${targetName}（媒体组 ${newItems.length} 个），但入库失败：${err.message}`;
+        if (processingMsgId) {
+            await bot.editMessageText(failText, { chat_id: userId, message_id: processingMsgId }).catch(() => { });
+        } else {
+            await bot.sendMessage(userId, failText).catch(() => { });
+        }
+        return;
+    }
 
     // 发送完成并已把注释还原到正确位置后，取"正确注释位置"（组内第一条带注释的媒体）的注释进入打标签流程，
     // 并带上该媒体的 file_unique_id（标签只写这一条 message）
@@ -553,8 +599,10 @@ async function sendSuccessWithTags(userId, text, groupId, caption, editMessageId
     // 不传 file_unique_id（旧调用兜底）时退化为整组添加
     const allTags = await getTags();
     const matched = matchTagsInText(caption, allTags);
+    let prevTags = [];
     if (fileUniqueId) {
         const prev = await getMessageTags(fileUniqueId);
+        prevTags = prev;
         for (const tag of prev) {
             await removeTagFromMessage(fileUniqueId, tag);
             await tagUsed(tag, -1);
@@ -573,6 +621,19 @@ async function sendSuccessWithTags(userId, text, groupId, caption, editMessageId
     // 已选标签展示在消息文本中（该 message 自己的标签）
     const current = fileUniqueId ? await getMessageTags(fileUniqueId) : await getGroupTags(groupId);
     const finalText = text + (current.length ? `\n\n📌 已选标签：${current.join('、')}` : '');
+
+    // 自动识别打标签留痕（自动打上的标签与手动操作分开统计）
+    const autoAdded = matched.filter(t => !prevTags.includes(t));
+    if (autoAdded.length > 0) {
+        logOperation({
+            action: 'tag_add',
+            source: 'private',
+            userId,
+            target: { type: fileUniqueId ? 'media' : 'media_group', id: fileUniqueId || groupId },
+            counts: { tags: autoAdded.length, messages: fileUniqueId ? 1 : undefined },
+            detail: { tags: autoAdded, auto: true, matchedFrom: caption.slice(0, 60) }
+        }).catch(() => { });
+    }
 
     const keyboard = await renderTagKeyboard(userId, null, groupId, 1, fileUniqueId);
     // 进入标签阶段（可从任意模式切入：覆盖为 send 标签状态）
@@ -649,11 +710,31 @@ async function handleSendMode(msg, state) {
         try {
             const sent = await bot.sendMessage(targetChatId, msg.text);
             logger.info(`用户 ${userId} 发送文本到 ${targetChatId}: msg=${sent.message_id}`);
+            logOperation({
+                action: 'send_text',
+                source: 'private',
+                userId,
+                chatId: targetChatId,
+                messageId: sent.message_id,
+                target: { type: 'chat', id: targetChatId },
+                counts: { texts: 1, textLength: msg.text.length },
+                detail: { targetName, targetType: state.targetType || 'group' }
+            }).catch(() => { });
             await bot.sendMessage(userId, `✅ 已发送到 ${targetName}`, {
                 reply_to_message_id: userMsgId
             });
         } catch (err) {
             logger.error(`发送文本失败: ${err.message}`);
+            logOperation({
+                action: 'send_fail',
+                result: 'fail',
+                source: 'private',
+                userId,
+                target: { type: 'chat', id: targetChatId },
+                counts: { texts: 1 },
+                detail: { targetName, textLength: msg.text.length },
+                error: err.message
+            }).catch(() => { });
             await bot.sendMessage(userId, '❌ 发送失败，请检查机器人是否为该群组管理员', {
                 reply_to_message_id: userMsgId
             });
@@ -702,6 +783,16 @@ async function handleSendMode(msg, state) {
         sentMsg = await sendSingleMediaToChat(targetChatId, mediaInfo);
     } catch (err) {
         logger.error(`发送单个媒体失败: ${err.message}`);
+        logOperation({
+            action: 'send_fail',
+            result: 'fail',
+            source: 'private',
+            userId,
+            target: { type: 'chat', id: targetChatId },
+            counts: { media: 1 },
+            detail: { targetName, targetType: state.targetType || 'group', mediaType: mediaInfo.type },
+            error: err.message
+        }).catch(() => { });
         const text = '❌ 发送失败，请检查机器人是否为该群组管理员';
         if (processingMsgId) {
             await bot.editMessageText(text, { chat_id: userId, message_id: processingMsgId }).catch(() => { });
@@ -712,9 +803,28 @@ async function handleSendMode(msg, state) {
     }
 
     await recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo, state.targetType || 'group');
-    // group_list 计数与删除标记（单条媒体，每组一次；无文本媒体标记可清理）
+    // group_list 计数与删除标记（单条媒体，每组一次）：
+    // 无文本媒体标记为时间戳（可被 /clean 清理），有文本标记 0 —— 统一按组内文本状态重算
     await upsertGroupList(groupId);
-    await setGroupDelete(groupId, mediaInfo.caption && String(mediaInfo.caption).trim() ? 0 : Date.now());
+    await syncGroupDeleteByText(groupId);
+    logOperation({
+        action: 'send_media',
+        source: 'private',
+        userId,
+        chatId: targetChatId,
+        messageId: sentMsg.message_id,
+        target: { type: 'chat', id: targetChatId },
+        counts: { media: 1, groups: 1, captions: mediaInfo.caption ? 1 : 0 },
+        detail: {
+            targetName,
+            targetType: state.targetType || 'group',
+            isMediaGroup: false,
+            mediaType: mediaInfo.type,
+            videoTime: mediaInfo.videoTime || undefined,
+            hasCaption: !!mediaInfo.caption,
+            groupId
+        }
+    }).catch(() => { });
     await sendSuccessWithTags(userId, `✅ 已发送到 ${targetName}`, groupId, mediaInfo.caption, processingMsgId, mediaInfo.fileUniqueId);
     logger.info(`用户 ${userId} 发送单个媒体到 ${targetChatId}，group_id=${groupId}`);
     return true;

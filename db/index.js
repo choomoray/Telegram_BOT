@@ -24,9 +24,14 @@ async function initCollections() {
         const groupListCol = db.collection(COLLECTIONS.GROUP_LIST);
         await groupListCol.createIndex({ group_id: 1 }, { unique: true });
 
-        // log 集合索引
+        // log 集合索引（操作日志：时间线 + 月表/年表聚合 + 按动作/大类/用户筛选）
         const logCol = db.collection(COLLECTIONS.LOG);
         await logCol.createIndex({ time: -1 });
+        await logCol.createIndex({ date: -1 });
+        await logCol.createIndex({ action: 1, date: -1 });
+        await logCol.createIndex({ category: 1, date: -1 });
+        await logCol.createIndex({ userId: 1, date: -1 });
+        await logCol.createIndex({ result: 1, date: -1 });
 
         // transport 集合索引
         const transportCol = db.collection(COLLECTIONS.TRANSPORT);

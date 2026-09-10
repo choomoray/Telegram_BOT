@@ -41,8 +41,6 @@ async function handleMediaUnhideCommand(userId, msg) {
     const sizeHint = groupSize !== null ? `\n📦 退出时按 ${groupSize} 个为一组打包发送` : '';
     await bot.sendMessage(userId, `✅ 已进入媒体去遮罩模式\n🎭 请发送图片或视频，退出时自动移除 spoiler 遮罩。${sizeHint}\n使用 /exit 退出或10分钟无操作自动退出，收集的媒体将分组发送给你。`)
         .catch(err => logger.error('发送消息失败:', err.message));
-
-    insertLog(21, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
 }
 
 module.exports = handleMediaUnhideCommand;

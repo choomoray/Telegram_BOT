@@ -74,8 +74,6 @@ async function handleMediaGroupCommand(userId, msg) {
         _onExit: async () => { }
     });
     logger.info(`用户 ${userId} 进入媒体合并模式，每组最多 ${groupSize} 个媒体`);
-
-    insertLog(14, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
 }
 
 module.exports = handleMediaGroupCommand;

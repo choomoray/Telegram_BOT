@@ -8,6 +8,7 @@ const { deleteMessageByFileUniqueId } = require('../../db/message');
 const { deleteGroupList } = require('../../db/groupList');
 const { extractMediaFromMessage } = require('../../media');
 const { deleteUserState } = require('../../states');
+const { logOperation } = require('../../utils/opLog');
 
 async function handleDeleteGroupMode(msg, state) {
     const userId = msg.from.id;
@@ -33,6 +34,7 @@ async function handleDeleteGroupMode(msg, state) {
         return true;
     }
 
+    let targetGroupId = null; // 供失败日志定位媒体组
     try {
         const mediaDoc = await findMediaByFileUniqueId(fileUniqueId);
         if (!mediaDoc) {
@@ -45,9 +47,13 @@ async function handleDeleteGroupMode(msg, state) {
         }
 
         const groupId = mediaDoc.group_id;
+        targetGroupId = groupId;
         const mediaCol = getCollection(COLLECTIONS.MEDIA);
         const messageCol = getCollection(COLLECTIONS.MESSAGE);
         const groupListCol = getCollection(COLLECTIONS.GROUP_LIST);
+
+        // 删除前先统计该组媒体数量（删除后无法再统计，用于日志 counts.media）
+        const mediaCount = await mediaCol.countDocuments({ group_id: groupId });
 
         // 删除该组的所有媒体
         await mediaCol.deleteMany({ group_id: groupId });
@@ -61,9 +67,26 @@ async function handleDeleteGroupMode(msg, state) {
             message_id: processingMsg.message_id
         });
         deleteUserState(userId);
+        logOperation({
+            action: 'media_delete_group',
+            source: 'private',
+            userId,
+            target: { type: 'media_group', id: groupId },
+            counts: { media: mediaCount },
+            detail: { groupId, fileUniqueId }
+        }).catch(() => { });
         logger.info(`用户 ${userId} 删除媒体组成功，group_id=${groupId}`);
     } catch (err) {
         logger.error(`删除媒体组失败: ${err.message}`);
+        logOperation({
+            action: 'media_delete_group',
+            result: 'fail',
+            source: 'private',
+            userId,
+            target: { type: 'media_group', id: targetGroupId || fileUniqueId },
+            detail: { groupId: targetGroupId, fileUniqueId },
+            error: err.message
+        }).catch(() => { });
         await bot.editMessageText('❌ 删除失败，请稍后重试', {
             chat_id: userId,
             message_id: processingMsg.message_id

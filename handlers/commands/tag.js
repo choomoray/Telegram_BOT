@@ -8,7 +8,6 @@ const bot = require('../../bot');
 const logger = require('../../logger');
 const { setUserState, updateUserActivity } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
-const { insertLog } = require('../../db/log');
 
 async function handleTagCommand(userId, msg) {
     updateUserActivity(userId);
@@ -29,8 +28,6 @@ async function handleTagCommand(userId, msg) {
 
     const { showTagMenu } = require('../modes/tagMode');
     await showTagMenu(userId, msg.message_id);
-
-    insertLog(26, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
 }
 
 module.exports = handleTagCommand;

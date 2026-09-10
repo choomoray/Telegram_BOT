@@ -9,6 +9,7 @@ const {
     deleteChannelGroup
 } = require('../../../db/channelGroup');
 const { extractChatInfo } = require('../../../db/transport');
+const { logOperation } = require('../../../utils/opLog');
 const { escapeHTML } = require('../../../utils/sanitize');
 const { paginationRow } = require('../../../utils/reply');
 
@@ -152,13 +153,22 @@ async function promptAddGroup(userId, messageId) {
 async function verifyAndAddGroup(userId, input, state, msg) {
     try {
         const chatInfo = await extractChatInfo(input, bot);
+        const chatType = chatInfo.chat_id.toString().startsWith('-100') ? 'channel' : 'group';
         await upsertChannelGroup({
             id: chatInfo.chat_id,
             name: chatInfo.chat_name || `Group ${chatInfo.chat_id}`,
-            type: chatInfo.chat_id.toString().startsWith('-100') ? 'channel' : 'group',
+            type: chatType,
             bind_id: null,
             is_bound: false
         });
+        logOperation({
+            action: 'chat_create',
+            source: 'private',
+            userId,
+            target: { type: 'chat', id: chatInfo.chat_id },
+            counts: { chats: 1 },
+            detail: { name: chatInfo.chat_name, chatType, via: 'manage', input: String(input).slice(0, 80) }
+        }).catch(() => { });
 
         const keyboard = {
             inline_keyboard: [
@@ -178,6 +188,14 @@ async function verifyAndAddGroup(userId, input, state, msg) {
         });
     } catch (err) {
         logger.error(`解析链接添加群组失败: ${err.message}`);
+        logOperation({
+            action: 'chat_create',
+            result: 'fail',
+            source: 'private',
+            userId,
+            detail: { via: 'manage', input: String(input).slice(0, 80) },
+            error: err.message
+        }).catch(() => { });
         await bot.sendMessage(userId, `❌ 无法识别该链接，请确认机器人已加入且为管理员，或链接格式正确`, { reply_to_message_id: msg.message_id });
     }
 }
@@ -202,17 +220,36 @@ async function verifyAndBind(userId, input, state, msg) {
     try {
         const chatInfo = await extractChatInfo(input, bot);
         const bindId = chatInfo.chat_id;
+        let ownerId = null;
         if (state.newGroupId) {
+            ownerId = state.newGroupId;
             await updateChannelGroup(state.newGroupId, { bind_id: bindId });
         } else {
             const groups = await getAllChannelGroups();
             const g = groups[state.groupIndex - 1];
+            ownerId = g ? g.id : null;
             await updateChannelGroup(g.id, { bind_id: bindId });
         }
+        logOperation({
+            action: 'chat_bind',
+            source: 'private',
+            userId,
+            target: { type: 'chat', id: ownerId },
+            counts: { chats: 1 },
+            detail: { via: 'manage', bindId, input: String(input).slice(0, 80) }
+        }).catch(() => { });
         await bot.sendMessage(userId, '✅ 关联成功', { reply_to_message_id: msg.message_id });
         await showGroupList(userId, state.mainMsgId);
     } catch (err) {
         logger.error(`关联群组失败: ${err.message}`);
+        logOperation({
+            action: 'chat_bind',
+            result: 'fail',
+            source: 'private',
+            userId,
+            detail: { via: 'manage', input: String(input).slice(0, 80) },
+            error: err.message
+        }).catch(() => { });
         await bot.sendMessage(userId, `❌ 无法识别该链接，请确认机器人已加入且为管理员`, { reply_to_message_id: msg.message_id });
     }
 }
@@ -238,6 +275,14 @@ async function saveEditName(userId, newName, state, msg) {
     const groups = await getAllChannelGroups();
     const g = groups[state.groupIndex - 1];
     await updateChannelGroup(g.id, { name: newName });
+    logOperation({
+        action: 'chat_update',
+        source: 'private',
+        userId,
+        target: { type: 'chat', id: g.id },
+        counts: { chats: 1 },
+        detail: { via: 'manage', before: g.name, after: newName }
+    }).catch(() => { });
     await bot.sendMessage(userId, `✅ 名称已更新为 ${newName}`, { reply_to_message_id: msg.message_id });
     await showGroupList(userId, state.mainMsgId);
 }
@@ -262,6 +307,14 @@ async function executeDelete(userId, messageId, groupIndex) {
     const groups = await getAllChannelGroups();
     const g = groups[groupIndex - 1];
     await deleteChannelGroup(g.id);
+    logOperation({
+        action: 'chat_delete',
+        source: 'private',
+        userId,
+        target: { type: 'chat', id: g.id },
+        counts: { chats: 1 },
+        detail: { via: 'manage', name: g.name, chatType: g.type, bindId: g.bind_id ?? null }
+    }).catch(() => { });
     await bot.editMessageText('✅ 已删除', { chat_id: userId, message_id: messageId });
     await showGroupList(userId, messageId);
 }

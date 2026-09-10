@@ -7,7 +7,6 @@ const {
     getRawUserState
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
-const { insertLog } = require('../../db/log');
 const { entryMsg } = require('../../utils/reply');
 
 async function handleDeleteGroupCommand(userId, msg) {
@@ -39,8 +38,6 @@ async function handleDeleteGroupCommand(userId, msg) {
     });
 
     logger.info(`用户 ${userId} 进入【媒体组删除模式】，等待消息ID: ${processingMsg.message_id}`);
-
-    insertLog(19, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
 }
 
 module.exports = handleDeleteGroupCommand;

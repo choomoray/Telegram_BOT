@@ -4,8 +4,9 @@ const logger = require('../logger');
 
 /**
  * 新增 media 记录
- * @param {Object} data - { group_id, subgroup, file_id, file_unique_id, media_type, message_id, video_time (optional),
- *                          group (optional): { chat_id, message_id }, channel (optional): { chat_id, message_id } }
+ * @param {Object} data - { group_id, subgroup, file_id, file_unique_id, media_type, message_id,
+ *                          video_time (可选), thumb_file_id (可选，视频/文档/音频封面),
+ *                          group (可选): { chat_id, message_id }, channel (可选): { chat_id, message_id } }
  */
 async function insertMedia(data) {
     try {
@@ -28,6 +29,10 @@ async function insertMedia(data) {
         }
         if (data.media_type === 'video' && data.video_time !== undefined && data.video_time !== null) {
             doc.video_time = data.video_time;
+        }
+        // 视频/文档/音频的封面 file_id（Web 控制台缩略图用；图片不需要，直接用自身 file_id）
+        if (data.thumb_file_id) {
+            doc.thumb_file_id = data.thumb_file_id;
         }
         logger.info(`准备插入 media: ${JSON.stringify(doc)}`);
         const result = await col.insertOne(doc);

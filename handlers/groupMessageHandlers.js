@@ -17,13 +17,14 @@ const {
 const {
     upsertGroupList,
     setGroupDelete,
+    syncGroupDeleteByText,
     findGroupList,
     deleteGroupList
 } = require('../db/groupList');
 const { getCollection, COLLECTIONS } = require('../db/index');
 const { handleQuery } = require('./queryHandler');
 const { isAdmin } = require('./queryHandler');
-const { insertLog } = require('../db/log');
+const { logOperation } = require('../utils/opLog');
 const { executeCommand } = require('./commands');
 const { getUserState } = require('../states');
 const handleModeMessage = require('./modes');
@@ -193,18 +194,19 @@ async function isChannelAutoForward(msg, existingMessage) {
 
 /**
  * 频道转发媒体归属记录：群组收到频道转发的媒体时，
- * 1. message 记录（有文本时）新增 channel_forward 项：标记为频道转发 + 频道源位置 + 群组位置
- *    （不覆盖 chat_id/message_id，保持频道源位置）
- * 2. media 记录写入双位置：group=群组位置、channel=频道位置（有则存），不再覆盖顶层 message_id
+ * 1. 媒体库中已有该媒体 → 写入双位置（group=群组位置、channel=频道位置）不重复收录；
+ *    有文本时同步 message.channel_forward（标记频道转发 + 频道源位置 + 群组位置）
+ * 2. 媒体库中没有该媒体（频道侧未收录 / 记录已被清理）→ **照常收录**：
+ *    新建 group_list + media（群组位置），有文本再写 message；空描述则只留 media，
+ *    group_list.is_delete 记为时间戳（表示可被 /clean 清理），后续补文本会自动变为 0
  * 使回复操作时用户可选择回复在频道还是群组；给空媒体加注释时也能拿到双位置。
- * 媒体本身（media 记录与 group_id）保持频道收录时的归属，不重复收录。
  * @param {Object} msg - 当前收到的群组消息
  * @param {Object} mediaInfo - 媒体信息
  * @param {Object} [channelForwardInfo] - resolveChannelForwardInfo 的返回值，可选（未传时从已有记录推导）
  */
 async function transferRecordToGroup(msg, mediaInfo, channelForwardInfo) {
     try {
-        const { fileUniqueId, caption, type } = mediaInfo;
+        const { fileUniqueId, caption, type, fileId, videoTime } = mediaInfo;
         const messageCol = getCollection(COLLECTIONS.MESSAGE);
         const mediaCol = getCollection(COLLECTIONS.MEDIA);
 
@@ -224,26 +226,57 @@ async function transferRecordToGroup(msg, mediaInfo, channelForwardInfo) {
             group_message_id: msg.message_id
         };
 
+        // ---------- 媒体库中不存在该媒体：照常收录（空描述也必须收录） ----------
+        let groupId = existingMedia ? existingMedia.group_id : null;
+        const collectedNow = !existingMedia;
+        if (collectedNow) {
+            groupId = generateGroupIdFromMessage(msg);
+            if (!groupId) {
+                logger.error(`频道转发媒体无法生成 group_id: chatId=${msg.chat.id}, messageId=${msg.message_id}`);
+                return;
+            }
+            await upsertGroupList(groupId);
+            const doc = {
+                group_id: groupId,
+                subgroup: 1,
+                file_id: fileId,
+                file_unique_id: fileUniqueId,
+                media_type: type,
+                message_id: msg.message_id,
+                group: { chat_id: msg.chat.id, message_id: msg.message_id }
+            };
+            if (type === 'video' && videoTime !== undefined && videoTime !== null) {
+                doc.video_time = videoTime;
+            }
+            if (mediaInfo.thumbFileId) doc.thumb_file_id = mediaInfo.thumbFileId;
+            // 频道位置仅在已知频道消息 ID 时写入（否则无法据此回复频道）
+            if (channelChatId && channelMessageId) {
+                doc.channel = { chat_id: channelChatId, message_id: channelMessageId };
+            }
+            await insertMedia(doc);
+            logger.info(`频道转发媒体库中不存在，照常收录: file_unique_id=${fileUniqueId}, group_id=${groupId}, group=${msg.chat.id}/${msg.message_id}${caption ? ', 含描述' : ', 空描述(可被清理)'}`);
+        }
+
+        // ---------- message 记录：已有则补充 channel_forward（有文本时更新文本），无则按需新建 ----------
         if (existingMessage) {
             // 已有记录（通常为频道侧收录）：保持 chat_id/message_id 为频道源位置，补充 channel_forward
             const update = { channel_forward: channelForward };
             if (caption) update.text = removeLevelSuffix(caption);
             await messageCol.updateOne({ file_unique_id: fileUniqueId }, { $set: update });
         } else if (caption) {
-            // 无 message 记录（频道侧未收录文本），群组转发带文本则创建（位置为群组，频道源尽可能补全）
             await upsertMessage({
                 message_id: msg.message_id,
                 chat_id: msg.chat.id,
                 text: removeLevelSuffix(caption),
                 file_unique_id: fileUniqueId,
                 media_type: type,
-                group_id: existingMedia ? existingMedia.group_id : null,
+                group_id: groupId,
                 channel_forward: channelForward
             });
         }
 
-        // media 记录：group/channel 双位置（不再覆盖顶层 message_id，保留首次收录位置）
-        if (existingMedia) {
+        // ---------- media 记录：原本就有则补双位置（顶层 message_id 保留首次收录位置） ----------
+        if (!collectedNow) {
             const update = {
                 'group.chat_id': msg.chat.id,
                 'group.message_id': msg.message_id
@@ -255,7 +288,31 @@ async function transferRecordToGroup(msg, mediaInfo, channelForwardInfo) {
             await mediaCol.updateOne({ file_unique_id: fileUniqueId }, { $set: update });
         }
 
-        logger.info(`频道转发媒体记录双位置: file_unique_id=${fileUniqueId}, group=${msg.chat.id}/${msg.message_id}, channel=${channelChatId}/${channelMessageId}`);
+        // ---------- 文本状态变化后重算 is_delete（有文本 → 0；空描述 → 时间戳） ----------
+        if (groupId && (collectedNow || caption)) {
+            await syncGroupDeleteByText(groupId);
+        }
+
+        logger.info(`频道转发媒体记录完成: file_unique_id=${fileUniqueId}, group=${msg.chat.id}/${msg.message_id}, channel=${channelChatId}/${channelMessageId}${collectedNow ? ', 本次新收录' : ''}`);
+        // 频道转发归属日志（区分「库里已有 → 仅补位置」与「库里没有 → 本次新收录」）
+        logOperation({
+            action: 'channel_forward',
+            source: 'group',
+            userId: msg.from ? msg.from.id : undefined,
+            chatId: msg.chat.id,
+            messageId: msg.message_id,
+            target: { type: 'media', id: fileUniqueId },
+            counts: collectedNow ? { media: 1, groups: 1 } : {},
+            detail: {
+                mediaType: type,
+                fileName: fileUniqueId,
+                collectedNow,
+                hasCaption: !!caption,
+                channelChatId,
+                channelMessageId,
+                groupId
+            }
+        }).catch(() => { });
     } catch (err) {
         logger.error(`频道转发归属记录失败: ${err.message}`);
     }
@@ -276,10 +333,11 @@ async function handleNewMediaMessage(msg) {
         return;
     }
 
-    const { fileUniqueId, type, fileId, caption, videoTime } = mediaInfo;
+    const { fileUniqueId, type, fileId, caption, videoTime, thumbFileId } = mediaInfo;
     const chatId = msg.chat.id;
     const messageId = msg.message_id;
     const hasMediaGroup = !!msg.media_group_id;
+    const source = msg.chat.type === 'channel' ? 'channel' : 'group';
     const groupId = generateGroupIdFromMessage(msg);
     if (!groupId) {
         logger.error(`无法生成 group_id: chatId=${chatId}, messageId=${messageId}`);
@@ -379,6 +437,24 @@ async function handleNewMediaMessage(msg) {
             if (hasMediaGroup && isFirstOfGroup) {
                 groupProcessed.set(groupId, Date.now());
             }
+            // 重复命中也是有效统计口径（重复率/来源分析），与成功收录分开记录
+            logOperation({
+                action: 'media_save_duplicate',
+                source,
+                userId: msg.from ? msg.from.id : undefined,
+                chatId,
+                messageId,
+                target: { type: 'media', id: fileUniqueId },
+                counts: { media: 1 },
+                detail: {
+                    mediaType: type,
+                    fileName: fileUniqueId,
+                    groupId,
+                    isMediaGroup: hasMediaGroup,
+                    existingChatId: existingMedia.chat_id || (existingMedia.group && existingMedia.group.chat_id) || null,
+                    existingGroupId: existingMedia.group_id || null
+                }
+            }).catch(() => { });
             return;
         }
 
@@ -398,10 +474,16 @@ async function handleNewMediaMessage(msg) {
             media_type: type,
             message_id: messageId,
             video_time: videoTime,
+            thumb_file_id: thumbFileId,
             ...location
         });
         logger.info(`media 插入: file_unique_id=${fileUniqueId}, type=${type}, message_id=${messageId}, group_id=${groupId}, subgroup=1${videoTime ? `, video_time=${videoTime}` : ''}${location.group ? `, group=${location.group.chat_id}/${location.group.message_id}` : ''}${location.channel ? `, channel=${location.channel.chat_id}/${location.channel.message_id}` : ''}`);
         operations.push({ type: 'media', fileUniqueId, groupId });
+
+        // 组内文本状态变化后统一重算 is_delete：
+        // 有文本 → 0（无需清理）；空描述 → 时间戳（可被 /clean 清理），后续补/改文本会自动回到 0
+        const groupDocBefore = await findGroupList(groupId);
+        const prevIsDelete = groupDocBefore ? groupDocBefore.is_delete : null;
 
         if (caption) {
             const cleanText = removeLevelSuffix(caption);
@@ -414,29 +496,40 @@ async function handleNewMediaMessage(msg) {
                 group_id: groupId
             });
             operations.push({ type: 'message', fileUniqueId, groupId });
-
-            await setGroupDelete(groupId, 0);
-            operations.push({ type: 'setGroupDelete', groupId, value: 0 });
-        } else {
-            const groupDoc = await findGroupList(groupId);
-            if (groupDoc) {
-                if (groupDoc.is_delete === null) {
-                    await setGroupDelete(groupId, Date.now());
-                    operations.push({ type: 'setGroupDelete', groupId, value: Date.now() });
-                    logger.info(`无文本媒体新建组，设置 is_delete 为当前时间戳: group_id=${groupId}`);
-                } else if (groupDoc.is_delete !== 0) {
-                    await setGroupDelete(groupId, Date.now());
-                    operations.push({ type: 'setGroupDelete', groupId, value: Date.now() });
-                    logger.info(`无文本媒体加入已有组，更新 is_delete 为当前时间戳: group_id=${groupId}, old=${groupDoc.is_delete}`);
-                }
-            }
         }
+
+        const isDelete = await syncGroupDeleteByText(groupId);
+        if (isDelete !== prevIsDelete) {
+            operations.push({ type: 'setGroupDelete', groupId, value: prevIsDelete });
+        }
+        logger.info(`group_list 文本状态重算: group_id=${groupId}, is_delete=${isDelete}${caption ? '（有描述）' : '（空描述，可被清理）'}`);
 
         if (shouldReply) {
             const successText = hasMediaGroup ? '✅ 媒体组收录成功' : '✅ 收录成功';
             await updateProcessingMessage(msg, processingMsg.message_id, successText, true);
-            insertLog(1).catch(err => logger.error(`记录日志失败: ${err.message}`));
         }
+
+        // 收录成功日志（每条媒体一条，含类型/时长/是否有描述/标签来源等报表字段）
+        logOperation({
+            action: 'media_save',
+            source,
+            userId: msg.from ? msg.from.id : undefined,
+            chatId,
+            messageId,
+            target: { type: 'media_group', id: groupId },
+            counts: { media: 1, captions: caption ? 1 : 0, groups: 1 },
+            detail: {
+                mediaType: type,
+                fileName: fileUniqueId,
+                videoTime: videoTime || undefined,
+                hasCaption: !!caption,
+                captionLength: caption ? caption.length : 0,
+                isMediaGroup: hasMediaGroup,
+                mediaGroupId: msg.media_group_id || undefined,
+                position: location.channel ? 'channel' : 'group',
+                isDelete
+            }
+        }).catch(() => { });
 
         if (hasMediaGroup && isFirstOfGroup) {
             groupProcessed.set(groupId, Date.now());
@@ -444,6 +537,19 @@ async function handleNewMediaMessage(msg) {
 
     } catch (err) {
         logger.error(`❌ 收录媒体失败，开始回滚: ${err.message}`);
+        // 失败也要留痕：便于统计失败率与排障
+        logOperation({
+            action: 'media_save_fail',
+            result: 'fail',
+            source,
+            userId: msg.from ? msg.from.id : undefined,
+            chatId,
+            messageId,
+            target: { type: 'media_group', id: groupId },
+            counts: { media: 1 },
+            detail: { mediaType: type, fileName: fileUniqueId, isMediaGroup: hasMediaGroup, rolledBack: operations.length },
+            error: err.message
+        }).catch(() => { });
         for (const op of operations.reverse()) {
             try {
                 switch (op.type) {
@@ -496,6 +602,7 @@ async function handleEditedMessage(msg) {
     const { fileUniqueId, type, caption } = mediaInfo;
     const chatId = msg.chat.id;
     const messageId = msg.message_id;
+    const source = msg.chat.type === 'channel' ? 'channel' : 'group';
     const groupId = generateGroupIdFromMessage(msg);
     if (!groupId) return;
 
@@ -529,23 +636,64 @@ async function handleEditedMessage(msg) {
                     group_id: groupId
                 });
             }
-            await setGroupDelete(groupId, 0);
+            await syncGroupDeleteByText(groupId);
             // 标签按 message 独立：编辑后按新文本重算该 message 自己的标签（不影响组内其他 message）
             const { reMatchMessageTags } = require('../utils/tagSync');
             await reMatchMessageTags(fileUniqueId, cleanText);
             await updateProcessingMessage(msg, processingMsg.message_id, '✅ 编辑成功', true);
-            insertLog(2).catch(err => logger.error(`记录日志失败: ${err.message}`));
+            logOperation({
+                action: 'media_edit',
+                source,
+                userId: msg.from ? msg.from.id : undefined,
+                chatId,
+                messageId,
+                target: { type: 'media', id: fileUniqueId },
+                counts: { edits: 1 },
+                detail: {
+                    mediaType: type,
+                    groupId,
+                    before: existingMessage ? existingMessage.text : undefined,
+                    after: cleanText,
+                    textLength: cleanText.length,
+                    isNewRecord: !existingMessage
+                }
+            }).catch(() => { });
         } else {
             if (existingMessage) {
                 const delGroupId = existingMessage.group_id;
                 await deleteMessageByFileUniqueId(fileUniqueId);
-                await setGroupDelete(delGroupId, Date.now());
+                // 描述被清空：组内若还有其他文本则保持 0，否则记为时间戳（可被 /clean 清理）
+                await syncGroupDeleteByText(delGroupId);
             }
             await updateProcessingMessage(msg, processingMsg.message_id, '✅ 删除成功', true);
-            insertLog(3).catch(err => logger.error(`记录日志失败: ${err.message}`));
+            logOperation({
+                action: 'media_delete',
+                source,
+                userId: msg.from ? msg.from.id : undefined,
+                chatId,
+                messageId,
+                target: { type: 'media', id: fileUniqueId },
+                counts: { edits: 1 },
+                detail: {
+                    mediaType: type,
+                    groupId,
+                    removedText: existingMessage ? existingMessage.text : undefined,
+                    hadText: !!existingMessage
+                }
+            }).catch(() => { });
         }
     } catch (err) {
         logger.error(`处理编辑消息失败: ${err.message}`);
+        logOperation({
+            action: 'media_edit',
+            result: 'fail',
+            source,
+            userId: msg.from ? msg.from.id : undefined,
+            chatId,
+            messageId,
+            target: { type: 'media', id: fileUniqueId },
+            error: err.message
+        }).catch(() => { });
         await updateProcessingMessage(msg, processingMsg.message_id, '❌ 编辑失败，请稍后重试', true);
     }
 }

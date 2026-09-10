@@ -5,6 +5,7 @@ const { setUserState } = require('../../../states');
 const { getAllUsers, setUserWhite } = require('../../../db/users');
 const { escapeHTML } = require('../../../utils/sanitize');
 const { paginationRow } = require('../../../utils/reply');
+const { logOperation } = require('../../../utils/opLog');
 
 async function showWhiteMenu(userId, messageId) {
     const keyboard = {
@@ -91,6 +92,16 @@ async function processAddWhite(userId, input, state, msg) {
     }
     await setUserWhite(targetUserId, 1);
     await bot.sendMessage(userId, `✅ 用户 ${targetUserId} 已加入白名单`, { reply_to_message_id: msg.message_id });
+    logOperation({
+        action: 'user_whitelist_add',
+        source: 'private',
+        userId,
+        chatId: msg.chat ? msg.chat.id : undefined,
+        messageId: msg.message_id,
+        target: { type: 'user', id: targetUserId },
+        counts: { users: 1 },
+        detail: { source: 'manage' }
+    }).catch(() => { });
     await showWhiteMenu(userId, state.mainMsgId);
 }
 
@@ -168,6 +179,14 @@ async function promptConfirmRemoveWhite(userId, messageId, targetUserId) {
 
 async function executeRemoveWhite(userId, messageId, targetUserId) {
     await setUserWhite(targetUserId, 0);
+    logOperation({
+        action: 'user_whitelist_remove',
+        source: 'private',
+        userId,
+        target: { type: 'user', id: targetUserId },
+        counts: { users: 1 },
+        detail: { via: 'manage' }
+    }).catch(() => { });
     await bot.editMessageText(`✅ 用户 ${targetUserId} 已移出白名单`, {
         chat_id: userId,
         message_id: messageId

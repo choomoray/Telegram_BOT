@@ -14,7 +14,7 @@ const { getCollection, COLLECTIONS } = require('../db/getCollection');
 const { setUserState, deleteUserState, getRawUserState } = require('../states');
 const { isAdmin } = require('../utils/permissions');
 const { removeLevelSuffix } = require('../utils/levelExtractor');
-const { insertLog } = require('../db/log');
+const { logOperation } = require('../utils/opLog');
 
 const SUPPORTED_MEDIA_TYPES = ['photo', 'video', 'audio', 'document'];
 
@@ -70,6 +70,10 @@ async function applyReplyEdit(msg, { mediaDoc, targetChatId, targetMessageId, ne
     const messageCol = getCollection(COLLECTIONS.MESSAGE);
     const cleanText = removeLevelSuffix(newText);
     const isClearing = newText.trim() === 'null';
+    // 群组/频道来源（日志 source）与修改前文本（日志 detail.before）
+    const source = msg.chat.type === 'channel' ? 'channel' : 'group';
+    const beforeDoc = await messageCol.findOne({ file_unique_id: mediaDoc.file_unique_id });
+    const before = beforeDoc ? beforeDoc.text : undefined;
 
     const { updateMessageDb } = require('./modes/editMode');
     const { reMatchMessageTags, clearMessageTags } = require('../utils/tagSync');
@@ -128,7 +132,27 @@ async function applyReplyEdit(msg, { mediaDoc, targetChatId, targetMessageId, ne
         if (procMsg) scheduleDelete(chatId, procMsg.message_id);
 
         cleanupPendingState(userId);
-        if (userId) insertLog(23, userId).catch(err => logger.error(`记录日志失败: ${err.message}`));
+        // 群组/频道回复 /edit 成功留痕（over48h=false 表示 Telegram 侧也改成功了）
+        logOperation({
+            action: 'media_edit',
+            source,
+            userId,
+            chatId,
+            messageId: msg.message_id,
+            target: { type: 'media', id: mediaDoc.file_unique_id },
+            counts: { edits: 1 },
+            detail: {
+                via: 'reply_edit',
+                before,
+                after: cleanText,
+                clearing: isClearing,
+                over48h: false,
+                groupId: mediaDoc.group_id,
+                mediaType: mediaDoc.media_type,
+                targetChatId,
+                targetMessageId
+            }
+        }).catch(() => { });
         logger.info(`群组快捷编辑成功: chatId=${chatId}, target=${targetChatId}/${targetMessageId}, clearing=${isClearing}, userId=${userId}`);
     } catch (err) {
         const errMsg = err.message || '';
@@ -145,6 +169,27 @@ async function applyReplyEdit(msg, { mediaDoc, targetChatId, targetMessageId, ne
                 scheduleAllCleanup(warnMsg.message_id);
                 if (procMsg) scheduleDelete(chatId, procMsg.message_id);
                 cleanupPendingState(userId);
+                // 48 小时降级同样是一次成功的编辑（只改了数据库），单独留痕
+                logOperation({
+                    action: 'media_edit',
+                    source,
+                    userId,
+                    chatId,
+                    messageId: msg.message_id,
+                    target: { type: 'media', id: mediaDoc.file_unique_id },
+                    counts: { edits: 1 },
+                    detail: {
+                        via: 'reply_edit',
+                        before,
+                        after: cleanText,
+                        clearing: isClearing,
+                        over48h: true,
+                        groupId: mediaDoc.group_id,
+                        mediaType: mediaDoc.media_type,
+                        targetChatId,
+                        targetMessageId
+                    }
+                }).catch(() => { });
                 logger.info(`群组快捷编辑超时，仅更新数据库: chatId=${chatId}, target=${targetChatId}/${targetMessageId}`);
             } catch (dbErr) {
                 logger.error(`群组快捷编辑仅更新数据库失败: ${dbErr.message}`);
@@ -155,6 +200,17 @@ async function applyReplyEdit(msg, { mediaDoc, targetChatId, targetMessageId, ne
                 scheduleAllCleanup(failMsg.message_id);
                 if (procMsg) scheduleDelete(chatId, procMsg.message_id);
                 cleanupPendingState(userId);
+                logOperation({
+                    action: 'media_edit',
+                    result: 'fail',
+                    source,
+                    userId,
+                    chatId,
+                    messageId: msg.message_id,
+                    target: { type: 'media', id: mediaDoc.file_unique_id },
+                    detail: { via: 'reply_edit', over48h: true, groupId: mediaDoc.group_id },
+                    error: dbErr.message
+                }).catch(() => { });
             }
         } else {
             logger.error(`群组快捷编辑失败: ${err.message}`);
@@ -165,6 +221,18 @@ async function applyReplyEdit(msg, { mediaDoc, targetChatId, targetMessageId, ne
             scheduleAllCleanup(failMsg.message_id);
             if (procMsg) scheduleDelete(chatId, procMsg.message_id);
             cleanupPendingState(userId);
+            // 真正的失败（非 48 小时降级）
+            logOperation({
+                action: 'media_edit',
+                result: 'fail',
+                source,
+                userId,
+                chatId,
+                messageId: msg.message_id,
+                target: { type: 'media', id: mediaDoc.file_unique_id },
+                detail: { via: 'reply_edit', over48h: false, groupId: mediaDoc.group_id },
+                error: err.message
+            }).catch(() => { });
         }
     }
 }

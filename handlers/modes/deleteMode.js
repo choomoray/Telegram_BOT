@@ -5,9 +5,10 @@ const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { findMediaByFileUniqueId } = require('../../db/media');
 const { deleteMediaByFileUniqueId } = require('../../db/media');
 const { deleteMessageByFileUniqueId, findMessageByFileUniqueId } = require('../../db/message');
-const { deleteGroupList, setGroupDelete } = require('../../db/groupList');
+const { deleteGroupList, syncGroupDeleteByText } = require('../../db/groupList');
 const { extractMediaFromMessage } = require('../../media');
 const { deleteUserState } = require('../../states');
+const { logOperation } = require('../../utils/opLog');
 
 async function handleDeleteMode(msg, state) {
     const userId = msg.from.id;
@@ -33,6 +34,7 @@ async function handleDeleteMode(msg, state) {
         return true;
     }
 
+    let targetGroupId = null; // 供失败日志定位媒体组
     try {
         const mediaDoc = await findMediaByFileUniqueId(fileUniqueId);
         if (!mediaDoc) {
@@ -45,6 +47,7 @@ async function handleDeleteMode(msg, state) {
         }
 
         const groupId = mediaDoc.group_id;
+        targetGroupId = groupId;
         const groupListCol = getCollection(COLLECTIONS.GROUP_LIST);
         const groupDoc = await groupListCol.findOne({ group_id: groupId });
 
@@ -84,15 +87,11 @@ async function handleDeleteMode(msg, state) {
             if (updatedGroup && updatedGroup.is_group === 0) {
                 await deleteGroupList(groupId);
                 logger.info(`删除媒体后 group_list 计数归零，已删除 group_id=${groupId}`);
-            } else {
-                // 如果删除了有文本的媒体，且组内没有其他文本消息，则设置 is_delete 为时间戳
-                if (hadText) {
-                    const otherMessages = await getCollection(COLLECTIONS.MESSAGE).countDocuments({ group_id: groupId });
-                    if (otherMessages === 0) {
-                        await setGroupDelete(groupId, Date.now());
-                        logger.info(`删除文本媒体后，组内无其他文本，设置 is_delete 为时间戳: group_id=${groupId}`);
-                    }
-                }
+            } else if (hadText) {
+                // 删除的是有文本的媒体 → 按组内剩余文本统一重算 is_delete
+                // （组内还有其他文本 → 0；已无文本 → 时间戳，可被 /clean 清理）
+                await syncGroupDeleteByText(groupId);
+                logger.info(`删除文本媒体后按组内文本重算 is_delete: group_id=${groupId}`);
             }
         }
 
@@ -101,9 +100,34 @@ async function handleDeleteMode(msg, state) {
             message_id: processingMsg.message_id
         });
         deleteUserState(userId);
+        logOperation({
+            action: 'media_delete_one',
+            source: 'private',
+            userId,
+            target: { type: 'media_group', id: groupId },
+            counts: { media: 1 },
+            detail: {
+                hadText,
+                deletedGroup: groupDoc.is_group === 1,
+                mediaType: mediaDoc.media_type,
+                fileUniqueId
+            }
+        }).catch(() => { });
         logger.info(`用户 ${userId} 删除单一媒体成功，group_id=${groupId}`);
     } catch (err) {
         logger.error(`删除失败: ${err.message}`);
+        logOperation({
+            action: 'media_delete_one',
+            result: 'fail',
+            source: 'private',
+            userId,
+            target: { type: 'media_group', id: targetGroupId || fileUniqueId },
+            detail: {
+                mediaType: mediaInfo.type,
+                fileUniqueId
+            },
+            error: err.message
+        }).catch(() => { });
         await bot.editMessageText('❌ 删除失败，请稍后重试', {
             chat_id: userId,
             message_id: processingMsg.message_id

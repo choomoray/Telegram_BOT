@@ -3,7 +3,7 @@ const bot = require('../../bot');
 const logger = require('../../logger');
 const { getSettings, updateSetting } = require('../../db/settings');
 const { getRawUserState, setUserState, deleteUserState } = require('../../states');
-const { insertLog } = require('../../db/log');
+const { logOperation } = require('../../utils/opLog');
 const { paginationRow } = require('../../utils/reply');
 
 const TIME_OPTIONS = [
@@ -335,7 +335,13 @@ async function handleNumberInput(userId, text, state) {
     }
     try {
         await setting.update(num.toString());
-        insertLog(24, userId, { setting: editingKey, value: num }).catch(err => logger.error(`记录日志失败: ${err.message}`));
+        logOperation({
+            action: 'setting_update',
+            source: 'private',
+            userId,
+            target: { type: 'setting', id: editingKey },
+            detail: { setting: editingKey, value: num, previous: setting.value }
+        }).catch(() => { });
 
         const keyboard = {
             inline_keyboard: [[{ text: '🔙 返回设置', callback_data: 'set_back' }]]
@@ -414,7 +420,15 @@ async function handleCallback(query) {
         try {
             if (setting.type === 'bool' || setting.type === 'enum') {
                 await setting.update(val);
-                insertLog(24, userId, { setting: key, value: val }).catch(err => logger.error(`记录日志失败: ${err.message}`));
+                logOperation({
+                    action: 'setting_update',
+                    source: 'private',
+                    userId,
+                    chatId,
+                    messageId,
+                    target: { type: 'setting', id: key },
+                    detail: { setting: key, value: val, previous: setting.value }
+                }).catch(() => { });
                 const keyboard = {
                     inline_keyboard: [[{ text: '🔙 返回设置', callback_data: 'set_back' }]]
                 };

@@ -2,8 +2,9 @@
 const bot = require('../../bot');
 const logger = require('../../logger');
 const { findMediaByFileUniqueId } = require('../../db/media');
-const { incrementMark } = require('../../db/groupList');
+const { incrementMark, findGroupList } = require('../../db/groupList');
 const { extractMediaFromMessage } = require('../../media');
+const { logOperation } = require('../../utils/opLog');
 
 // 用于防止同一媒体组被多次处理的锁集合
 const processingGroups = new Set();
@@ -78,9 +79,32 @@ async function handleMarkMode(msg, state) {
             chat_id: userId,
             message_id: processingMsg.message_id
         });
+        // 标记成功留痕（group_id 来自 media；组内媒体数与新 mark 值用于报表）
+        const groupDoc = await findGroupList(groupId);
+        logOperation({
+            action: 'mark',
+            source: 'private',
+            userId,
+            target: { type: 'media_group', id: groupId },
+            counts: { marks: 1, media: (groupDoc && groupDoc.is_group) || undefined },
+            detail: {
+                markValue: newMark,
+                isGroup: !!mediaGroupId,
+                mediaType: mediaInfo.type,
+                fileUniqueId
+            }
+        }).catch(() => { });
         logger.info(`用户 ${userId} 标记成功: group_id=${groupId}, mark 新值=${newMark}`);
     } catch (err) {
         logger.error(`标记模式处理失败: ${err.message}`);
+        logOperation({
+            action: 'mark',
+            result: 'fail',
+            source: 'private',
+            userId,
+            detail: { mediaType: mediaInfo.type, fileUniqueId },
+            error: err.message
+        }).catch(() => { });
         await bot.editMessageText('❌ 处理失败，请稍后重试', {
             chat_id: userId,
             message_id: processingMsg.message_id

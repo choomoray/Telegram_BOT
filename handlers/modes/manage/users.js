@@ -10,6 +10,7 @@ const {
 } = require('../../../db/users');
 const { escapeHTML } = require('../../../utils/sanitize');
 const { paginationRow } = require('../../../utils/reply');
+const { logOperation } = require('../../../utils/opLog');
 
 async function showUserManagementMenu(userId, messageId) {
     const keyboard = {
@@ -75,12 +76,32 @@ async function processUserIdForAction(userId, input, state, msg) {
             if (result.banned > 0) msgText += `，成功封禁 ${result.banned} 个频道`;
             if (result.failed > 0) msgText += `，${result.failed} 个频道失败`;
             await bot.sendMessage(userId, msgText, { reply_to_message_id: msg.message_id });
+            logOperation({
+                action: 'user_ban',
+                source: 'private',
+                userId,
+                chatId: msg.chat ? msg.chat.id : undefined,
+                messageId: msg.message_id,
+                target: { type: 'user', id: targetUserId },
+                counts: { users: 1 },
+                detail: { source: 'manage', name: user.name || undefined, banned: result.banned, failed: result.failed }
+            }).catch(() => { });
         } else {
             const result = await unbanUserFully(targetUserId);
             let msgText = `✅ 该用户已${actionText}`;
             if (result.unbanned > 0) msgText += `，成功解封 ${result.unbanned} 个频道`;
             if (result.failed > 0) msgText += `，${result.failed} 个频道失败`;
             await bot.sendMessage(userId, msgText, { reply_to_message_id: msg.message_id });
+            logOperation({
+                action: 'user_unban',
+                source: 'private',
+                userId,
+                chatId: msg.chat ? msg.chat.id : undefined,
+                messageId: msg.message_id,
+                target: { type: 'user', id: targetUserId },
+                counts: { users: 1 },
+                detail: { source: 'manage', name: user.name || undefined, unbanned: result.unbanned, failed: result.failed }
+            }).catch(() => { });
         }
         logger.info(`管理员 ${userId} ${actionText}了用户 ${targetUserId}`);
     } finally {
