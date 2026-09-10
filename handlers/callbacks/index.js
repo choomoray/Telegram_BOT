@@ -45,6 +45,12 @@ const callbackHandlers = {
     tagmsg_page: tagMode.handleCallback,
     tagedit: tagMode.handleCallback,
     tagedit_page: tagMode.handleCallback,
+    // 两区标签键盘的分隔行（仅提示，不改变状态）
+    tag_noop: async (query) => {
+        await bot.answerCallbackQuery(query.id, {
+            text: '⬆️ 上方为已有标签（点击移除）｜⬇️ 下方为标签库（点击添加）'
+        });
+    },
     edit_dbonly: editConfirmDbOnly,
     edit_dbonly_cancel: async (query) => {
         const userId = query.from.id;

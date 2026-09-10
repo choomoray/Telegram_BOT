@@ -22,7 +22,7 @@ const {
     getMessageTags
 } = require('../../db/message');
 const { getTags, sortTags, tagUsed, addTag } = require('../../db/tags');
-const { buildTagKeyboard, splitTagInput, matchTagsInText } = require('../../utils/tagUi');
+const { buildTagRegionKeyboard, splitTagInput, matchTagsInText } = require('../../utils/tagUi');
 const { extractMediaFromMessage, restoreMediaGroupCaptions } = require('../../media');
 const { removeLevelSuffix } = require('../../utils/levelExtractor');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
@@ -151,6 +151,9 @@ async function handleCallback(query) {
 
 /**
  * 标签按钮键盘构建
+ * 两区版面：
+ *   上区 = 已打上的标签（置顶显示，点击移除）
+ *   下区 = 标签库正常显示（置顶标签 pin>0 在最前，其余按使用次数；已打上的非置顶标签不再重复显示）
  * @param {number} userId
  * @param {number|null} messageId
  * @param {string} groupId
@@ -162,18 +165,15 @@ async function renderTagKeyboard(userId, messageId, groupId, page = 1, fileUniqu
     const current = fileUniqueId
         ? await getMessageTags(fileUniqueId)
         : await getGroupTags(groupId);
-    const currentSet = new Set(current);
-    const result = buildTagKeyboard(tags, {
+    return buildTagRegionKeyboard(current, tags, {
         prefix: 'sendtag',
         pagePrefix: 'sendtag_page',
         page,
-        marker: { names: currentSet, on: '✅', off: '+' },
         extraRows: [
             [{ text: '✅ 完成', callback_data: 'sendtag_done' }],
             [{ text: '🔁 回复该消息', callback_data: 'sendtag_reply' }]
         ]
     });
-    return result;
 }
 
 async function handleTagCallback(query) {

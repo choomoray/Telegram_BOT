@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { sortTags } = require('../db/tags');
-const { splitTagInput, matchTagsInText } = require('../utils/tagUi');
+const { splitTagInput, matchTagsInText, buildTagRegionKeyboard } = require('../utils/tagUi');
 
 // ---------------- sortTags（标签展示排序） ----------------
 
@@ -78,4 +78,99 @@ test('文本不含标签返回空', () => {
     assert.deepStrictEqual(matchTagsInText('普通文本', tags), []);
     assert.deepStrictEqual(matchTagsInText('', tags), []);
     assert.deepStrictEqual(matchTagsInText(null, tags), []);
+});
+
+// ---------------- buildTagRegionKeyboard（两区键盘：上区已有标签 / 下区标签库） ----------------
+
+const LIB = [
+    { name: '置顶A', pin: 1, count: 3 },
+    { name: '置顶B', pin: 2, count: 1 },
+    { name: '普通A', count: 10 },
+    { name: '普通B', count: 5 }
+];
+const flat = kb => kb.inline_keyboard.map(row => row.map(b => b.text));
+
+test('上区为已有标签（✅），下区去掉已打上的非置顶标签、保留已打上的置顶标签', () => {
+    const kb = buildTagRegionKeyboard(['普通A', '置顶A'], LIB, {
+        prefix: 'sendtag',
+        pagePrefix: 'sendtag_page'
+    });
+    assert.deepStrictEqual(flat(kb), [
+        ['✅普通A', '✅置顶A'],
+        ['── 已有标签（点击移除） ──'],
+        ['✅置顶A', '+置顶B', '+普通B']
+    ]);
+    // 上区按钮 = 点击移除（与下区共用前缀，由回调按当前状态决定增删）
+    assert.strictEqual(kb.inline_keyboard[0][0].callback_data, `sendtag:${encodeURIComponent('普通A')}`);
+    assert.strictEqual(kb.inline_keyboard[2][2].callback_data, `sendtag:${encodeURIComponent('普通B')}`);
+    // 分隔行只提示，不改变状态
+    assert.strictEqual(kb.inline_keyboard[1][0].callback_data, 'tag_noop');
+    assert.deepStrictEqual(kb.applied, ['普通A', '置顶A']);
+    assert.deepStrictEqual(kb.library.map(t => t.name), ['置顶A', '置顶B', '普通B']);
+});
+
+test('没有已有标签时只有下区：全部 + 前缀、不插分隔行', () => {
+    const kb = buildTagRegionKeyboard([], LIB, { prefix: 'tagmsg:tag', pagePrefix: 'tagmsg_page' });
+    assert.deepStrictEqual(flat(kb), [['+置顶A', '+置顶B', '+普通A', '+普通B']]);
+    assert.deepStrictEqual(kb.applied, []);
+});
+
+test('已有标签去重，已打上的置顶标签仍留在下区', () => {
+    const kb = buildTagRegionKeyboard(['普通A', '普通A', '普通B'], LIB, {
+        prefix: 'tagmsg:tag',
+        pagePrefix: 'tagmsg_page'
+    });
+    assert.deepStrictEqual(flat(kb), [
+        ['✅普通A', '✅普通B'],
+        ['── 已有标签（点击移除） ──'],
+        ['+置顶A', '+置顶B']
+    ]);
+    assert.deepStrictEqual(kb.applied, ['普通A', '普通B']);
+    assert.deepStrictEqual(kb.library.map(t => t.name), ['置顶A', '置顶B']);
+});
+
+test('下区被过滤空时只剩上区，不插分隔行', () => {
+    const kb = buildTagRegionKeyboard(['普通A'], [{ name: '普通A', pin: 0, count: 1 }], {
+        prefix: 'tagmsg:tag',
+        pagePrefix: 'tagmsg_page'
+    });
+    assert.deepStrictEqual(flat(kb), [['✅普通A']]);
+    assert.deepStrictEqual(kb.library, []);
+});
+
+test('上区每行 4 个，超过 4 个换行', () => {
+    const applied = ['A', 'B', 'C', 'D', 'E'];
+    const kb = buildTagRegionKeyboard(applied, [], { prefix: 'p', pagePrefix: 'pp' });
+    assert.deepStrictEqual(flat(kb), [['✅A', '✅B', '✅C', '✅D'], ['✅E']]);
+});
+
+test('翻页只作用于下区标签库、上区每页都在', () => {
+    const library = Array.from({ length: 45 }, (_, i) => ({
+        name: `T${String(i).padStart(2, '0')}`,
+        pin: 0,
+        count: 45 - i
+    }));
+    const page1 = buildTagRegionKeyboard(['T00'], library, { prefix: 'p', pagePrefix: 'pp', page: 1 });
+    // 上区 1 行 + 分隔行 + 下区 40 个（10 行） + 翻页 1 行
+    assert.strictEqual(page1.inline_keyboard.length, 13);
+    assert.strictEqual(page1.totalPages, 2);
+    assert.strictEqual(page1.inline_keyboard[12][0].text, '1 / 2');
+    assert.strictEqual(page1.inline_keyboard[12][1].callback_data, 'pp:2');
+
+    const page2 = buildTagRegionKeyboard(['T00'], library, { prefix: 'p', pagePrefix: 'pp', page: 2 });
+    assert.deepStrictEqual(flat(page2)[0], ['✅T00']);
+    assert.strictEqual(page2.library.length, 44);
+    assert.strictEqual(page2.inline_keyboard[3][0].text, '◀ 上一页');
+});
+
+test('extraRows 追加在最后，separator: null 可关闭分隔行', () => {
+    const kb = buildTagRegionKeyboard(['普通A'], LIB, {
+        prefix: 'p',
+        pagePrefix: 'pp',
+        separator: null,
+        extraRows: [[{ text: '↩️ 返回选择', callback_data: 'back' }]]
+    });
+    const rows = kb.inline_keyboard;
+    assert.strictEqual(rows[rows.length - 1][0].text, '↩️ 返回选择');
+    assert.ok(!rows.some(r => r.some(b => b.callback_data === 'tag_noop')));
 });

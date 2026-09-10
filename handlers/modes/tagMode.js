@@ -3,6 +3,7 @@
  * /tag 标签模式
  * 1. 修改消息标签：发送媒体 → 预览媒体组 → 展示现有标签 → 添加/删除模式
  *    （标签按钮直接操作或手动输入，操作后刷新；标签按钮翻页 10 行/页）
+ *    添加模式为两区版面：上区=已有标签（点击移除），下区=标签库正常显示（置顶在前，点击添加）
  * 2. 编辑标签：添加（发文本）/ 改名（选标签→发文本）/ 删除（选标签）/ 固定置顶，
  *    修改与删除同步 message 集合
  */
@@ -20,7 +21,7 @@ const {
     getMessageTags
 } = require('../../db/message');
 const { getTags, sortTags, addTag, removeTag, renameTag, setTagPin, tagUsed } = require('../../db/tags');
-const { buildTagKeyboard, splitTagInput } = require('../../utils/tagUi');
+const { buildTagKeyboard, buildTagRegionKeyboard, splitTagInput } = require('../../utils/tagUi');
 const { extractMediaFromMessage } = require('../../media');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
 const { logOperation } = require('../../utils/opLog');
@@ -138,7 +139,9 @@ async function showGroupTagSelect(userId, messageId, groupId, asNew = false) {
 }
 
 /** 添加/删除标签模式界面（标签按钮翻页 10 行/页，手动输入同样可用）
- *  作用对象 = 定位用的那条 message（标签按 message 独立） */
+ *  作用对象 = 定位用的那条 message（标签按 message 独立）
+ *  添加标签：两区版面——上区=已有标签（点击移除），下区=标签库正常显示（置顶在前，点击添加）
+ *  删除标签：单区版面（列出的就是已有标签，点击移除） */
 async function showGroupTagAction(userId, messageId, groupId, mode, page = 1) {
     const tags = sortTags(await getTags());
     const st = getRawUserState(userId);
@@ -149,25 +152,34 @@ async function showGroupTagAction(userId, messageId, groupId, mode, page = 1) {
         ? '➕ 正在添加标签（点击按钮或发送文本，空格/、分隔）'
         : '🗑️ 正在删除标签（点击按钮或发送文本，空格/、分隔）';
 
-    let available = [];
+    let result;
+    let text;
     if (mode === 'add') {
-        available = tags.filter(t => !current.includes(t.name));
+        result = buildTagRegionKeyboard(current, tags, {
+            prefix: 'tagmsg:tag',
+            pagePrefix: 'tagmsg_page',
+            page,
+            extraRows: [[{ text: '↩️ 返回选择', callback_data: 'tagmsg:back' }]]
+        });
+        const appliedText = current.length ? `📌 已有标签：${current.join('、')}` : '📌 已有标签：（无）';
+        const hint = result.library.length
+            ? `⬇️ 下方标签库共 ${result.library.length} 个可添加（置顶在前）`
+            : '（没有可添加的标签）';
+        text = `${title}\n${appliedText}\n${hint}`;
     } else {
-        available = current.map(n => ({ name: n, pin: 0, count: 0 }));
+        const available = current.map(n => ({ name: n, pin: 0, count: 0 }));
+        result = buildTagKeyboard(available, {
+            prefix: 'tagmsg:tag',
+            pagePrefix: 'tagmsg_page',
+            page,
+            extraRows: [[{ text: '↩️ 返回选择', callback_data: 'tagmsg:back' }]]
+        });
+        const tagText = current.length ? `📌 现有标签：${current.join('、')}` : '📌 现有标签：（无）';
+        const hint = available.length ? `共 ${available.length} 个可删除标签` : '（没有可删除的标签）';
+        text = `${title}\n${tagText}\n${hint}`;
     }
 
-    const result = buildTagKeyboard(available, {
-        prefix: 'tagmsg:tag',
-        pagePrefix: 'tagmsg_page',
-        page,
-        extraRows: [[{ text: '↩️ 返回选择', callback_data: 'tagmsg:back' }]]
-    });
-
-    const tagText = current.length ? `📌 现有标签：${current.join('、')}` : '📌 现有标签：（无）';
-    const hint = mode === 'add'
-        ? (available.length ? `共 ${available.length} 个可添加标签` : '（没有可添加的标签）')
-        : (available.length ? `共 ${available.length} 个可删除标签` : '（没有可删除的标签）');
-    await bot.editMessageText(`${title}\n${tagText}\n${hint}`, {
+    await bot.editMessageText(text, {
         chat_id: userId,
         message_id: messageId,
         reply_markup: result
@@ -311,24 +323,28 @@ async function handleCallback(query) {
             const tag = decodeURIComponent(parts[2]);
             const mode = state && state.groupTagMode ? state.groupTagMode : 'add';
             const fileUniqueId = resolveTagTarget(state);
-            if (mode === 'add') {
-                if (fileUniqueId) {
-                    await addTagToMessage(fileUniqueId, tag);
-                } else {
-                    await addTagToGroup(groupId, tag);
-                }
-                await tagUsed(tag, 1);
-            } else {
+            // 点击语义：已打上的标签 → 移除（上区），未打上的 → 添加（下区）
+            const currentList = fileUniqueId ? await getMessageTags(fileUniqueId) : await getGroupTags(groupId);
+            const applied = currentList.includes(tag);
+            const op = applied ? 'del' : 'add';
+            if (applied) {
                 if (fileUniqueId) {
                     await removeTagFromMessage(fileUniqueId, tag);
                 } else {
                     await removeTagFromGroup(groupId, tag);
                 }
                 await tagUsed(tag, -1);
+            } else {
+                if (fileUniqueId) {
+                    await addTagToMessage(fileUniqueId, tag);
+                } else {
+                    await addTagToGroup(groupId, tag);
+                }
+                await tagUsed(tag, 1);
             }
-            await bot.answerCallbackQuery(query.id, { text: `标签「${tag}」已${mode === 'add' ? '添加' : '移除'}` });
-            logTagChange(userId, mode, [tag], fileUniqueId, groupId, 'button');
-            logger.info(`用户 ${userId} 修改消息标签: ${mode} ${tag} -> group=${groupId}${fileUniqueId ? `, file=${fileUniqueId}` : ''}`);
+            await bot.answerCallbackQuery(query.id, { text: `标签「${tag}」已${applied ? '移除' : '添加'}` });
+            logTagChange(userId, op, [tag], fileUniqueId, groupId, 'button');
+            logger.info(`用户 ${userId} 修改消息标签: ${op} ${tag} -> group=${groupId}${fileUniqueId ? `, file=${fileUniqueId}` : ''}`);
             // 操作后刷新
             await showGroupTagAction(userId, messageId, groupId, mode);
             return;
