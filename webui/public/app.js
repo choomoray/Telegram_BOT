@@ -496,6 +496,14 @@
 
   async function loadRaw() {
     const r = state.raw;
+    // 「全部数据库」不再拉跨集合数据：集合明细表已列出全部集合，点行/下拉选择即可浏览
+    if (r.collection === ALL_KEY) {
+      r.groups = [];
+      r.items = [];
+      r.total = 0;
+      r.totalPages = 1;
+      return { all: true, groups: [] };
+    }
     const data = await apiPost('/db/query', {
       collection: r.collection,
       filter: {},
@@ -504,7 +512,8 @@
       pageSize: r.pageSize
     });
     if (data.all) {
-      r.groups = data.groups || [];
+      // 兜底：后端返回跨集合结构时也不展示（视图只浏览单个集合）
+      r.groups = [];
       r.items = [];
       r.total = 0;
       r.totalPages = 1;
@@ -1492,12 +1501,9 @@
 
     let listHtml;
     if (isAll) {
-      const groups = (r.groups || []).filter(g => g.total > 0);
-      listHtml = groups.length ? groups.map(g => `
-        <div class="col-summary" data-action="raw-collection" data-collection="${esc(g.collection)}">
-          <span>📁</span><b>${esc(g.collection)}</b>
-          <span class="count">${fmtNum(g.total)} 条</span>
-        </div>`).join('') : '<div class="empty">没有数据</div>';
+      // 「全部数据库」不再列一遍集合文件夹列表（上面「集合明细」表已经列出全部集合，点行即可浏览）
+      listHtml = `<div class="empty"><div class="empty-ico">👆</div>
+        <div>点上方「集合明细」里的任意一行（或在右上角下拉选集合），即可在下方浏览该集合的原始文档</div></div>`;
     } else {
       listHtml = r.items.length
         ? r.items.map((d, i) => docCard(r.collection, d, i)).join('')

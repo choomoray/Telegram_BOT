@@ -594,6 +594,10 @@ test('「数据库」视图：上栏（集合浏览）+ 集合明细表 整合�
     assert.match(html, /2\.00 KB/, '集合 storageSize 2048 → 2.00 KB');
     assert.ok(html.includes('data-action="raw-collection" data-collection="media" class=""'), '明细行可点；「全部数据库」时不选中任何行');
 
+    // 下方不再重复列一遍集合（旧的「全部数据库」文件夹列表已去掉），只给一句引导
+    assert.ok(!html.includes('col-summary'), '不再显示集合文件夹列表');
+    assert.match(html, /点上方「集合明细」里的任意一行/, '给出引导提示');
+
     assert.ok(env.requests.some(r => r.url.startsWith('/api/db-stats')));
     await act(env, { action: 'dbstats-refresh' });
     assert.ok(env.requests.some(r => r.url.includes('/api/db-stats?force=1')));
