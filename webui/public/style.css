@@ -582,19 +582,152 @@ td.right, th.right { text-align: right; }
 .report-card .sub { font-size: 11.5px; color: var(--text-3); }
 .delta-up { color: var(--ok); }
 .delta-down { color: var(--danger); }
-.chart { display: flex; align-items: flex-end; gap: 3px; height: 132px; padding-top: 8px; }
-.chart .col { flex: 1; min-width: 3px; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; height: 100%; }
-.chart .col i { display: block; width: 100%; border-radius: 3px 3px 0 0; background: var(--accent); transition: height 300ms var(--ease); min-height: 2px; }
-.chart .col:hover i { background: var(--accent-hover); }
-.chart .col span { font-size: 9px; color: var(--text-3); white-space: nowrap; }
 .hbar { display: grid; grid-template-columns: minmax(96px, 168px) 1fr 62px; align-items: center; gap: 10px; font-size: 12.5px; margin-bottom: 7px; }
 .hbar .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
 .hbar .bar { height: 8px; }
 .hbar .n { text-align: right; font-family: var(--mono); color: var(--text-2); font-size: 12px; }
 
+/* ---------- 报表：每日操作量（GitHub 方格样式） ---------- */
+/* 5 档色深走变量，浅色主题用更深一档的蓝，避免在浅底上看不清 */
+:root {
+  --cg0: var(--surface-3);
+  --cg1: #16405c;
+  --cg2: #1d6c9c;
+  --cg3: #2490cd;
+  --cg4: #45b6f0;
+}
+html[data-theme="light"] {
+  --cg0: #e4ebf3;
+  --cg1: #b7e0f7;
+  --cg2: #7cc7ee;
+  --cg3: #3aa8e0;
+  --cg4: #1a86c0;
+}
+.cg-wrap { padding: 2px 0 4px; overflow-x: auto; }
+/* 年份切换（顶栏右上角 ◀ 2026 年 ▶） */
+.year-picker { display: inline-flex; align-items: center; gap: 8px; }
+.year-picker .year-label { font-size: 13px; font-weight: 650; min-width: 62px; text-align: center; font-variant-numeric: tabular-nums; }
+/*
+ * GitHub 全年方格：7 行 = 周一…周日，每列一周。
+ * 列宽用 minmax(9px, 1fr) 自适应：宽屏铺满卡片（不再留大片空白），窄屏兜底 9px 并横向滚动。
+ * 必须显式声明 7 行，否则 grid-auto-flow: column 会把所有格子排成一行。
+ */
+.cg-months {
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(9px, 1fr); gap: 3px;
+  margin-left: 27px; margin-bottom: 3px;
+  font-size: 10px; color: var(--text-3); line-height: 1.4;
+}
+.cg-months span { white-space: nowrap; }
+.cg-row { display: flex; gap: 5px; }
+.cg-days { display: grid; grid-template-rows: repeat(7, 1fr); gap: 3px; width: 22px; flex: 0 0 auto; }
+.cg-days span {
+  display: flex; align-items: center; justify-content: flex-end;
+  font-size: 10px; color: var(--text-3); line-height: 1; white-space: nowrap; overflow: hidden;
+}
+.cg-grid {
+  display: grid; grid-auto-flow: column;
+  grid-template-rows: repeat(7, auto);
+  grid-auto-columns: minmax(9px, 1fr);
+  gap: 3px; flex: 1 1 auto; min-width: 0;
+}
+.cg-cell {
+  width: 100%; aspect-ratio: 1; border-radius: 3px; background: var(--cg0);
+  transition: transform var(--speed) var(--ease);
+}
+.cg-cell[data-empty="1"] { background: transparent; }
+.cg-cell.lv1 { background: var(--cg1); }
+.cg-cell.lv2 { background: var(--cg2); }
+.cg-cell.lv3 { background: var(--cg3); }
+.cg-cell.lv4 { background: var(--cg4); }
+.cg-cell:hover { transform: scale(1.14); box-shadow: 0 0 0 1px var(--border-strong); }
+.cg-leg { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 11px; color: var(--text-3); flex-wrap: wrap; }
+.cg-leg i {
+  width: 11px; height: 11px; border-radius: 2.5px; background: var(--cg0); display: inline-block;
+}
+.cg-leg i.lv1 { background: var(--cg1); }
+.cg-leg i.lv2 { background: var(--cg2); }
+.cg-leg i.lv3 { background: var(--cg3); }
+.cg-leg i.lv4 { background: var(--cg4); }
+.cg-tip { margin-left: 6px; font-size: 11px; color: var(--text-3); }
+
+/* ---------- 活跃时间：24 小时柱 ---------- */
+/* 行 = 「峰值标签 / 柱体(1fr) / 小时标签」，柱高按 1fr 行精确换算，不参与 flex 收缩 */
+.chart { display: flex; align-items: stretch; gap: 3px; height: 158px; padding-top: 4px; }
+.chart .col {
+  flex: 1 1 0; min-width: 0;
+  display: grid; grid-template-rows: 14px 1fr 13px; align-items: end; justify-items: center;
+  gap: 3px;
+}
+.chart .col i {
+  grid-row: 2; display: block; width: 100%; min-height: 0;
+  border-radius: 3px 3px 1px 1px; background: var(--accent);
+  transition: height 300ms var(--ease);
+}
+.chart .col .h { grid-row: 3; font-size: 8.5px; color: var(--text-3); line-height: 1; font-variant-numeric: tabular-nums; }
+.chart .col .v { grid-row: 1; font-size: 9px; color: var(--ok); font-weight: 650; line-height: 1; }
+.chart .col.is-peak i { background: var(--ok); }
+.chart .col.is-zero i { background: var(--surface-3); height: 2px !important; align-self: end; }
+.chart .col.is-group { box-shadow: -1px 0 0 var(--border-soft); }
+.chart .col:hover i { background: var(--accent-hover); }
+.chart .col.is-peak:hover i { background: var(--ok); }
+.hour-summary { margin-top: 10px; font-size: 11.5px; color: var(--text-3); }
+
 /* ---------- 日志表格复用 ---------- */
 .log-detail { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); word-break: break-all; }
 .table-scroll { overflow-x: auto; }
+
+/* ---------- 统计报表：底部日志表撑满剩余高度（否则悬在中间、不贴底） ---------- */
+.view-fill { display: flex; flex-direction: column; }
+.view-fill > .toolbar,
+.view-fill > .report-grid,
+.view-fill > .grid-2,
+.view-fill > .card { flex: 0 0 auto; }
+.view-fill > .stats-logs-card {
+  flex: 1 1 auto; display: flex; flex-direction: column; min-height: 280px;
+}
+.view-fill > .stats-logs-card > .table-wrap {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+}
+
+/* ---------- 媒体详情：选中媒体后高亮其可改标签 ---------- */
+.detail-item { cursor: pointer; transition: border-color var(--speed), box-shadow var(--speed); }
+.detail-item:hover { border-color: var(--accent); }
+.detail-item.is-active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+/* 无文本记录的媒体现在也可点选（选中后自动补出描述 / 标签编辑区），只做一点弱化 */
+.detail-item.no-msg { opacity: .88; }
+.msg-block.is-active { border-color: var(--accent); background: var(--surface); }
+/* 无文本记录的媒体：点选后可在详情里补描述 / 打标签（虚线边框 + 提示文案） */
+.msg-block.no-record { border-left-style: dashed; border-left-color: var(--text-3); }
+.msg-block.no-record .text { color: var(--text-3); font-style: italic; }
+/* 常规（未选中）时标签区灰掉且不可点 */
+.tag-edit.is-locked { opacity: .5; filter: grayscale(.4); pointer-events: none; }
+/* 选中后必须重新打开鼠标事件，否则「➕ 添加标签」和标签上的 ✕ / ✎ 都点不动 */
+.tag-edit.is-active { opacity: 1; filter: none; pointer-events: auto; }
+.tag-edit .tag-pill button { display: none; }
+.tag-edit.is-active .tag-pill button { display: inline; }
+.tag-edit.is-active .tag-pill { background: var(--accent); color: #fff; }
+.tag-edit .tag-add-btn { font-size: 11.5px; }
+.tag-edit.is-active .tag-add-btn.is-highlight {
+  border-color: var(--accent); color: var(--accent); background: var(--accent-soft);
+  animation: tagPulse 1.4s var(--ease) infinite;
+}
+@keyframes tagPulse { 0%, 100% { box-shadow: 0 0 0 0 var(--accent-soft); } 50% { box-shadow: 0 0 0 4px var(--accent-soft); } }
+
+/* ---------- 标签：模式提示、拖拽排序与置顶状态 ---------- */
+.tag-hint {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 9px 12px;
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
+  font-size: 12px; color: var(--text-2); background: var(--surface-2);
+}
+.tag-card { cursor: pointer; transition: border-color var(--speed), transform var(--speed) var(--ease), opacity var(--speed); }
+.tag-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.tag-card.is-deleting { border-color: var(--danger); }
+.tag-card.is-deleting:hover { background: var(--danger-soft, var(--surface-2)); }
+.tag-grid.is-sorting .tag-card { cursor: grab; border-style: dashed; }
+.tag-grid.is-sorting .tag-card:hover { transform: none; }
+.tag-card.is-dragging { opacity: .45; }
+.tag-card .drag-hint { font-size: 11px; color: var(--text-3); }
+.tag-card .pin-badge { font-size: 11px; }
 
 /* ---------- 窄屏 ---------- */@media (max-width: 1180px) {
   .app { grid-template-columns: 66px minmax(0, 1fr) 340px; }

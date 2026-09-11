@@ -80,10 +80,13 @@
 - 历史数据可能只有 `type`/`time`/`userId`/`query`
 
 ### transport / settings / article / collection
-- `transport`: `{ chat_id(唯一), name?, url? }`
+- `transport`: `{ chat_id(唯一), chat_name, url, num, alive, last_check_at, last_check_status, last_check_error }`
+  - `num`: 搬运次数；`alive`: true=链接有效 / false=已失效 / null=未检查（由 `utils/linkHealth.js` 写入，控制台与机器人共用）
+  - `last_check_status`: "ok"|"dead"|"unknown"，`last_check_error`: 失效原因文本
 - `settings`: 单文档 `_id: "app_settings"`（**禁止修改或删除该文档**，只允许改其中字段）：`search_random`、`random_pictures`、`random_pictures_num`、`random_videos`、`random_videos_time`、`random_videos_num_text`、`random_videos_num_video`、`media_group_num`、`article_sort`、`sub_article_sort`
-- `article`: `{ id, title?, link?, updated_at }`；`sub_article`: `{ id, article_id, title?, link?, updated_at }`
-- `collection`: `{ id, name, type, created_at, updated_at }`；`sub_collection`: `{ id, collection_id, name, link, created_at, updated_at }`
+- `article`: `{ id, title?, link?, created_at, updated_at }`；`sub_article`: `{ id, article_id, title?, link?, created_at, updated_at }`
+- `collection`: `{ id, name, type: "collection"|"misc", created_at, updated_at }`；`sub_collection`: `{ id, collection_id, name, link, created_at, updated_at }`
+- 控制台「搬运收录」「文章」「合集 / 杂集」视图提供上述几个集合的完整增删改查（删除父项会级联删除子项），「数据库」视图展示各集合的文档数与存储占用
 
 ## 三、输出格式（唯一允许的输出）
 

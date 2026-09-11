@@ -80,6 +80,53 @@ test('文本不含标签返回空', () => {
     assert.deepStrictEqual(matchTagsInText(null, tags), []);
 });
 
+// 用户要求：英文标签必须整词命中，不能把单词拆成 h / e / he / el 这样的片段
+
+test('英文标签整词匹配：hello 不会在单词内部被拆出来', () => {
+    const tags = [{ name: 'h' }, { name: 'e' }, { name: 'he' }, { name: 'el' }];
+    assert.deepStrictEqual(matchTagsInText('hello', tags), [], '单词内部不应匹配出任何片段');
+    assert.deepStrictEqual(matchTagsInText('hello world', tags), [], 'he 不能命中 hello');
+});
+
+test('英文标签整词匹配：只有完整单词才命中', () => {
+    const tags = [{ name: 'hello' }, { name: 'world' }];
+    assert.deepStrictEqual(matchTagsInText('hello', tags), ['hello']);
+    assert.deepStrictEqual(matchTagsInText('say hello world!', tags), ['hello', 'world']);
+    assert.deepStrictEqual(matchTagsInText('helloworld', tags), [], 'helloworld 里没有独立的 hello/world');
+    assert.deepStrictEqual(matchTagsInText('hello_world', tags), [], '下划线属于单词字符，不算整词边界');
+});
+
+test('英文标签大小写不敏感且支持数字/下划线标签', () => {
+    assert.deepStrictEqual(matchTagsInText('这是HD画质', [{ name: 'hd' }]), ['hd'], '中文旁的英文仍是整词');
+    assert.deepStrictEqual(matchTagsInText('JK 写真', [{ name: 'jk' }]), ['jk']);
+    assert.deepStrictEqual(matchTagsInText('第 2024 期', [{ name: '2024' }]), ['2024']);
+    assert.deepStrictEqual(matchTagsInText('第2024期', [{ name: '2024' }]), ['2024'], '中文算词边界');
+    assert.deepStrictEqual(matchTagsInText('a_hd_b', [{ name: 'hd' }]), [], '下划线内不命中');
+    assert.deepStrictEqual(matchTagsInText('HD-hd', [{ name: 'HD' }]), ['HD'], '连字符是边界，命中');
+});
+
+test('中文标签仍按子串匹配（中文没有词边界）', () => {
+    const tags = [{ name: '图片' }, { name: '教程' }];
+    assert.deepStrictEqual(matchTagsInText('这是一个图片教程', tags), ['图片', '教程']);
+    assert.deepStrictEqual(matchTagsInText('高清图片合集', [{ name: '图片' }]), ['图片']);
+});
+
+test('中英混合标签按子串匹配（含非 ASCII 字符时不做整词限制）', () => {
+    assert.deepStrictEqual(matchTagsInText('这套 HD 高清 图集', [{ name: 'HD 高清' }]), ['HD 高清']);
+});
+
+test('含正则元字符的标签不会让匹配崩掉', () => {
+    assert.deepStrictEqual(matchTagsInText('价格 (特价) 出售', [{ name: '(特价)' }]), ['(特价)']);
+    assert.deepStrictEqual(matchTagsInText('文件 c.d 已上传', [{ name: 'c.d' }]), ['c.d']);
+    assert.deepStrictEqual(matchTagsInText('文件 cxd 已上传', [{ name: 'c.d' }]), [], '点号按字面量匹配');
+    assert.deepStrictEqual(matchTagsInText('没有这个标签', [{ name: 'a+b' }]), []);
+});
+
+
+test('matchTagsInText 跳过空标签对象', () => {
+    assert.deepStrictEqual(matchTagsInText('hello', [null, {}, { name: '' }, { name: 'hello' }]), ['hello']);
+});
+
 // ---------------- buildTagRegionKeyboard（两区键盘：上区已有标签 / 下区标签库） ----------------
 
 const LIB = [

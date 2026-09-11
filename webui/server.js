@@ -22,7 +22,7 @@ const config = require('../config');
 const logger = require('../logger');
 const { getCollection, COLLECTIONS } = require('../db/getCollection');
 const { callDeepSeek } = require('./ai');
-const { logOperation, getCatalog, ACTION_BY_TYPE, actionLabel, categoryLabel, CATEGORIES } = require('../utils/opLog');
+const { logOperation, getCatalog, ACTION_BY_TYPE, actionLabel, categoryLabel, legacyTypeLabel, CATEGORIES } = require('../utils/opLog');
 const { addTag, tagUsed } = require('../db/tags');
 const {
     addTagToMessage, removeTagFromMessage, getMessageTags,
@@ -31,6 +31,7 @@ const {
 const { reMatchMessageTags, clearMessageTags } = require('../utils/tagSync');
 const { removeLevelSuffix } = require('../utils/levelExtractor');
 const { updateMessageDb } = require('../handlers/modes/editMode');
+const { transportLinkUrl } = require('../utils/tgLink');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const SESSION_TTL = 12 * 60 * 60 * 1000; // 会话有效期 12 小时
@@ -476,7 +477,7 @@ async function handleOverview(D) {
             _id: String(doc._id),
             type: doc.type,
             action: doc.action || (ACTION_BY_TYPE[doc.type] || null),
-            actionLabel: doc.actionLabel || actionLabel(doc.action || ACTION_BY_TYPE[doc.type]) || null,
+            actionLabel: doc.actionLabel || actionLabel(doc.action || ACTION_BY_TYPE[doc.type]) || legacyTypeLabel(doc.type) || null,
             category: doc.category || null,
             result: doc.result || 'ok',
             source: doc.source || null,
@@ -1249,12 +1250,12 @@ async function handleOpLogs(D, url) {
     const docs = await col.find(filter).sort({ time: -1 }).skip((page - 1) * pageSize).limit(pageSize).toArray();
 
     const items = docs.map(doc => {
-        const mappedAction = doc.action || (ACTION_BY_TYPE[doc.type] || `legacy_type_${doc.type}`);
+        const mappedAction = doc.action || (ACTION_BY_TYPE[doc.type] || `legacy_type_${doc.type ?? 'unknown'}`);
         const meta = getCatalog().actions.find(a => a.action === mappedAction);
         return {
             _id: String(doc._id),
             action: mappedAction,
-            actionLabel: doc.actionLabel || actionLabel(doc.action || ACTION_BY_TYPE[doc.type]) || `类型 ${doc.type}`,
+            actionLabel: doc.actionLabel || actionLabel(doc.action || ACTION_BY_TYPE[doc.type]) || legacyTypeLabel(doc.type),
             category: doc.category || (meta ? meta.category : null),
             type: doc.type ?? null,
             result: doc.result || 'ok',
@@ -1313,6 +1314,7 @@ function aggregateLogs(docs) {
     const byAction = new Map();
     const byCategory = new Map();
     const byUser = new Map();
+    const byHour = new Array(24).fill(0).map((_, hour) => ({ hour, count: 0, media: 0 })); // 北京时间整点
     const failures = { count: 0, byAction: {} };
     const activeDays = new Set();
 
@@ -1325,10 +1327,10 @@ function aggregateLogs(docs) {
     };
 
     for (const doc of docs) {
-        const action = doc.action || (ACTION_BY_TYPE[doc.type] || `legacy_type_${doc.type}`);
+        const action = doc.action || (ACTION_BY_TYPE[doc.type] || `legacy_type_${doc.type ?? 'unknown'}`);
         const meta = actionMap.get(action);
         const category = doc.category || (meta ? meta.category : 'other');
-        const label = doc.actionLabel || (meta ? meta.label : action);
+        const label = doc.actionLabel || (meta ? meta.label : legacyTypeLabel(doc.type));
         const at = doc.date ? new Date(doc.date).getTime() : doc.time;
         const day = new Date(at + 8 * 3600 * 1000).toISOString().slice(0, 10); // 北京时间自然日
 
@@ -1341,6 +1343,13 @@ function aggregateLogs(docs) {
         dayRow.count += 1;
         dayRow.media += (doc.counts && doc.counts.media) || 0;
         dayRow.groups += (doc.counts && doc.counts.groups) || 0;
+
+        // 活跃时间：按北京时间整点归桶（前端画 24 小时分布）
+        const hour = new Date(at + 8 * 3600 * 1000).getUTCHours();
+        if (hour >= 0 && hour < 24) {
+            byHour[hour].count += 1;
+            byHour[hour].media += (doc.counts && doc.counts.media) || 0;
+        }
 
         if (!byAction.has(action)) byAction.set(action, { action, label, category, count: 0, media: 0, groups: 0, fail: 0, users: new Set() });
         const row = byAction.get(action);
@@ -1367,6 +1376,7 @@ function aggregateLogs(docs) {
     return {
         totals: { ...totals, activeDays: activeDays.size, avgPerDay: activeDays.size ? Math.round((totals.operations / activeDays.size) * 10) / 10 : 0 },
         byDay: [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : 1)),
+        byHour,
         byAction: [...byAction.values()]
             .map(r => ({ ...r, users: r.users.size }))
             .sort((a, b) => b.count - a.count),
@@ -1645,6 +1655,788 @@ function closeAllSseClients() {
     sseClients.clear();
 }
 
+// ---------------- 搬运收录（transport）----------------
+
+/** 未检查：字段缺失或为 null 都算"未检查" */
+const TRANSPORT_UNCHECKED = { $or: [{ alive: null }, { alive: { $exists: false } }] };
+
+/** transport 文档 → 前端结构（附可点击跳转链接与活性状态） */
+function transportView(doc) {
+    const d = doc || {};
+    return {
+        chat_id: d.chat_id,
+        chat_name: d.chat_name || `Chat${d.chat_id}`,
+        url: d.url || '',
+        link: transportLinkUrl(d),
+        num: Number.isFinite(Number(d.num)) ? Number(d.num) : 0,
+        alive: d.alive === true ? true : (d.alive === false ? false : null),
+        last_check_at: d.last_check_at || null,
+        last_check_status: d.last_check_status || null,
+        last_check_error: d.last_check_error || null,
+        created_at: d.created_at || null,
+        updated_at: d.updated_at || null
+    };
+}
+
+async function handleTransportList(D, url) {
+    const q = (url.searchParams.get('q') || '').trim();
+    const status = url.searchParams.get('status') || 'all';
+    const page = Math.max(1, parseInt(url.searchParams.get('page'), 10) || 1);
+    const pageSize = Math.min(200, Math.max(1, parseInt(url.searchParams.get('pageSize'), 10) || 20));
+
+    const and = [];
+    if (q) {
+        const or = [
+            { chat_name: { $regex: escapeRegex(q), $options: 'i' } },
+            { url: { $regex: escapeRegex(q), $options: 'i' } }
+        ];
+        if (/^-?\d+$/.test(q)) or.push({ chat_id: Number(q) });
+        and.push({ $or: or });
+    }
+    if (status === 'alive') and.push({ alive: true });
+    else if (status === 'dead') and.push({ alive: false });
+    else if (status === 'unchecked') and.push(TRANSPORT_UNCHECKED);
+    const filter = and.length ? { $and: and } : {};
+
+    const col = D.getCollection(COLLECTIONS.TRANSPORT);
+    const total = await col.countDocuments(filter);
+    const docs = await col.find(filter).sort({ num: -1, chat_id: 1 }).skip((page - 1) * pageSize).limit(pageSize).toArray();
+    const [all, alive, dead, unchecked] = await Promise.all([
+        col.countDocuments({}),
+        col.countDocuments({ alive: true }),
+        col.countDocuments({ alive: false }),
+        col.countDocuments(TRANSPORT_UNCHECKED)
+    ]);
+
+    return {
+        status: 200,
+        data: {
+            items: docs.map(transportView),
+            total, page, pageSize,
+            totalPages: Math.max(1, Math.ceil(total / pageSize)),
+            counts: { all, alive, dead, unchecked }
+        }
+    };
+}
+
+async function handleTransportCreate(D, url, body) {
+    const chatId = toNumberId(body.chat_id);
+    if (chatId === null) return { status: 400, data: { error: 'chat_id 必须是数字' } };
+    const link = String(body.url || '').trim();
+    if (!link) return { status: 400, data: { error: '收录链接不能为空' } };
+
+    const col = D.getCollection(COLLECTIONS.TRANSPORT);
+    if (await col.findOne({ chat_id: chatId })) {
+        return { status: 409, data: { error: `该会话已存在收录记录（chat_id=${chatId}）` } };
+    }
+    const now = Date.now();
+    const doc = {
+        chat_id: chatId,
+        chat_name: String(body.chat_name || '').trim().slice(0, 64) || `Chat${chatId}`,
+        url: link,
+        num: Number.isFinite(Number(body.num)) ? Number(body.num) : 0,
+        created_at: now,
+        updated_at: now,
+        alive: null,
+        last_check_at: null,
+        last_check_status: null,
+        last_check_error: null
+    };
+    await col.insertOne(doc);
+    logOperation({
+        action: 'transport_save',
+        source: 'webui',
+        target: { type: 'chat', id: chatId },
+        counts: { chats: 1 },
+        detail: { chat_name: doc.chat_name, url: link, created: true, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, chat_id: chatId, item: transportView(doc) } };
+}
+
+async function handleTransportUpdate(D, url, body) {
+    const chatId = toNumberId(body.chat_id);
+    if (chatId === null) return { status: 400, data: { error: 'chat_id 必须是数字' } };
+    const patch = isPlainObject(body.patch) ? body.patch : {};
+
+    const update = {};
+    if (typeof patch.chat_name === 'string' && patch.chat_name.trim()) {
+        update.chat_name = patch.chat_name.trim().slice(0, 64);
+    }
+    if (patch.url !== undefined) {
+        const link = String(patch.url || '').trim();
+        if (!link) return { status: 400, data: { error: '收录链接不能为空' } };
+        update.url = link;
+    }
+    if (patch.num !== undefined && Number.isFinite(Number(patch.num))) update.num = Number(patch.num);
+    if (Object.keys(update).length === 0) {
+        return { status: 400, data: { error: '没有可修改的字段（chat_name/url/num）' } };
+    }
+
+    const col = D.getCollection(COLLECTIONS.TRANSPORT);
+    const before = await col.findOne({ chat_id: chatId });
+    if (!before) return { status: 404, data: { error: `未找到收录记录（chat_id=${chatId}）` } };
+
+    update.updated_at = Date.now();
+    // 链接变化后旧的活性结论作废，等待重新检查
+    if (update.url && update.url !== before.url) {
+        Object.assign(update, { alive: null, last_check_status: null, last_check_error: null, last_check_at: null });
+    }
+    await col.updateOne({ chat_id: chatId }, { $set: update });
+    const after = await col.findOne({ chat_id: chatId });
+
+    logOperation({
+        action: 'transport_save',
+        source: 'webui',
+        target: { type: 'chat', id: chatId },
+        counts: { chats: 1 },
+        detail: { chat_name: update.chat_name || before.chat_name, url: update.url || before.url, fields: Object.keys(update), via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, chat_id: chatId, item: transportView(after || { ...before, ...update }) } };
+}
+
+async function handleTransportDelete(D, url, body) {
+    if (body.confirm !== true) return { status: 400, data: { error: '删除需要二次确认（confirm: true）' } };
+    const chatId = toNumberId(body.chat_id);
+    if (chatId === null) return { status: 400, data: { error: 'chat_id 必须是数字' } };
+    const col = D.getCollection(COLLECTIONS.TRANSPORT);
+    const before = await col.findOne({ chat_id: chatId });
+    const result = await col.deleteOne({ chat_id: chatId });
+    if (result.deletedCount === 0) return { status: 404, data: { error: `未找到收录记录（chat_id=${chatId}）` } };
+
+    logOperation({
+        action: 'transport_delete',
+        source: 'webui',
+        target: { type: 'chat', id: chatId },
+        counts: { chats: 1 },
+        detail: { chat_name: (before && before.chat_name) || undefined, url: (before && before.url) || undefined, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, chat_id: chatId } };
+}
+
+/** 活性检查（单条 / 全部）；检查器可通过 deps 注入，便于离线测试 */
+async function handleTransportCheck(D, url, body) {
+    let checkOne = D.checkTransportLink;
+    let checkAll = D.checkAllTransports;
+    if (!checkOne || !checkAll) {
+        try {
+            const lh = require('../utils/linkHealth');
+            checkOne = checkOne || lh.checkTransportLink;
+            checkAll = checkAll || lh.checkAllTransports;
+        } catch (err) {
+            return { status: 503, data: { error: `活性检查不可用：${err.message}` } };
+        }
+    }
+    const col = D.getCollection(COLLECTIONS.TRANSPORT);
+    const chatId = toNumberId(body.chat_id);
+
+    if (chatId !== null) {
+        const doc = await col.findOne({ chat_id: chatId });
+        if (!doc) return { status: 404, data: { error: `未找到收录记录（chat_id=${chatId}）` } };
+        const result = await checkOne(doc);
+        const update = {
+            last_check_at: Date.now(),
+            last_check_status: result.status,
+            last_check_error: result.error || null
+        };
+        if (result.status === 'ok') update.alive = true;
+        else if (result.status === 'dead') update.alive = false;
+        else update.alive = doc.alive === undefined ? null : doc.alive;
+        if (result.chat_name) update.chat_name = result.chat_name;
+        await col.updateOne({ chat_id: chatId }, { $set: update });
+        const after = await col.findOne({ chat_id: chatId });
+        logOperation({
+            action: 'transport_check',
+            source: 'webui',
+            target: { type: 'chat', id: chatId },
+            detail: { status: result.status, error: result.error || undefined, via: 'webui' }
+        }).catch(() => { });
+        return { status: 200, data: { ok: true, item: transportView(after || { ...doc, ...update }) } };
+    }
+
+    const summary = await checkAll({ force: true, concurrency: 4 });
+    logOperation({
+        action: 'transport_check',
+        source: 'webui',
+        target: { type: 'collection', id: COLLECTIONS.TRANSPORT },
+        counts: { chats: summary.checked },
+        detail: {
+            total: summary.total, ok: summary.ok, dead: summary.dead.length,
+            unknown: summary.unknown.length, newlyDead: summary.newlyDead.length, via: 'webui'
+        }
+    }).catch(() => { });
+    return {
+        status: 200,
+        data: {
+            ok: true,
+            summary: {
+                total: summary.total,
+                checked: summary.checked,
+                ok: summary.ok,
+                dead: summary.dead.length,
+                unknown: summary.unknown.length,
+                newlyDead: summary.newlyDead.map(d => ({ chat_id: d.chat_id, chat_name: d.chat_name, error: d.check_error }))
+            }
+        }
+    };
+}
+
+// ---------------- 文章（article / sub_article）----------------
+
+/** 取下一个业务自增 id（用 find+sort+limit，避免依赖 findOne 的 sort 选项） */
+async function nextBizId(col) {
+    const docs = await col.find({}).sort({ id: -1 }).limit(1).toArray();
+    const max = docs.length ? Number(docs[0].id) : 0;
+    return (Number.isFinite(max) ? max : 0) + 1;
+}
+
+function articleView(doc, subs, subCount) {
+    const d = doc || {};
+    return {
+        id: d.id,
+        title: d.title || '',
+        link: d.link || '',
+        created_at: d.created_at || null,
+        updated_at: d.updated_at || null,
+        subCount: subCount === undefined ? (subs ? subs.length : 0) : subCount,
+        subs: subs || []
+    };
+}
+
+function subArticleView(doc) {
+    const d = doc || {};
+    return {
+        id: d.id,
+        article_id: d.article_id,
+        title: d.title || '',
+        link: d.link || '',
+        created_at: d.created_at || null,
+        updated_at: d.updated_at || null
+    };
+}
+
+async function handleArticleList(D, url) {
+    const q = (url.searchParams.get('q') || '').trim();
+    const withSubs = url.searchParams.get('withSubs') === '1';
+    const page = Math.max(1, parseInt(url.searchParams.get('page'), 10) || 1);
+    const pageSize = Math.min(200, Math.max(1, parseInt(url.searchParams.get('pageSize'), 10) || 20));
+
+    const col = D.getCollection(COLLECTIONS.ARTICLE);
+    const subCol = D.getCollection(COLLECTIONS.SUB_ARTICLE);
+    const filter = q
+        ? { $or: [
+            { title: { $regex: escapeRegex(q), $options: 'i' } },
+            { link: { $regex: escapeRegex(q), $options: 'i' } }
+        ] }
+        : {};
+    const total = await col.countDocuments(filter);
+    const docs = await col.find(filter).sort({ updated_at: -1, id: -1 }).skip((page - 1) * pageSize).limit(pageSize).toArray();
+
+    const items = [];
+    for (const doc of docs) {
+        const subs = withSubs ? await subCol.find({ article_id: doc.id }).sort({ updated_at: -1, id: -1 }).toArray() : [];
+        const subCount = withSubs ? subs.length : await subCol.countDocuments({ article_id: doc.id });
+        items.push(articleView(doc, subs.map(subArticleView), subCount));
+    }
+
+    return {
+        status: 200,
+        data: {
+            items, total, page, pageSize,
+            totalPages: Math.max(1, Math.ceil(total / pageSize)),
+            subTotal: await subCol.countDocuments({})
+        }
+    };
+}
+
+async function handleArticleCreate(D, url, body) {
+    const title = String(body.title || '').trim();
+    if (!title) return { status: 400, data: { error: '标题不能为空' } };
+    if (title.length > 200) return { status: 400, data: { error: '标题最长 200 个字符' } };
+    const col = D.getCollection(COLLECTIONS.ARTICLE);
+    const now = Date.now();
+    const id = await nextBizId(col);
+    const doc = { id, title, link: String(body.link || '').trim(), created_at: now, updated_at: now };
+    await col.insertOne(doc);
+    logOperation({
+        action: 'article_save',
+        source: 'webui',
+        target: { type: 'article', id },
+        counts: { articles: 1 },
+        detail: { title, created: true, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id, item: articleView(doc, [], 0) } };
+}
+
+async function handleArticleUpdate(D, url, body) {
+    const id = toNumberId(body.id);
+    if (id === null) return { status: 400, data: { error: 'id 必须是数字' } };
+    const patch = isPlainObject(body.patch) ? body.patch : {};
+    const update = {};
+    if (patch.title !== undefined) {
+        const title = String(patch.title || '').trim();
+        if (!title) return { status: 400, data: { error: '标题不能为空' } };
+        update.title = title.slice(0, 200);
+    }
+    if (patch.link !== undefined) update.link = String(patch.link || '').trim();
+    if (Object.keys(update).length === 0) return { status: 400, data: { error: '没有可修改的字段（title/link）' } };
+
+    const col = D.getCollection(COLLECTIONS.ARTICLE);
+    const before = await col.findOne({ id });
+    if (!before) return { status: 404, data: { error: `未找到文章 id=${id}` } };
+    update.updated_at = Date.now();
+    await col.updateOne({ id }, { $set: update });
+    const after = await col.findOne({ id });
+    logOperation({
+        action: 'article_save',
+        source: 'webui',
+        target: { type: 'article', id },
+        counts: { articles: 1 },
+        detail: { title: update.title !== undefined ? update.title : before.title, fields: Object.keys(update), via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id, item: articleView(after || { ...before, ...update }) } };
+}
+
+async function handleArticleDelete(D, url, body) {
+    if (body.confirm !== true) return { status: 400, data: { error: '删除需要二次确认（confirm: true）' } };
+    const id = toNumberId(body.id);
+    if (id === null) return { status: 400, data: { error: 'id 必须是数字' } };
+    const col = D.getCollection(COLLECTIONS.ARTICLE);
+    const subCol = D.getCollection(COLLECTIONS.SUB_ARTICLE);
+    const before = await col.findOne({ id });
+    const subResult = await subCol.deleteMany({ article_id: id });
+    const result = await col.deleteOne({ id });
+    if (result.deletedCount === 0) return { status: 404, data: { error: `未找到文章 id=${id}` } };
+    logOperation({
+        action: 'article_delete',
+        source: 'webui',
+        target: { type: 'article', id },
+        counts: { articles: 1, subArticles: subResult.deletedCount || 0 },
+        detail: { title: (before && before.title) || undefined, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id, removedSubs: subResult.deletedCount || 0 } };
+}
+
+async function handleSubArticleCreate(D, url, body) {
+    const articleId = toNumberId(body.article_id);
+    if (articleId === null) return { status: 400, data: { error: 'article_id 必须是数字' } };
+    const title = String(body.title || '').trim();
+    if (!title) return { status: 400, data: { error: '子文章标题不能为空' } };
+    const articleCol = D.getCollection(COLLECTIONS.ARTICLE);
+    if (!(await articleCol.findOne({ id: articleId }))) {
+        return { status: 404, data: { error: `未找到文章 id=${articleId}` } };
+    }
+    const col = D.getCollection(COLLECTIONS.SUB_ARTICLE);
+    const now = Date.now();
+    const id = await nextBizId(col);
+    const doc = { id, article_id: articleId, title: title.slice(0, 200), link: String(body.link || '').trim(), created_at: now, updated_at: now };
+    await col.insertOne(doc);
+    await articleCol.updateOne({ id: articleId }, { $set: { updated_at: now } });
+    logOperation({
+        action: 'article_save',
+        source: 'webui',
+        target: { type: 'article', id: articleId },
+        counts: { subArticles: 1 },
+        detail: { title: doc.title, subId: id, created: true, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id, item: subArticleView(doc) } };
+}
+
+async function handleSubArticleUpdate(D, url, body) {
+    const id = toNumberId(body.id);
+    if (id === null) return { status: 400, data: { error: 'id 必须是数字' } };
+    const patch = isPlainObject(body.patch) ? body.patch : {};
+    const update = {};
+    if (patch.title !== undefined) {
+        const title = String(patch.title || '').trim();
+        if (!title) return { status: 400, data: { error: '子文章标题不能为空' } };
+        update.title = title.slice(0, 200);
+    }
+    if (patch.link !== undefined) update.link = String(patch.link || '').trim();
+    if (Object.keys(update).length === 0) return { status: 400, data: { error: '没有可修改的字段（title/link）' } };
+
+    const col = D.getCollection(COLLECTIONS.SUB_ARTICLE);
+    const before = await col.findOne({ id });
+    if (!before) return { status: 404, data: { error: `未找到子文章 id=${id}` } };
+    update.updated_at = Date.now();
+    await col.updateOne({ id }, { $set: update });
+    const articleCol = D.getCollection(COLLECTIONS.ARTICLE);
+    await articleCol.updateOne({ id: before.article_id }, { $set: { updated_at: update.updated_at } });
+    const after = await col.findOne({ id });
+    logOperation({
+        action: 'article_save',
+        source: 'webui',
+        target: { type: 'article', id: before.article_id },
+        counts: { subArticles: 1 },
+        detail: { subId: id, fields: Object.keys(update), via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id, item: subArticleView(after || { ...before, ...update }) } };
+}
+
+async function handleSubArticleDelete(D, url, body) {
+    if (body.confirm !== true) return { status: 400, data: { error: '删除需要二次确认（confirm: true）' } };
+    const id = toNumberId(body.id);
+    if (id === null) return { status: 400, data: { error: 'id 必须是数字' } };
+    const col = D.getCollection(COLLECTIONS.SUB_ARTICLE);
+    const before = await col.findOne({ id });
+    const result = await col.deleteOne({ id });
+    if (result.deletedCount === 0) return { status: 404, data: { error: `未找到子文章 id=${id}` } };
+    if (before) {
+        await D.getCollection(COLLECTIONS.ARTICLE).updateOne({ id: before.article_id }, { $set: { updated_at: Date.now() } });
+    }
+    logOperation({
+        action: 'article_delete',
+        source: 'webui',
+        target: { type: 'article', id: before ? before.article_id : undefined },
+        counts: { subArticles: 1 },
+        detail: { subId: id, title: (before && before.title) || undefined, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id } };
+}
+
+// ---------------- 合集 / 杂集（collection / sub_collection）----------------
+
+const COLLECTION_TYPES = new Set(['collection', 'misc']);
+
+function collectionView(doc, subs, subCount) {
+    const d = doc || {};
+    return {
+        id: d.id,
+        name: d.name || '',
+        type: d.type || 'collection',
+        created_at: d.created_at || null,
+        updated_at: d.updated_at || null,
+        subCount: subCount === undefined ? (subs ? subs.length : 0) : subCount,
+        subs: subs || []
+    };
+}
+
+function subCollectionView(doc) {
+    const d = doc || {};
+    return {
+        id: d.id,
+        collection_id: d.collection_id,
+        name: d.name || '',
+        link: d.link || '',
+        created_at: d.created_at || null,
+        updated_at: d.updated_at || null
+    };
+}
+
+async function handleCollectionList(D, url) {
+    const type = url.searchParams.get('type') || 'all';
+    const q = (url.searchParams.get('q') || '').trim();
+    const withSubs = url.searchParams.get('withSubs') === '1';
+
+    const col = D.getCollection(COLLECTIONS.COLLECTION);
+    const subCol = D.getCollection(COLLECTIONS.SUB_COLLECTION);
+    const and = [];
+    if (COLLECTION_TYPES.has(type)) and.push({ type });
+    if (q) and.push({ name: { $regex: escapeRegex(q), $options: 'i' } });
+    const filter = and.length ? { $and: and } : {};
+    const docs = await col.find(filter).sort({ updated_at: -1, id: -1 }).toArray();
+
+    const items = [];
+    for (const doc of docs) {
+        const subs = withSubs ? await subCol.find({ collection_id: doc.id }).sort({ updated_at: -1, id: -1 }).toArray() : [];
+        const subCount = withSubs ? subs.length : await subCol.countDocuments({ collection_id: doc.id });
+        items.push(collectionView(doc, subs.map(subCollectionView), subCount));
+    }
+
+    const [all, collections, misc] = await Promise.all([
+        col.countDocuments({}),
+        col.countDocuments({ type: 'collection' }),
+        col.countDocuments({ type: 'misc' })
+    ]);
+    return {
+        status: 200,
+        data: {
+            items,
+            total: items.length,
+            counts: { all, collection: collections, misc },
+            subTotal: await subCol.countDocuments({})
+        }
+    };
+}
+
+async function handleCollectionCreate(D, url, body) {
+    const name = String(body.name || '').trim();
+    if (!name) return { status: 400, data: { error: '名称不能为空' } };
+    const type = String(body.type || 'collection');
+    if (!COLLECTION_TYPES.has(type)) return { status: 400, data: { error: "type 必须是 collection（合集）或 misc（杂集）" } };
+    const col = D.getCollection(COLLECTIONS.COLLECTION);
+    const now = Date.now();
+    const id = await nextBizId(col);
+    const doc = { id, name: name.slice(0, 200), type, created_at: now, updated_at: now };
+    await col.insertOne(doc);
+    logOperation({
+        action: 'collection_save',
+        source: 'webui',
+        target: { type: 'collection', id },
+        counts: { collections: 1 },
+        detail: { name: doc.name, type, created: true, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id, item: collectionView(doc, [], 0) } };
+}
+
+async function handleCollectionUpdate(D, url, body) {
+    const id = toNumberId(body.id);
+    if (id === null) return { status: 400, data: { error: 'id 必须是数字' } };
+    const patch = isPlainObject(body.patch) ? body.patch : {};
+    const update = {};
+    if (patch.name !== undefined) {
+        const name = String(patch.name || '').trim();
+        if (!name) return { status: 400, data: { error: '名称不能为空' } };
+        update.name = name.slice(0, 200);
+    }
+    if (patch.type !== undefined) {
+        const type = String(patch.type);
+        if (!COLLECTION_TYPES.has(type)) return { status: 400, data: { error: "type 必须是 collection（合集）或 misc（杂集）" } };
+        update.type = type;
+    }
+    if (Object.keys(update).length === 0) return { status: 400, data: { error: '没有可修改的字段（name/type）' } };
+
+    const col = D.getCollection(COLLECTIONS.COLLECTION);
+    const before = await col.findOne({ id });
+    if (!before) return { status: 404, data: { error: `未找到合集 id=${id}` } };
+    update.updated_at = Date.now();
+    await col.updateOne({ id }, { $set: update });
+    const after = await col.findOne({ id });
+    logOperation({
+        action: 'collection_save',
+        source: 'webui',
+        target: { type: 'collection', id },
+        counts: { collections: 1 },
+        detail: { name: update.name !== undefined ? update.name : before.name, fields: Object.keys(update), via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id, item: collectionView(after || { ...before, ...update }) } };
+}
+
+async function handleCollectionDelete(D, url, body) {
+    if (body.confirm !== true) return { status: 400, data: { error: '删除需要二次确认（confirm: true）' } };
+    const id = toNumberId(body.id);
+    if (id === null) return { status: 400, data: { error: 'id 必须是数字' } };
+    const col = D.getCollection(COLLECTIONS.COLLECTION);
+    const subCol = D.getCollection(COLLECTIONS.SUB_COLLECTION);
+    const before = await col.findOne({ id });
+    const subResult = await subCol.deleteMany({ collection_id: id });
+    const result = await col.deleteOne({ id });
+    if (result.deletedCount === 0) return { status: 404, data: { error: `未找到合集 id=${id}` } };
+    logOperation({
+        action: 'collection_delete',
+        source: 'webui',
+        target: { type: 'collection', id },
+        counts: { collections: 1, subCollections: subResult.deletedCount || 0 },
+        detail: { name: (before && before.name) || undefined, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id, removedSubs: subResult.deletedCount || 0 } };
+}
+
+async function handleSubCollectionCreate(D, url, body) {
+    const collectionId = toNumberId(body.collection_id);
+    if (collectionId === null) return { status: 400, data: { error: 'collection_id 必须是数字' } };
+    const name = String(body.name || '').trim();
+    if (!name) return { status: 400, data: { error: '子项名称不能为空' } };
+    const collectionCol = D.getCollection(COLLECTIONS.COLLECTION);
+    if (!(await collectionCol.findOne({ id: collectionId }))) {
+        return { status: 404, data: { error: `未找到合集 id=${collectionId}` } };
+    }
+    const col = D.getCollection(COLLECTIONS.SUB_COLLECTION);
+    const now = Date.now();
+    const id = await nextBizId(col);
+    const doc = { id, collection_id: collectionId, name: name.slice(0, 200), link: String(body.link || '').trim(), created_at: now, updated_at: now };
+    await col.insertOne(doc);
+    await collectionCol.updateOne({ id: collectionId }, { $set: { updated_at: now } });
+    logOperation({
+        action: 'collection_save',
+        source: 'webui',
+        target: { type: 'collection', id: collectionId },
+        counts: { subCollections: 1 },
+        detail: { name: doc.name, subId: id, created: true, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id, item: subCollectionView(doc) } };
+}
+
+async function handleSubCollectionUpdate(D, url, body) {
+    const id = toNumberId(body.id);
+    if (id === null) return { status: 400, data: { error: 'id 必须是数字' } };
+    const patch = isPlainObject(body.patch) ? body.patch : {};
+    const update = {};
+    if (patch.name !== undefined) {
+        const name = String(patch.name || '').trim();
+        if (!name) return { status: 400, data: { error: '子项名称不能为空' } };
+        update.name = name.slice(0, 200);
+    }
+    if (patch.link !== undefined) update.link = String(patch.link || '').trim();
+    if (Object.keys(update).length === 0) return { status: 400, data: { error: '没有可修改的字段（name/link）' } };
+
+    const col = D.getCollection(COLLECTIONS.SUB_COLLECTION);
+    const before = await col.findOne({ id });
+    if (!before) return { status: 404, data: { error: `未找到子项 id=${id}` } };
+    update.updated_at = Date.now();
+    await col.updateOne({ id }, { $set: update });
+    await D.getCollection(COLLECTIONS.COLLECTION).updateOne({ id: before.collection_id }, { $set: { updated_at: update.updated_at } });
+    const after = await col.findOne({ id });
+    logOperation({
+        action: 'collection_save',
+        source: 'webui',
+        target: { type: 'collection', id: before.collection_id },
+        counts: { subCollections: 1 },
+        detail: { subId: id, fields: Object.keys(update), via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id, item: subCollectionView(after || { ...before, ...update }) } };
+}
+
+async function handleSubCollectionDelete(D, url, body) {
+    if (body.confirm !== true) return { status: 400, data: { error: '删除需要二次确认（confirm: true）' } };
+    const id = toNumberId(body.id);
+    if (id === null) return { status: 400, data: { error: 'id 必须是数字' } };
+    const col = D.getCollection(COLLECTIONS.SUB_COLLECTION);
+    const before = await col.findOne({ id });
+    const result = await col.deleteOne({ id });
+    if (result.deletedCount === 0) return { status: 404, data: { error: `未找到子项 id=${id}` } };
+    if (before) {
+        await D.getCollection(COLLECTIONS.COLLECTION).updateOne({ id: before.collection_id }, { $set: { updated_at: Date.now() } });
+    }
+    logOperation({
+        action: 'collection_delete',
+        source: 'webui',
+        target: { type: 'collection', id: before ? before.collection_id : undefined },
+        counts: { subCollections: 1 },
+        detail: { subId: id, name: (before && before.name) || undefined, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, id } };
+}
+
+// ---------------- 标签库（tags）增删与置顶排序 ----------------
+
+async function handleTagCreate(D, url, body) {
+    const name = normalizeTagName(body.name);
+    if (!name) return { status: 400, data: { error: '标签名不能为空，且不超过 20 个字符' } };
+    // 显式查重（不依赖唯一索引报错，便于给出明确提示，也便于测试）
+    if (await D.getCollection(COLLECTIONS.TAGS).findOne({ name })) {
+        return { status: 409, data: { error: `标签「${name}」已存在` } };
+    }
+    const { addTag } = require('../db/tags');
+    const result = await addTag(name);
+    if (!result.ok) return { status: 409, data: { error: result.error || '添加标签失败' } };
+    logOperation({
+        action: 'tag_create',
+        source: 'webui',
+        target: { type: 'tag', id: name },
+        counts: { tags: 1 },
+        detail: { tag: name, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, name } };
+}
+
+async function handleTagDelete(D, url, body) {
+    if (body.confirm !== true) return { status: 400, data: { error: '删除标签需要二次确认（confirm: true）' } };
+    const name = normalizeTagName(body.name);
+    if (!name) return { status: 400, data: { error: '标签名不能为空' } };
+    const { removeTag } = require('../db/tags');
+    const result = await removeTag(name);
+    if (!result.ok) return { status: 404, data: { error: result.error || '删除标签失败' } };
+    logOperation({
+        action: 'tag_delete',
+        source: 'webui',
+        target: { type: 'tag', id: name },
+        counts: { tags: 1, messages: result.synced || undefined },
+        detail: { tag: name, synced: result.synced || 0, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, name, synced: result.synced || 0 } };
+}
+
+/**
+ * 标签改名：POST /api/tags/rename
+ * body: { name, to }
+ * 会同步改写所有消息里的该标签（db/tags.renameTag）
+ */
+async function handleTagRename(D, url, body) {
+    const from = normalizeTagName(body.name);
+    const to = normalizeTagName(body.to);
+    if (!from) return { status: 400, data: { error: '原标签名不能为空' } };
+    if (!to) return { status: 400, data: { error: '新标签名不能为空，且不超过 20 个字符' } };
+
+    const { renameTag } = require('../db/tags');
+    const result = await renameTag(from, to);
+    if (!result.ok) {
+        const notFound = /不存在/.test(result.error || '');
+        return { status: notFound ? 404 : 409, data: { error: result.error || '改名失败' } };
+    }
+    if (from !== to) {
+        logOperation({
+            action: 'tag_rename',
+            source: 'webui',
+            target: { type: 'tag', id: to },
+            counts: { tags: 1, messages: result.synced || undefined },
+            detail: { from, to, synced: result.synced || 0, via: 'webui' }
+        }).catch(() => { });
+    }
+    return { status: 200, data: { ok: true, name: to, from, synced: result.synced || 0, tags: result.tags } };
+}
+
+async function handleTagPin(D, url, body) {
+    const name = normalizeTagName(body.name);
+    if (!name) return { status: 400, data: { error: '标签名不能为空' } };
+    const pin = Math.min(normalizePin(body.pin), 40);
+    const { setTagPin } = require('../db/tags');
+    const result = await setTagPin(name, pin);
+    if (!result.ok) return { status: 404, data: { error: result.error || '设置置顶失败' } };
+    logOperation({
+        action: 'tag_pin',
+        source: 'webui',
+        target: { type: 'tag', id: name },
+        counts: { tags: 1 },
+        detail: { tag: name, pin, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, name, pin, tags: result.tags } };
+}
+
+/** 置顶排序：按传入顺序写 pin=1..N（拖拽排序保存用） */
+async function handleTagReorder(D, url, body) {
+    const names = Array.isArray(body.names) ? body.names : null;
+    if (!names || !names.length) return { status: 400, data: { error: 'names 必须是非空数组' } };
+    const { reorderTags } = require('../db/tags');
+    const result = await reorderTags(names);
+    if (!result.ok) return { status: 400, data: { error: result.error || '排序失败' } };
+    logOperation({
+        action: 'tag_pin',
+        source: 'webui',
+        target: { type: 'collection', id: COLLECTIONS.TAGS },
+        counts: { tags: result.updated },
+        detail: { order: names.slice(0, 40), updated: result.updated, via: 'webui' }
+    }).catch(() => { });
+    return { status: 200, data: { ok: true, updated: result.updated, tags: result.tags } };
+}
+
+// ---------------- 数据库存储统计 ----------------
+
+/**
+ * GET /api/db-stats
+ * 各集合文档数 / 数据大小 / 存储大小 / 索引；套餐不允许读取大小时自动降级为仅文档数
+ */
+async function handleDbStats(D, url) {
+    const force = url.searchParams.get('force') === '1';
+    try {
+        const { getDbStats } = require('../db/dbStats');
+        const stats = await getDbStats({ force });
+        return { status: 200, data: { ok: true, ...stats } };
+    } catch (err) {
+        logger.warn(`读取数据库统计失败（降级为不可用）: ${err.message}`);
+        return {
+            status: 200,
+            data: {
+                ok: false,
+                available: false,
+                reason: err.message || '无法读取数据库统计',
+                at: Date.now(),
+                totals: null,
+                collections: []
+            }
+        };
+    }
+}
+
 // 路由表：method + path 前缀
 const ROUTES = [
     ['POST', /^\/api\/login$/, handleLogin],
@@ -1671,7 +2463,37 @@ const ROUTES = [
     ['POST', /^\/api\/groups\/delete$/, handleChatDelete],
     // 报表
     ['GET', /^\/api\/oplogs$/, handleOpLogs],
-    ['GET', /^\/api\/stats$/, handleStats]
+    ['GET', /^\/api\/stats$/, handleStats],
+    // 搬运收录（含链接活性检查）
+    ['GET', /^\/api\/transport$/, handleTransportList],
+    ['POST', /^\/api\/transport\/create$/, handleTransportCreate],
+    ['POST', /^\/api\/transport\/update$/, handleTransportUpdate],
+    ['POST', /^\/api\/transport\/delete$/, handleTransportDelete],
+    ['POST', /^\/api\/transport\/check$/, handleTransportCheck],
+    // 文章 / 子文章
+    ['GET', /^\/api\/articles$/, handleArticleList],
+    ['POST', /^\/api\/articles\/create$/, handleArticleCreate],
+    ['POST', /^\/api\/articles\/update$/, handleArticleUpdate],
+    ['POST', /^\/api\/articles\/delete$/, handleArticleDelete],
+    ['POST', /^\/api\/articles\/sub\/create$/, handleSubArticleCreate],
+    ['POST', /^\/api\/articles\/sub\/update$/, handleSubArticleUpdate],
+    ['POST', /^\/api\/articles\/sub\/delete$/, handleSubArticleDelete],
+    // 合集 / 杂集 / 子项
+    ['GET', /^\/api\/collections$/, handleCollectionList],
+    ['POST', /^\/api\/collections\/create$/, handleCollectionCreate],
+    ['POST', /^\/api\/collections\/update$/, handleCollectionUpdate],
+    ['POST', /^\/api\/collections\/delete$/, handleCollectionDelete],
+    ['POST', /^\/api\/collections\/sub\/create$/, handleSubCollectionCreate],
+    ['POST', /^\/api\/collections\/sub\/update$/, handleSubCollectionUpdate],
+    ['POST', /^\/api\/collections\/sub\/delete$/, handleSubCollectionDelete],
+    // 数据库存储统计
+    ['GET', /^\/api\/db-stats$/, handleDbStats],
+    // 标签库增删 / 改名 / 置顶 / 拖拽排序
+    ['POST', /^\/api\/tags\/create$/, handleTagCreate],
+    ['POST', /^\/api\/tags\/delete$/, handleTagDelete],
+    ['POST', /^\/api\/tags\/rename$/, handleTagRename],
+    ['POST', /^\/api\/tags\/pin$/, handleTagPin],
+    ['POST', /^\/api\/tags\/reorder$/, handleTagReorder],
 ];
 
 async function handleApi(D, req, res, url) {

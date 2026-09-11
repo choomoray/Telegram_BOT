@@ -15,6 +15,9 @@
 const { getCollection, COLLECTIONS } = require('./getCollection');
 const logger = require('../logger');
 
+/** 置顶位置上限（每行 4 个按钮 × 10 行） */
+const MAX_PIN = 40;
+
 function normalizePin(pin) {
     return Number.isInteger(pin) && pin > 0 ? pin : 0;
 }
@@ -133,6 +136,39 @@ async function setTagPin(name, pin) {
 }
 
 /**
+ * 批量重排置顶位置（控制台「置顶排序」拖拽用）：
+ * 传入按展示顺序排列的标签名数组，依次写入 pin=1..N（超过 MAX_PIN 的置 0，不参与置顶）。
+ * 不在数组里的标签保持原样（不会误清空）。
+ * @param {string[]} names
+ * @returns {Promise<{ok:boolean, tags:Array, updated:number}>}
+ */
+async function reorderTags(names) {
+    const list = (Array.isArray(names) ? names : [])
+        .map(n => String(n || '').trim().toUpperCase())
+        .filter(Boolean);
+    if (!list.length) return { ok: false, error: '没有需要排序的标签', tags: await getTags(), updated: 0 };
+
+    const col = getCollection(COLLECTIONS.TAGS);
+    let updated = 0;
+    const CHUNK = 10; // 分批并发，避免单次请求过多
+    for (let i = 0; i < list.length; i += CHUNK) {
+        const slice = list.slice(i, i + CHUNK);
+        await Promise.all(slice.map(async (name, idx) => {
+            const position = i + idx + 1;
+            const pin = position <= MAX_PIN ? position : 0;
+            try {
+                const res = await col.updateOne({ name }, { $set: { pin } });
+                if (res && res.matchedCount) updated++;
+            } catch (err) {
+                logger.warn(`重排标签失败 ${name}: ${err.message}`);
+            }
+        }));
+    }
+    logger.info(`标签重排: ${updated}/${list.length} 个已写入置顶位置`);
+    return { ok: true, tags: await getTags(), updated };
+}
+
+/**
  * 标签使用次数增减（打标签 +1，移除 -1，最低 0；管道更新避免并发读改写）
  */
 async function tagUsed(name, delta = 1) {
@@ -192,6 +228,8 @@ module.exports = {
     removeTag,
     renameTag,
     setTagPin,
+    reorderTags,
     tagUsed,
-    migrateTagsFromSettings
+    migrateTagsFromSettings,
+    MAX_PIN
 };

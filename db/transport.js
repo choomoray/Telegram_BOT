@@ -78,6 +78,99 @@ async function deleteTransport(chatId) {
 }
 
 /**
+ * 新建 transport 记录（控制台用；已存在同 chat_id 时报错）
+ * @returns {Promise<{ok:boolean, transport?:Object, error?:string}>}
+ */
+async function createTransport({ chat_id, chat_name, url, num = 0 }) {
+    try {
+        const chatId = Number(chat_id);
+        if (!Number.isFinite(chatId)) return { ok: false, error: 'chat_id 必须是数字' };
+        const trimmedUrl = String(url || '').trim();
+        if (!trimmedUrl) return { ok: false, error: '收录链接不能为空' };
+        const col = getTransportCollection();
+        const existing = await col.findOne({ chat_id: chatId });
+        if (existing) return { ok: false, error: `该会话已存在收录记录（${existing.chat_name || chatId}）` };
+        const doc = {
+            chat_id: chatId,
+            chat_name: String(chat_name || '').trim() || `Chat${chatId}`,
+            url: trimmedUrl,
+            num: Number.isFinite(Number(num)) ? Number(num) : 0,
+            created_at: Date.now(),
+            updated_at: Date.now(),
+            alive: null,
+            last_check_at: null,
+            last_check_status: null,
+            last_check_error: null
+        };
+        await col.insertOne(doc);
+        logger.info(`transport 新建: chat_id=${chatId}, url=${trimmedUrl}`);
+        return { ok: true, transport: doc };
+    } catch (err) {
+        logger.error(`新建 transport 失败: ${err.message}`);
+        return { ok: false, error: '新建失败：' + err.message };
+    }
+}
+
+/**
+ * 修改 transport 记录（控制台用；支持改 chat_name / url / num）
+ * @returns {Promise<{ok:boolean, transport?:Object, error?:string}>}
+ */
+async function updateTransport(chatId, updates = {}) {
+    try {
+        const id = Number(chatId);
+        const col = getTransportCollection();
+        const existing = await col.findOne({ chat_id: id });
+        if (!existing) return { ok: false, error: '记录不存在' };
+        const set = { updated_at: Date.now() };
+        if (updates.chat_name !== undefined) set.chat_name = String(updates.chat_name || '').trim() || existing.chat_name;
+        if (updates.url !== undefined) {
+            const u = String(updates.url || '').trim();
+            if (!u) return { ok: false, error: '收录链接不能为空' };
+            set.url = u;
+        }
+        if (updates.num !== undefined && Number.isFinite(Number(updates.num))) set.num = Number(updates.num);
+        // 链接或会话变化后旧的活性结论作废，等待下次检查
+        if (updates.url !== undefined) {
+            set.alive = null;
+            set.last_check_status = null;
+            set.last_check_error = null;
+            set.last_check_at = null;
+        }
+        await col.updateOne({ chat_id: id }, { $set: set });
+        logger.info(`transport 修改: chat_id=${id}`);
+        return { ok: true, transport: await col.findOne({ chat_id: id }) };
+    } catch (err) {
+        logger.error(`修改 transport 失败: ${err.message}`);
+        return { ok: false, error: '修改失败：' + err.message };
+    }
+}
+
+/**
+ * 写回活性检查结果
+ * @param {number} chatId
+ * @param {Object} result - { status:'ok'|'dead'|'unknown', error, chatName, previousAlive }
+ */
+async function updateTransportStatus(chatId, result = {}) {
+    const col = getTransportCollection();
+    const set = {
+        last_check_at: Date.now(),
+        last_check_status: result.status || 'unknown',
+        last_check_error: result.error || null
+    };
+    if (result.status === 'ok') set.alive = true;
+    else if (result.status === 'dead') set.alive = false;
+    else set.alive = result.previousAlive === undefined ? null : result.previousAlive;
+    if (result.chatName) set.chat_name = result.chatName;
+    await col.updateOne({ chat_id: Number(chatId) }, { $set: set });
+    return set;
+}
+
+/** 列出所有 transport（活性检查用，字段与 getAllTransports 一致） */
+async function getTransportHealth() {
+    return await getAllTransports();
+}
+
+/**
  * 从 Telegram 链接中提取 chat_id，如果无法获取名称则返回默认名称
  * @param {string} url - 原始链接
  * @param {Object} bot - Telegram bot 实例
@@ -158,5 +251,9 @@ module.exports = {
     getAllTransports,
     getTransportByChatId,
     deleteTransport,
+    createTransport,
+    updateTransport,
+    updateTransportStatus,
+    getTransportHealth,
     extractChatInfo
 };

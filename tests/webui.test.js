@@ -501,9 +501,12 @@ function compareForSort(a, b) {
 }
 
 /**
- * 应用更新文档（支持 $set/$unset/$inc/$addToSet/$pull 与 tagUsed 使用的聚合管道写法）
+ * 应用更新文档（支持 $set/$unset/$inc/$addToSet/$pull、位置操作符 tags.$ 与 tagUsed 的聚合管道写法）
+ * @param {Object} target - 命中的文档（就地修改）
+ * @param {Object|Array} update - 更新文档
+ * @param {Object} [filter] - 查询条件（支持 `tags.$` 位置更新时需要知道命中的数组元素）
  */
-function applyUpdate(target, update) {
+function applyUpdate(target, update, filter) {
     if (Array.isArray(update)) {
         // 聚合管道：本项目仅 tagUsed 使用 count = max(0, count + delta)
         const setSpec = (update[0] && update[0].$set) || {};
@@ -515,7 +518,21 @@ function applyUpdate(target, update) {
         return;
     }
     if (!update) return;
-    if (update.$set) Object.assign(target, update.$set);
+    if (update.$set) {
+        for (const [key, val] of Object.entries(update.$set)) {
+            if (key.endsWith('.$')) {
+                // 位置操作符：改写数组里「被 filter 命中的那个元素」
+                const field = key.slice(0, -2);
+                const arr = target[field];
+                if (!Array.isArray(arr)) continue;
+                const wanted = filter ? filter[field] : undefined;
+                const idx = wanted === undefined ? 0 : arr.findIndex(v => looseEqual(v, wanted));
+                if (idx >= 0) arr[idx] = val;
+                continue;
+            }
+            target[key] = val;
+        }
+    }
     if (update.$inc) {
         for (const [key, delta] of Object.entries(update.$inc)) target[key] = (target[key] || 0) + delta;
     }
@@ -604,13 +621,13 @@ function makeMemoryCol(initialDocs = []) {
             calls.update.push({ filter, update });
             const target = docs.find(d => matchFilter(d, filter));
             if (!target) return { matchedCount: 0, modifiedCount: 0 };
-            applyUpdate(target, update);
+            applyUpdate(target, update, filter);
             return { matchedCount: 1, modifiedCount: 1 };
         },
         updateMany: async (filter, update) => {
             calls.update.push({ filter, update });
             const matched = docs.filter(d => matchFilter(d, filter));
-            for (const doc of matched) applyUpdate(doc, update);
+            for (const doc of matched) applyUpdate(doc, update, filter);
             return { matchedCount: matched.length, modifiedCount: matched.length };
         },
         deleteOne: async (filter = {}) => {
@@ -1208,6 +1225,23 @@ test('新增领域接口未登录均返回 401', async () => {
         ['/api/groups/create', 'POST'],
         ['/api/groups/update', 'POST'],
         ['/api/groups/delete', 'POST'],
+        ['/api/transport', 'GET'],
+        ['/api/transport/create', 'POST'],
+        ['/api/transport/update', 'POST'],
+        ['/api/transport/delete', 'POST'],
+        ['/api/transport/check', 'POST'],
+        ['/api/articles', 'GET'],
+        ['/api/articles/create', 'POST'],
+        ['/api/articles/sub/create', 'POST'],
+        ['/api/collections', 'GET'],
+        ['/api/collections/create', 'POST'],
+        ['/api/collections/sub/create', 'POST'],
+        ['/api/db-stats', 'GET'],
+        ['/api/tags/create', 'POST'],
+        ['/api/tags/delete', 'POST'],
+        ['/api/tags/pin', 'POST'],
+        ['/api/tags/rename', 'POST'],
+        ['/api/tags/reorder', 'POST'],
         ['/api/thumb?fileUniqueId=AQAD1', 'GET']
     ];
     for (const [path, method] of endpoints) {
@@ -1568,6 +1602,430 @@ test('GET /api/stats 没有日志时返回零值结构而不报错', async () =>
         assert.strictEqual(r.body.totals.operations, 0);
         assert.deepStrictEqual(r.body.byDay, []);
         assert.deepStrictEqual(r.body.byAction, []);
+        assert.strictEqual(r.body.byHour.length, 24, '没有日志也返回 24 个小时桶');
+        assert.ok(r.body.byHour.every(h => h.count === 0));
+    });
+});
+
+test('GET /api/stats 返回活跃时间：24 个小时桶，按北京时间整点归桶', async () => {
+    const deps = makeMemoryDeps({ log: [] });
+    await withDomain(deps, async (b, auth) => {
+        const logCol = deps.getCollection('log');
+        // 固定时间点：UTC 01:00 = 北京 09:00；UTC 13:00 = 北京 21:00
+        const utc = Date.UTC(2026, 0, 15, 1, 0, 0);
+        logCol.docs.splice(0, logCol.docs.length,
+            { _id: 'h1', action: 'media_save', result: 'ok', time: utc, date: new Date(utc), counts: { media: 2 } },
+            { _id: 'h2', action: 'media_save', result: 'ok', time: utc, date: new Date(utc) },
+            { _id: 'h3', action: 'query_keyword', result: 'ok', time: utc + 12 * 3600 * 1000, date: new Date(utc + 12 * 3600 * 1000), counts: { media: 3 } }
+        );
+        const r = await domainReq(b, auth, '/api/stats?period=month&year=2026&month=1');
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(r.body.byHour.length, 24);
+        assert.deepStrictEqual(r.body.byHour.map(h => h.hour), Array.from({ length: 24 }, (_, h) => h), '小时按 0..23 排列');
+        assert.strictEqual(r.body.byHour[9].count, 2, 'UTC 01:00 → 北京 09:00');
+        assert.strictEqual(r.body.byHour[9].media, 2, '该小时的媒体产出也汇总');
+        assert.strictEqual(r.body.byHour[21].count, 1, 'UTC 13:00 → 北京 21:00');
+        assert.strictEqual(r.body.byHour[21].media, 3);
+        assert.strictEqual(r.body.byHour.reduce((sum, h) => sum + h.count, 0), r.body.totals.operations, '小时桶总数 = 操作总数');
+    });
+});
+
+// ---------------- 搬运收录（transport）增删改查 + 链接活性 ----------------
+
+function makeTransportData() {
+    return {
+        transport: [
+            { chat_id: -1001, chat_name: '有效频道', url: 'https://t.me/alive', num: 5, alive: true, last_check_at: NOW - 1000, last_check_status: 'ok' },
+            { chat_id: -1002, chat_name: '失效频道', url: 'https://t.me/dead', num: 3, alive: false, last_check_at: NOW - 2000, last_check_status: 'dead', last_check_error: 'chat not found' },
+            { chat_id: -1003, chat_name: '未检查频道', url: 'https://t.me/unknown', num: 1 },
+            { chat_id: -1001234567890, chat_name: '无链接记录', num: 0 }
+        ]
+    };
+}
+
+test('GET /api/transport：排序 / 状态筛选 / 计数 / 跳转链接', async () => {
+    const deps = makeMemoryDeps(makeTransportData());
+    await withDomain(deps, async (b, auth) => {
+        const all = await domainReq(b, auth, '/api/transport');
+        assert.strictEqual(all.status, 200);
+        assert.strictEqual(all.body.total, 4);
+        assert.deepStrictEqual(all.body.counts, { all: 4, alive: 1, dead: 1, unchecked: 2 });
+        assert.strictEqual(all.body.items[0].chat_id, -1001, '按搬运次数降序');
+        assert.strictEqual(all.body.items[0].link, 'https://t.me/alive');
+        assert.strictEqual(all.body.items[0].alive, true);
+
+        const noUrl = all.body.items.find(i => i.chat_id === -1001234567890);
+        assert.strictEqual(noUrl.link, 'https://t.me/c/1234567890', '无 url 时由 chat_id 推导 t.me/c 链接');
+        assert.strictEqual(noUrl.alive, null, '未检查为 null');
+
+        const dead = await domainReq(b, auth, '/api/transport?status=dead');
+        assert.strictEqual(dead.body.total, 1);
+        assert.strictEqual(dead.body.items[0].chat_id, -1002);
+        assert.strictEqual(dead.body.items[0].last_check_error, 'chat not found');
+
+        const unchecked = await domainReq(b, auth, '/api/transport?status=unchecked');
+        assert.strictEqual(unchecked.body.total, 2, '字段缺失与 null 都算未检查');
+
+        const search = await domainReq(b, auth, '/api/transport?q=' + encodeURIComponent('失效'));
+        assert.strictEqual(search.body.total, 1);
+        const byId = await domainReq(b, auth, '/api/transport?q=-1003');
+        assert.strictEqual(byId.body.total, 1, '纯数字关键词按 chat_id 精确匹配');
+    });
+});
+
+test('POST /api/transport/create：校验 chat_id/链接、拒绝重复', async () => {
+    const deps = makeMemoryDeps(makeTransportData());
+    await withDomain(deps, async (b, auth) => {
+        assert.strictEqual((await domainReq(b, auth, '/api/transport/create', { method: 'POST', body: JSON.stringify({ url: 'https://t.me/x' }) })).status, 400);
+        assert.strictEqual((await domainReq(b, auth, '/api/transport/create', { method: 'POST', body: JSON.stringify({ chat_id: -2001 }) })).status, 400);
+        assert.strictEqual((await domainReq(b, auth, '/api/transport/create', { method: 'POST', body: JSON.stringify({ chat_id: -1001, url: 'https://t.me/x' }) })).status, 409);
+
+        const r = await domainReq(b, auth, '/api/transport/create', {
+            method: 'POST',
+            body: JSON.stringify({ chat_id: -2001, chat_name: '新频道', url: 'https://t.me/new', num: 2 })
+        });
+        assert.strictEqual(r.status, 200);
+        const doc = deps.getCollection('transport').docs.find(t => t.chat_id === -2001);
+        assert.strictEqual(doc.chat_name, '新频道');
+        assert.strictEqual(doc.num, 2);
+        assert.strictEqual(doc.alive, null, '新建记录默认未检查');
+        assert.ok(doc.created_at > 0);
+    });
+});
+
+test('POST /api/transport/update：改名字/链接，改链接后活性作废', async () => {
+    const deps = makeMemoryDeps(makeTransportData());
+    await withDomain(deps, async (b, auth) => {
+        assert.strictEqual((await domainReq(b, auth, '/api/transport/update', { method: 'POST', body: JSON.stringify({ chat_id: -1001, patch: {} }) })).status, 400);
+        assert.strictEqual((await domainReq(b, auth, '/api/transport/update', { method: 'POST', body: JSON.stringify({ chat_id: -9999, patch: { chat_name: 'x' } }) })).status, 404);
+        assert.strictEqual((await domainReq(b, auth, '/api/transport/update', { method: 'POST', body: JSON.stringify({ chat_id: -1001, patch: { url: '' } }) })).status, 400);
+
+        const rename = await domainReq(b, auth, '/api/transport/update', {
+            method: 'POST', body: JSON.stringify({ chat_id: -1001, patch: { chat_name: '改名后' } })
+        });
+        assert.strictEqual(rename.status, 200);
+        const doc = deps.getCollection('transport').docs.find(t => t.chat_id === -1001);
+        assert.strictEqual(doc.chat_name, '改名后');
+        assert.strictEqual(doc.alive, true, '只改名字不影响活性结论');
+
+        const relink = await domainReq(b, auth, '/api/transport/update', {
+            method: 'POST', body: JSON.stringify({ chat_id: -1001, patch: { url: 'https://t.me/other', num: 9 } })
+        });
+        assert.strictEqual(relink.status, 200);
+        assert.strictEqual(doc.url, 'https://t.me/other');
+        assert.strictEqual(doc.num, 9);
+        assert.strictEqual(doc.alive, null, '链接变化后活性作废，等待重新检查');
+        assert.strictEqual(doc.last_check_status, null);
+    });
+});
+
+test('POST /api/transport/delete：二次确认 + 删除后 404', async () => {
+    const deps = makeMemoryDeps(makeTransportData());
+    await withDomain(deps, async (b, auth) => {
+        assert.strictEqual((await domainReq(b, auth, '/api/transport/delete', { method: 'POST', body: JSON.stringify({ chat_id: -1002 }) })).status, 400);
+        const r = await domainReq(b, auth, '/api/transport/delete', { method: 'POST', body: JSON.stringify({ chat_id: -1002, confirm: true }) });
+        assert.strictEqual(r.status, 200);
+        assert.ok(!deps.getCollection('transport').docs.some(t => t.chat_id === -1002));
+        assert.strictEqual((await domainReq(b, auth, '/api/transport/delete', { method: 'POST', body: JSON.stringify({ chat_id: -1002, confirm: true }) })).status, 404);
+    });
+});
+
+test('POST /api/transport/check：单条写回活性结论、全部检查返回汇总', async () => {
+    const deps = makeMemoryDeps(makeTransportData());
+    deps.checkTransportLink = async () => ({ status: 'dead', error: 'ETELEGRAM: 400 chat not found', chat_name: '有效频道改名' });
+    deps.checkAllTransports = async () => ({
+        total: 4, checked: 4, ok: 2,
+        dead: [{ chat_id: -1004, chat_name: '挂了', check_error: 'chat not found' }],
+        newlyDead: [{ chat_id: -1004, chat_name: '挂了', check_error: 'chat not found' }],
+        recovered: [], unknown: [], skipped: 0
+    });
+    await withDomain(deps, async (b, auth) => {
+        assert.strictEqual((await domainReq(b, auth, '/api/transport/check', { method: 'POST', body: JSON.stringify({ chat_id: -9999 }) })).status, 404);
+
+        const one = await domainReq(b, auth, '/api/transport/check', { method: 'POST', body: JSON.stringify({ chat_id: -1001 }) });
+        assert.strictEqual(one.status, 200);
+        assert.strictEqual(one.body.item.alive, false);
+        assert.strictEqual(one.body.item.last_check_status, 'dead');
+        assert.ok(one.body.item.last_check_at > 0);
+        assert.strictEqual(one.body.item.chat_name, '有效频道改名', '检查成功时同步真实会话名');
+        const doc = deps.getCollection('transport').docs.find(t => t.chat_id === -1001);
+        assert.strictEqual(doc.alive, false, '结论写回数据库');
+
+        const all = await domainReq(b, auth, '/api/transport/check', { method: 'POST', body: JSON.stringify({}) });
+        assert.strictEqual(all.status, 200);
+        assert.deepStrictEqual(all.body.summary, {
+            total: 4, checked: 4, ok: 2, dead: 1, unknown: 0,
+            newlyDead: [{ chat_id: -1004, chat_name: '挂了', error: 'chat not found' }]
+        });
+    });
+});
+
+// ---------------- 文章 / 子文章增删改查 ----------------
+
+test('文章：列表带子文章、新建、修改、级联删除', async () => {
+    const deps = makeMemoryDeps({
+        article: [{ id: 1, title: '旧文章', link: 'https://telegra.ph/old', created_at: NOW - 5000, updated_at: NOW - 5000 }],
+        sub_article: [{ id: 1, article_id: 1, title: '第一章', link: 'https://telegra.ph/1', created_at: NOW - 4000, updated_at: NOW - 4000 }]
+    });
+    await withDomain(deps, async (b, auth) => {
+        const list = await domainReq(b, auth, '/api/articles?withSubs=1');
+        assert.strictEqual(list.status, 200);
+        assert.strictEqual(list.body.total, 1);
+        assert.strictEqual(list.body.subTotal, 1);
+        assert.strictEqual(list.body.items[0].subCount, 1);
+        assert.strictEqual(list.body.items[0].subs[0].title, '第一章');
+
+        assert.strictEqual((await domainReq(b, auth, '/api/articles/create', { method: 'POST', body: JSON.stringify({ title: '  ' }) })).status, 400);
+        const created = await domainReq(b, auth, '/api/articles/create', {
+            method: 'POST', body: JSON.stringify({ title: '新文章', link: 'https://telegra.ph/new' })
+        });
+        assert.strictEqual(created.status, 200);
+        assert.strictEqual(created.body.id, 2, 'id 自增');
+        assert.strictEqual(created.body.item.title, '新文章');
+
+        assert.strictEqual((await domainReq(b, auth, '/api/articles/update', { method: 'POST', body: JSON.stringify({ id: 2, patch: {} }) })).status, 400);
+        assert.strictEqual((await domainReq(b, auth, '/api/articles/update', { method: 'POST', body: JSON.stringify({ id: 999, patch: { title: 'x' } }) })).status, 404);
+        const renamed = await domainReq(b, auth, '/api/articles/update', {
+            method: 'POST', body: JSON.stringify({ id: 2, patch: { title: '改名', hack: 1 } })
+        });
+        assert.strictEqual(renamed.status, 200);
+        const doc = deps.getCollection('article').docs.find(a => a.id === 2);
+        assert.strictEqual(doc.title, '改名');
+        assert.ok(!('hack' in doc), '非白名单字段被忽略');
+
+        assert.strictEqual((await domainReq(b, auth, '/api/articles/delete', { method: 'POST', body: JSON.stringify({ id: 1 }) })).status, 400);
+        const del = await domainReq(b, auth, '/api/articles/delete', { method: 'POST', body: JSON.stringify({ id: 1, confirm: true }) });
+        assert.strictEqual(del.status, 200);
+        assert.strictEqual(del.body.removedSubs, 1, '子文章级联删除');
+        assert.ok(!deps.getCollection('article').docs.some(a => a.id === 1));
+        assert.ok(!deps.getCollection('sub_article').docs.some(s => s.article_id === 1));
+    });
+});
+
+test('子文章：增删改 + 同步父文章 updated_at', async () => {
+    const deps = makeMemoryDeps({
+        article: [{ id: 1, title: '文章', link: '', created_at: NOW - 5000, updated_at: NOW - 5000 }],
+        sub_article: []
+    });
+    await withDomain(deps, async (b, auth) => {
+        assert.strictEqual((await domainReq(b, auth, '/api/articles/sub/create', { method: 'POST', body: JSON.stringify({ article_id: 999, title: 'x' }) })).status, 404);
+        assert.strictEqual((await domainReq(b, auth, '/api/articles/sub/create', { method: 'POST', body: JSON.stringify({ article_id: 1 }) })).status, 400);
+
+        const created = await domainReq(b, auth, '/api/articles/sub/create', {
+            method: 'POST', body: JSON.stringify({ article_id: 1, title: '第一章', link: 'https://telegra.ph/s1' })
+        });
+        assert.strictEqual(created.status, 200);
+        const subId = created.body.id;
+        assert.strictEqual(deps.getCollection('sub_article').docs[0].article_id, 1);
+        assert.ok(deps.getCollection('article').docs[0].updated_at > NOW - 5000, '父文章 updated_at 被刷新');
+
+        const subUpdate = await domainReq(b, auth, '/api/articles/sub/update', {
+            method: 'POST', body: JSON.stringify({ id: subId, patch: { title: '第二章', link: '' } })
+        });
+        assert.strictEqual(subUpdate.status, 200);
+        assert.strictEqual(subUpdate.body.item.title, '第二章');
+        assert.strictEqual((await domainReq(b, auth, '/api/articles/sub/update', { method: 'POST', body: JSON.stringify({ id: 999, patch: { title: 'x' } }) })).status, 404);
+
+        assert.strictEqual((await domainReq(b, auth, '/api/articles/sub/delete', { method: 'POST', body: JSON.stringify({ id: subId }) })).status, 400);
+        const del = await domainReq(b, auth, '/api/articles/sub/delete', { method: 'POST', body: JSON.stringify({ id: subId, confirm: true }) });
+        assert.strictEqual(del.status, 200);
+        assert.deepStrictEqual(deps.getCollection('sub_article').docs, []);
+    });
+});
+
+// ---------------- 合集 / 杂集增删改查 ----------------
+
+test('合集：列表按类型筛选、新建/修改校验 type、级联删除子项', async () => {
+    const deps = makeMemoryDeps({
+        collection: [
+            { id: 1, name: '合集A', type: 'collection', created_at: NOW - 3000, updated_at: NOW - 3000 },
+            { id: 2, name: '杂集B', type: 'misc', created_at: NOW - 2000, updated_at: NOW - 2000 }
+        ],
+        sub_collection: [{ id: 1, collection_id: 1, name: '子项1', link: 'https://t.me/x', created_at: NOW, updated_at: NOW }]
+    });
+    await withDomain(deps, async (b, auth) => {
+        const all = await domainReq(b, auth, '/api/collections?withSubs=1');
+        assert.strictEqual(all.status, 200);
+        assert.deepStrictEqual(all.body.counts, { all: 2, collection: 1, misc: 1 });
+        assert.strictEqual(all.body.subTotal, 1);
+        assert.strictEqual(all.body.items.find(c => c.id === 1).subCount, 1);
+
+        const onlyMisc = await domainReq(b, auth, '/api/collections?type=misc');
+        assert.strictEqual(onlyMisc.body.items.length, 1);
+        assert.strictEqual(onlyMisc.body.items[0].id, 2);
+
+        assert.strictEqual((await domainReq(b, auth, '/api/collections/create', { method: 'POST', body: JSON.stringify({ name: '', type: 'collection' }) })).status, 400);
+        assert.strictEqual((await domainReq(b, auth, '/api/collections/create', { method: 'POST', body: JSON.stringify({ name: 'x', type: 'bad' }) })).status, 400);
+        const created = await domainReq(b, auth, '/api/collections/create', {
+            method: 'POST', body: JSON.stringify({ name: '新杂集', type: 'misc' })
+        });
+        assert.strictEqual(created.status, 200);
+        assert.strictEqual(created.body.id, 3);
+
+        assert.strictEqual((await domainReq(b, auth, '/api/collections/update', { method: 'POST', body: JSON.stringify({ id: 999, patch: { name: 'x' } }) })).status, 404);
+        assert.strictEqual((await domainReq(b, auth, '/api/collections/update', { method: 'POST', body: JSON.stringify({ id: 3, patch: { type: 'nope' } }) })).status, 400);
+        const moved = await domainReq(b, auth, '/api/collections/update', {
+            method: 'POST', body: JSON.stringify({ id: 3, patch: { name: '改名', type: 'collection' } })
+        });
+        assert.strictEqual(moved.status, 200);
+        assert.strictEqual(moved.body.item.type, 'collection');
+
+        const del = await domainReq(b, auth, '/api/collections/delete', { method: 'POST', body: JSON.stringify({ id: 1, confirm: true }) });
+        assert.strictEqual(del.status, 200);
+        assert.strictEqual(del.body.removedSubs, 1);
+        assert.ok(!deps.getCollection('sub_collection').docs.some(s => s.collection_id === 1));
+    });
+});
+
+test('子合集：增删改 + 同步父合集 updated_at', async () => {
+    const deps = makeMemoryDeps({
+        collection: [{ id: 1, name: '合集', type: 'collection', created_at: NOW - 5000, updated_at: NOW - 5000 }],
+        sub_collection: []
+    });
+    await withDomain(deps, async (b, auth) => {
+        assert.strictEqual((await domainReq(b, auth, '/api/collections/sub/create', { method: 'POST', body: JSON.stringify({ collection_id: 999, name: 'x' }) })).status, 404);
+        const created = await domainReq(b, auth, '/api/collections/sub/create', {
+            method: 'POST', body: JSON.stringify({ collection_id: 1, name: '子项', link: 'https://t.me/a' })
+        });
+        assert.strictEqual(created.status, 200);
+        assert.ok(deps.getCollection('collection').docs[0].updated_at > NOW - 5000);
+
+        const subId = created.body.id;
+        const updated = await domainReq(b, auth, '/api/collections/sub/update', {
+            method: 'POST', body: JSON.stringify({ id: subId, patch: { name: '子项改名' } })
+        });
+        assert.strictEqual(updated.status, 200);
+        assert.strictEqual(updated.body.item.name, '子项改名');
+        assert.strictEqual((await domainReq(b, auth, '/api/collections/sub/update', { method: 'POST', body: JSON.stringify({ id: subId, patch: {} }) })).status, 400);
+
+        const del = await domainReq(b, auth, '/api/collections/sub/delete', { method: 'POST', body: JSON.stringify({ id: subId, confirm: true }) });
+        assert.strictEqual(del.status, 200);
+        assert.deepStrictEqual(deps.getCollection('sub_collection').docs, []);
+    });
+});
+
+// ---------------- 标签库：增删 / 置顶 / 拖拽排序 ----------------
+
+test('标签接口：新建（大写去重）/ 置顶（上限 40）/ 排序 / 删除（同步 message）', async () => {
+    const deps = makeMemoryDeps({
+        tags: [
+            { _id: 't1', name: 'AAA', pin: 1, count: 3 },
+            { _id: 't2', name: 'BBB', pin: 0, count: 1 },
+            { _id: 't3', name: 'CCC', pin: 0, count: 0 }
+        ],
+        message: [
+            { _id: 's1', file_unique_id: 'F1', text: 'x', tags: ['CCC'] },
+            { _id: 's2', file_unique_id: 'F2', text: 'y', tags: ['AAA', 'CCC'] }
+        ]
+    });
+    await withDomain(deps, async (b, auth) => {
+        expect: {
+            assert.strictEqual((await domainReq(b, auth, '/api/tags/create', { method: 'POST', body: JSON.stringify({}) })).status, 400);
+            assert.strictEqual((await domainReq(b, auth, '/api/tags/create', { method: 'POST', body: JSON.stringify({ name: 'x'.repeat(21) }) })).status, 400);
+        }
+        const created = await domainReq(b, auth, '/api/tags/create', { method: 'POST', body: JSON.stringify({ name: ' new tag ' }) });
+        assert.strictEqual(created.status, 200);
+        assert.strictEqual(created.body.name, 'NEW TAG', '标签名统一大写');
+        assert.strictEqual((await domainReq(b, auth, '/api/tags/create', { method: 'POST', body: JSON.stringify({ name: 'aaa' }) })).status, 409, '重名返回 409');
+
+        const capped = await domainReq(b, auth, '/api/tags/pin', { method: 'POST', body: JSON.stringify({ name: 'BBB', pin: 41 }) });
+        assert.strictEqual(capped.body.pin, 40, '置顶位置上限 40');
+        const unpin = await domainReq(b, auth, '/api/tags/pin', { method: 'POST', body: JSON.stringify({ name: 'AAA', pin: 0 }) });
+        assert.strictEqual(unpin.body.pin, 0);
+        assert.strictEqual((await domainReq(b, auth, '/api/tags/pin', { method: 'POST', body: JSON.stringify({ name: 'NOPE', pin: 1 }) })).status, 404);
+
+        const order = ['CCC', 'AAA', 'BBB'];
+        const reordered = await domainReq(b, auth, '/api/tags/reorder', { method: 'POST', body: JSON.stringify({ names: order }) });
+        assert.strictEqual(reordered.status, 200);
+        assert.strictEqual(reordered.body.updated, 3);
+        const tags = deps.getCollection('tags').docs;
+        assert.strictEqual(tags.find(t => t.name === 'CCC').pin, 1, '拖拽后的顺序 = 置顶 1..N');
+        assert.strictEqual(tags.find(t => t.name === 'AAA').pin, 2);
+        assert.strictEqual(tags.find(t => t.name === 'BBB').pin, 3);
+        assert.strictEqual((await domainReq(b, auth, '/api/tags/reorder', { method: 'POST', body: JSON.stringify({ names: [] }) })).status, 400);
+
+        assert.strictEqual((await domainReq(b, auth, '/api/tags/delete', { method: 'POST', body: JSON.stringify({ name: 'CCC' }) })).status, 400, '删除需二次确认');
+        const del = await domainReq(b, auth, '/api/tags/delete', { method: 'POST', body: JSON.stringify({ name: 'CCC', confirm: true }) });
+        assert.strictEqual(del.status, 200);
+        assert.strictEqual(del.body.synced, 2, '同步清理了 2 条消息');
+        assert.ok(!deps.getCollection('tags').docs.some(t => t.name === 'CCC'));
+        assert.ok(!deps.getCollection('message').docs.some(m => (m.tags || []).includes('CCC')));
+        assert.strictEqual((await domainReq(b, auth, '/api/tags/delete', { method: 'POST', body: JSON.stringify({ name: 'CCC', confirm: true }) })).status, 404);
+    });
+});
+
+test('标签接口：改名（同步 message）/ 校验重名与不存在', async () => {
+    const deps = makeMemoryDeps({
+        tags: [
+            { _id: 't1', name: 'JK', pin: 1, count: 3 },
+            { _id: 't2', name: 'CAT', pin: 0, count: 1 }
+        ],
+        message: [
+            { _id: 's1', file_unique_id: 'F1', text: 'x', tags: ['JK'] },
+            { _id: 's2', file_unique_id: 'F2', text: 'y', tags: ['JK', 'CAT'] },
+            { _id: 's3', file_unique_id: 'F3', text: 'z', tags: [] }
+        ]
+    });
+    await withDomain(deps, async (b, auth) => {
+        assert.strictEqual((await domainReq(b, auth, '/api/tags/rename', { method: 'POST', body: JSON.stringify({ name: 'JK' }) })).status, 400, '缺新名字');
+        assert.strictEqual((await domainReq(b, auth, '/api/tags/rename', { method: 'POST', body: JSON.stringify({ to: 'X' }) })).status, 400, '缺原名字');
+        assert.strictEqual((await domainReq(b, auth, '/api/tags/rename', { method: 'POST', body: JSON.stringify({ name: 'NOPE', to: 'X' }) })).status, 404, '原标签不存在');
+        assert.strictEqual((await domainReq(b, auth, '/api/tags/rename', { method: 'POST', body: JSON.stringify({ name: 'JK', to: 'cat' }) })).status, 409, '新名字与已有标签重名');
+        assert.strictEqual((await domainReq(b, auth, '/api/tags/rename', { method: 'POST', body: JSON.stringify({ name: 'JK', to: '  ' }) })).status, 400, '新名字空');
+
+        const r = await domainReq(b, auth, '/api/tags/rename', { method: 'POST', body: JSON.stringify({ name: 'jk', to: ' jk2 ' }) });
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(r.body.from, 'JK');
+        assert.strictEqual(r.body.name, 'JK2', '自动大写 + 去空白');
+        assert.strictEqual(r.body.synced, 2, '同步修改了 2 条消息');
+        assert.ok(deps.getCollection('tags').docs.some(t => t.name === 'JK2'));
+        assert.ok(!deps.getCollection('tags').docs.some(t => t.name === 'JK'));
+        assert.deepStrictEqual(deps.getCollection('message').docs.find(m => m.file_unique_id === 'F1').tags, ['JK2']);
+        assert.deepStrictEqual(deps.getCollection('message').docs.find(m => m.file_unique_id === 'F2').tags, ['JK2', 'CAT']);
+        assert.deepStrictEqual(deps.getCollection('message').docs.find(m => m.file_unique_id === 'F3').tags, [], '没打该标签的消息不受影响');
+
+        // 改名到相同的名字：200 且不报错（幂等）
+        const same = await domainReq(b, auth, '/api/tags/rename', { method: 'POST', body: JSON.stringify({ name: 'JK2', to: 'jk2' }) });
+        assert.strictEqual(same.status, 200);
+        assert.strictEqual(same.body.synced, 2);
+    });
+});
+
+test('历史日志编号都能显示可读名称（type=23 不再出现 legacy_type_23）', async () => {
+    const deps = makeMemoryDeps({
+        log: [
+            { _id: 'l23', type: 23, time: NOW - 3000, userId: 1 },
+            { _id: 'lneg', type: -1, time: NOW - 2000, userId: 2 },
+            { _id: 'l1', type: 1, time: NOW - 1000, userId: 3 }
+        ]
+    });
+    await withDomain(deps, async (b, auth) => {
+        const list = await domainReq(b, auth, '/api/oplogs');
+        const byType = (t) => list.body.items.find(i => i.type === t);
+        assert.strictEqual(byType(23).action, 'media_edit_text');
+        assert.strictEqual(byType(23).actionLabel, '修改文本');
+        assert.strictEqual(byType(-1).actionLabel, '未知操作');
+        assert.strictEqual(byType(1).actionLabel, '媒体收录');
+        assert.ok(!list.body.items.some(i => String(i.actionLabel || '').startsWith('legacy_type_')), '不应再出现 legacy_type_* 占位名');
+
+        const stats = await domainReq(b, auth, '/api/stats?period=month');
+        const labels = stats.body.byAction.map(a => a.label);
+        assert.ok(labels.includes('修改文本'), '报表动作明细里显示可读名称');
+        assert.ok(!labels.some(l => String(l).startsWith('legacy_type_')), '报表里不再出现占位名');
+    });
+});
+
+// ---------------- 数据库存储统计 ----------------
+
+test('GET /api/db-stats：无法读取时优雅降级（不抛 500）', async () => {
+    const deps = makeMemoryDeps({});
+    await withDomain(deps, async (b, auth) => {
+        const r = await domainReq(b, auth, '/api/db-stats');
+        assert.strictEqual(r.status, 200, '统计失败也要返回 200，让前端能提示降级');
+        assert.strictEqual(r.body.ok, false);
+        assert.strictEqual(r.body.available, false);
+        assert.ok(typeof r.body.reason === 'string' && r.body.reason.length > 0);
+        assert.deepStrictEqual(r.body.collections, []);
     });
 });
 

@@ -7,8 +7,40 @@ const {
     getAllTransports,
     upsertTransport,
     deleteTransport,
+    updateTransportStatus,
     extractChatInfo
 } = require('../../db/transport');
+const {
+    checkTransportLink,
+    checkAllTransports,
+    formatDeadReport
+} = require('../../utils/linkHealth');
+const { logOperation } = require('../../utils/opLog');
+
+const STALE_CHECK_MS = 6 * 60 * 60 * 1000; // 距上次检查超过 6 小时视为过期，进入列表时自动补查
+const STALE_CHECK_LIMIT = 8;               // 单次进入最多补查条数（避免阻塞/触发限流）
+
+/** 活性徽标：✅ 有效 / ❌ 失效 / ❔ 未检查 */
+function healthIcon(item) {
+    if (item && item.alive === true) return '✅';
+    if (item && item.alive === false) return '❌';
+    return '❔';
+}
+
+function formatCheckTime(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    const p = n => String(n).padStart(2, '0');
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 详情页的活性描述行（HTML 安全） */
+function healthLine(item) {
+    const when = item.last_check_at ? `（${formatCheckTime(item.last_check_at)} 检查）` : '';
+    if (item.alive === true) return `活性：✅ 链接有效${when}`;
+    if (item.alive === false) return `活性：❌ 已失效${when}\n原因：${escapeHTML(item.last_check_error || '不可访问')}`;
+    return '活性：❔ 尚未检查（点下方按钮立即检查）';
+}
 
 async function sendWithBackButton(userId, text, replyToMessageId = null, backData = 'transport:back') {
     const keyboard = { inline_keyboard: [[{ text: '🔙 返回', callback_data: backData }]] };
@@ -20,7 +52,13 @@ async function sendWithBackButton(userId, text, replyToMessageId = null, backDat
 }
 
 function buildMainKeyboard() {
-    return { inline_keyboard: [[{ text: '🔄 更新', callback_data: 'transport:update' }], [{ text: '📋 管理', callback_data: 'transport:manage' }]] };
+    return {
+        inline_keyboard: [
+            [{ text: '🔍 检查链接活性', callback_data: 'transport:check' }],
+            [{ text: '🔄 更新', callback_data: 'transport:update' }],
+            [{ text: '📋 管理', callback_data: 'transport:manage' }]
+        ]
+    };
 }
 
 function buildManageKeyboard(transports) {
@@ -38,9 +76,11 @@ function buildManageKeyboard(transports) {
 }
 
 function buildItemEditInterface(item, index) {
-    const text = `📌 项目 ${index}\n名称：${escapeHTML(item.chat_name)}\nID：<code>${item.chat_id}</code>\n链接：<a href="${item.url}">${item.url}</a>\n更新次数：${item.num || 0}`;
+    const link = item.url ? `<a href="${item.url}">${item.url}</a>` : '（无）';
+    const text = `📌 项目 ${index}\n名称：${escapeHTML(item.chat_name)}\nID：<code>${item.chat_id}</code>\n链接：${link}\n更新次数：${item.num || 0}\n${healthLine(item)}`;
     const keyboard = {
         inline_keyboard: [
+            [{ text: '🔍 检查该链接活性', callback_data: `transport:check_item:${index}` }],
             [{ text: '✏️ 编辑名字', callback_data: `transport:edit_name:${index}` }],
             [{ text: '🆔 编辑ID', callback_data: `transport:edit_id:${index}` }],
             [{ text: '🗑️ 删除', callback_data: `transport:delete:${index}` }],
@@ -50,32 +90,86 @@ function buildItemEditInterface(item, index) {
     return { text, keyboard };
 }
 
-async function showTransportList(userId, editMessageId = null, replyToMessageId = null) {
-    const transports = await getAllTransports();
-    let text = '📊 下面是搬运列表\n';
-    if (transports.length === 0) text += '暂无记录';
-    else {
-        for (let i = 0; i < transports.length; i++) {
-            const item = transports[i];
-            const number = (i + 1).toString().padStart(2, '0');
-            text += `<a href="${item.url}">${number} ${escapeHTML(item.chat_name)}</a>\n`;
-        }
+/** 列表头部统计行：✅ 有效 / ❌ 失效 / ❔ 未检查 */
+function healthSummary(transports) {
+    const alive = transports.filter(t => t.alive === true).length;
+    const dead = transports.filter(t => t.alive === false).length;
+    const unchecked = transports.length - alive - dead;
+    return `共 ${transports.length} 条：✅ 有效 ${alive} ／ ❌ 失效 ${dead} ／ ❔ 未检查 ${unchecked}`;
+}
+
+/** 列表文本（含活性徽标与失效提示） */
+function buildListText(transports) {
+    if (transports.length === 0) return '📊 下面是搬运列表\n暂无记录';
+    const lines = transports.map((item, i) => {
+        const number = (i + 1).toString().padStart(2, '0');
+        const link = item.url ? `<a href="${item.url}">${number} ${escapeHTML(item.chat_name)}</a>` : `${number} ${escapeHTML(item.chat_name)}`;
+        return `${healthIcon(item)} ${link}`;
+    });
+    let text = `📊 下面是搬运列表\n${lines.join('\n')}\n\n${healthSummary(transports)}`;
+    const dead = transports.filter(t => t.alive === false);
+    if (dead.length) {
+        text += `\n\n⚠️ 失效链接（编辑或删除）：\n${dead.slice(0, 5).map(d =>
+            `• ${escapeHTML(d.chat_name)}：${escapeHTML(d.last_check_error || '不可访问')}`).join('\n')}`;
+        if (dead.length > 5) text += `\n…另有 ${dead.length - 5} 条`;
     }
+    return text;
+}
+
+/**
+ * 进入列表时自动补查（不阻塞渲染）：挑出过期/从未检查的记录，最多 STALE_CHECK_LIMIT 条
+ * 检查完若列表消息仍在，刷新列表；发现失效链接则私聊提醒
+ */
+async function autoCheckStale(userId, messageId) {
+    try {
+        const transports = await getAllTransports();
+        const stale = transports
+            .filter(t => !t.last_check_at || Date.now() - t.last_check_at > STALE_CHECK_MS)
+            .slice(0, STALE_CHECK_LIMIT);
+        if (!stale.length) return;
+        const summary = await checkAllTransports({ records: stale, force: true, concurrency: 4 });
+        if (summary.newlyDead.length) {
+            await bot.sendMessage(userId, formatDeadReport(summary.newlyDead), { disable_web_page_preview: true }).catch(() => { });
+        }
+        const state = getRawUserState(userId);
+        // 只有当前仍停在列表页时才回写刷新，避免覆盖"管理 / 明细 / 检查结果"界面
+        const stillListing = state && state.mode === 'transport' && state.step === 'main'
+            && (!state.mainMsgId || state.mainMsgId === messageId);
+        if (messageId && stillListing) {
+            await showTransportList(userId, messageId, null, { skipAutoCheck: true }).catch(() => { });
+        }
+    } catch (err) {
+        logger.warn(`自动检查收录链接活性失败: ${err.message}`);
+    }
+}
+
+async function showTransportList(userId, editMessageId = null, replyToMessageId = null, opts = {}) {
+    const transports = await getAllTransports();
+    const text = buildListText(transports);
     const keyboard = buildMainKeyboard();
     const options = { parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: true };
+    let targetMessageId = editMessageId;
     if (editMessageId) {
         try {
             await bot.editMessageText(text, { chat_id: userId, message_id: editMessageId, ...options });
         } catch (err) {
-            if (err.response?.body?.description === 'Bad Request: message is not modified') return;
+            if (err.response?.body?.description === 'Bad Request: message is not modified') {
+                if (!opts.skipAutoCheck) autoCheckStale(userId, editMessageId).catch(() => { });
+                return null;
+            }
             logger.error(`编辑主界面失败: ${err.message}`);
             const sent = await bot.sendMessage(userId, text, { reply_to_message_id: replyToMessageId, ...options });
+            targetMessageId = sent && sent.message_id;
+            if (!opts.skipAutoCheck) autoCheckStale(userId, targetMessageId).catch(() => { });
             return sent;
         }
+        if (!opts.skipAutoCheck) autoCheckStale(userId, editMessageId).catch(() => { });
         return null;
-    } else {
-        return await bot.sendMessage(userId, text, { reply_to_message_id: replyToMessageId, ...options });
     }
+    const sent = await bot.sendMessage(userId, text, { reply_to_message_id: replyToMessageId, ...options });
+    targetMessageId = sent && sent.message_id;
+    if (!opts.skipAutoCheck) autoCheckStale(userId, targetMessageId).catch(() => { });
+    return sent;
 }
 
 async function handleUpdate(userId, msgId) {
@@ -100,6 +194,31 @@ async function handleAdd(userId, msgId) {
     });
 }
 
+/** 写回并返回活性结论（新增/改链接/单条检查共用） */
+async function checkAndSave(item) {
+    try {
+        const result = await checkTransportLink(item);
+        await updateTransportStatus(item.chat_id, {
+            status: result.status,
+            error: result.error,
+            chatName: result.chat_name,
+            previousAlive: item.alive
+        });
+        return result;
+    } catch (err) {
+        logger.warn(`检查链接活性失败 chat_id=${item.chat_id}: ${err.message}`);
+        return { status: 'unknown', error: err.message, chat_name: null };
+    }
+}
+
+/** 活性结论 → 一行提示 */
+function healthSuffix(result) {
+    if (!result) return '';
+    if (result.status === 'ok') return '\n活性检查：✅ 链接有效';
+    if (result.status === 'dead') return `\n活性检查：❌ 链接已失效（${result.error || '不可访问'}）`;
+    return `\n活性检查：❔ 暂时无法判定（${result.error || '未知原因'}）`;
+}
+
 async function processUrl(userId, url, state, originalMsg) {
     try {
         const chatInfo = await extractChatInfo(url, bot);
@@ -112,7 +231,17 @@ async function processUrl(userId, url, state, originalMsg) {
                 chat_name: existing.chat_name,
                 url: url
             });
-            await sendWithBackButton(userId, `✅ 频道：${existing.chat_name} 更新成功！`, originalMsg.message_id);
+            // 更新后立即实测一次活性，直接告诉用户这条链接还能不能用
+            const result = await checkAndSave({ chat_id: chatInfo.chat_id, url, alive: existing.alive });
+            logOperation({
+                action: 'transport_save',
+                source: 'private',
+                userId,
+                target: { type: 'chat', id: chatInfo.chat_id },
+                counts: { chats: 1 },
+                detail: { chat_name: existing.chat_name, url, updated: true, via: 'bot', alive: result.status }
+            }).catch(() => { });
+            await sendWithBackButton(userId, `✅ 频道：${existing.chat_name} 更新成功！${healthSuffix(result)}`, originalMsg.message_id);
             await showTransportList(userId, state.mainMsgId);
             setUserState(userId, { ...state, step: 'main', lastActivity: Date.now() });
         } else {
@@ -145,7 +274,16 @@ async function processName(userId, name, state, originalMsg) {
     const finalName = (name === '/skip' || !name) ? pendingChatName : name;
     try {
         await upsertTransport({ chat_id: pendingChatId, chat_name: finalName, url: pendingUrl });
-        await sendWithBackButton(userId, `✅ 已添加：${finalName}`, originalMsg.message_id);
+        const result = await checkAndSave({ chat_id: pendingChatId, url: pendingUrl, alive: null });
+        await sendWithBackButton(userId, `✅ 已添加：${finalName}${healthSuffix(result)}`, originalMsg.message_id);
+        logOperation({
+            action: 'transport_save',
+            source: 'private',
+            userId,
+            target: { type: 'chat', id: pendingChatId },
+            counts: { chats: 1 },
+            detail: { chat_name: finalName, url: pendingUrl, created: true, via: 'bot', alive: result.status }
+        }).catch(() => { });
         await showTransportList(userId, state.mainMsgId);
         setUserState(userId, { ...state, step: 'main', lastActivity: Date.now() });
     } catch (err) {
@@ -163,8 +301,9 @@ async function showManageInterface(userId, msgId, state) {
         for (let i = 0; i < transports.length; i++) {
             const item = transports[i];
             const number = (i + 1).toString().padStart(2, '0');
-            text += `<a href="${item.url}">${number} ${escapeHTML(item.chat_name)}</a>\n`;
+            text += `${healthIcon(item)} <a href="${item.url}">${number} ${escapeHTML(item.chat_name)}</a>\n`;
         }
+        text += `\n${healthSummary(transports)}`;
     }
     const keyboard = buildManageKeyboard(transports);
     await bot.editMessageText(text, {
@@ -174,13 +313,10 @@ async function showManageInterface(userId, msgId, state) {
     setUserState(userId, { ...state, step: 'manage', mainMsgId: state.mainMsgId, lastActivity: Date.now() });
 }
 
-async function handleItemSelect(userId, msgId, index, state, query) {
-    await bot.answerCallbackQuery(query.id, { text: '加载中...' });
+/** 渲染单个项目的编辑界面（不加 answerCallbackQuery，便于检查后原地刷新） */
+async function showItemInterface(userId, msgId, index, state) {
     const transports = await getAllTransports();
-    if (index < 1 || index > transports.length) {
-        await bot.answerCallbackQuery(query.id, { text: '无效序号' });
-        return;
-    }
+    if (index < 1 || index > transports.length) return false;
     const item = transports[index - 1];
     const { text, keyboard } = buildItemEditInterface(item, index);
     await bot.editMessageText(text, {
@@ -188,6 +324,59 @@ async function handleItemSelect(userId, msgId, index, state, query) {
         reply_markup: keyboard, disable_web_page_preview: true
     });
     setUserState(userId, { ...state, step: 'editing_item', editingIndex: index, editingItem: item, mainMsgId: state.mainMsgId, lastActivity: Date.now() });
+    return true;
+}
+
+async function handleItemSelect(userId, msgId, index, state, query) {
+    await bot.answerCallbackQuery(query.id, { text: '加载中...' });
+    if (!(await showItemInterface(userId, msgId, index, state))) {
+        await bot.answerCallbackQuery(query.id, { text: '无效序号' });
+    }
+}
+
+/** 检查单个项目：实测 → 写回 → 原地刷新详情 */
+async function handleCheckItem(userId, msgId, index, state, query) {
+    const transports = await getAllTransports();
+    if (index < 1 || index > transports.length) {
+        await bot.answerCallbackQuery(query.id, { text: '无效序号' });
+        return;
+    }
+    const item = transports[index - 1];
+    await bot.answerCallbackQuery(query.id, { text: '正在检查链接…' });
+    const result = await checkAndSave(item);
+    const toast = result.status === 'ok' ? '✅ 链接有效'
+        : result.status === 'dead' ? '❌ 链接已失效' : '❔ 暂时无法判定';
+    await bot.answerCallbackQuery(query.id, { text: toast }).catch(() => { });
+    await showItemInterface(userId, msgId, index, state);
+}
+
+/** 检查全部链接：实测 → 汇总 → 失效提醒 */
+async function handleCheckAll(userId, msgId, state, query) {
+    await bot.answerCallbackQuery(query.id, { text: '正在检查全部链接…' });
+    await bot.editMessageText('🔍 正在检查全部收录链接的活性，请稍候…', {
+        chat_id: userId, message_id: msgId, disable_web_page_preview: true
+    }).catch(() => { });
+    const summary = await checkAllTransports({ force: true, concurrency: 4 });
+    let text = `🔍 活性检查完成（共 ${summary.total} 条，本次检查 ${summary.checked} 条）\n✅ 有效 ${summary.ok} ／ ❌ 失效 ${summary.dead.length} ／ ❔ 未知 ${summary.unknown.length}`;
+    const report = formatDeadReport(summary.dead);
+    if (report) text += `\n\n${report}`;
+    if (summary.recovered.length) text += `\n\n♻️ ${summary.recovered.length} 条链接已恢复可访问`;
+    logOperation({
+        action: 'transport_check',
+        source: 'private',
+        userId,
+        target: { type: 'collection', id: 'transport' },
+        counts: { chats: summary.checked },
+        detail: { total: summary.total, ok: summary.ok, dead: summary.dead.length, unknown: summary.unknown.length, via: 'bot' }
+    }).catch(() => { });
+    await bot.editMessageText(text, {
+        chat_id: userId, message_id: msgId,
+        reply_markup: { inline_keyboard: [[{ text: '🔙 返回列表', callback_data: 'transport:back' }]] },
+        disable_web_page_preview: true
+    }).catch(async () => {
+        await bot.sendMessage(userId, text, { disable_web_page_preview: true }).catch(() => { });
+    });
+    setUserState(userId, { ...state, step: 'check_result', mainMsgId: msgId, lastActivity: Date.now() });
 }
 
 async function handleEditName(userId, msgId, index, state, query) {
@@ -222,6 +411,14 @@ async function handleDelete(userId, msgId, index, state, query) {
     if (index < 1 || index > transports.length) return;
     const item = transports[index - 1];
     await deleteTransport(item.chat_id);
+    logOperation({
+        action: 'transport_delete',
+        source: 'private',
+        userId,
+        target: { type: 'chat', id: item.chat_id },
+        counts: { chats: 1 },
+        detail: { chat_name: item.chat_name, url: item.url, via: 'bot' }
+    }).catch(() => { });
     await showManageInterface(userId, msgId, state);
 }
 
@@ -251,6 +448,15 @@ async function handleCallback(query) {
         await bot.answerCallbackQuery(query.id);
         await showTransportList(userId, messageId);
         setUserState(userId, { mode: 'transport', step: 'main', mainMsgId: messageId, lastActivity: Date.now() });
+        return true;
+    }
+    if (data === 'transport:check') {
+        await handleCheckAll(userId, messageId, state, query);
+        return true;
+    }
+    if (data.startsWith('transport:check_item:')) {
+        const index = parseInt(data.split(':')[2]);
+        await handleCheckItem(userId, messageId, index, state, query);
         return true;
     }
     if (data.startsWith('transport:item:')) {
@@ -322,7 +528,9 @@ async function handleTransportMessage(msg, state) {
         const item = transports[editingIndex - 1];
         await deleteTransport(item.chat_id);
         await upsertTransport({ chat_id: newId, chat_name: item.chat_name, url: item.url });
-        await sendWithBackButton(userId, `✅ 已更新 chat_id 为：${newId}`, msg.message_id);
+        // 换了 chat_id 等于换了目标，立即实测一次活性
+        const result = await checkAndSave({ chat_id: newId, url: item.url, alive: null });
+        await sendWithBackButton(userId, `✅ 已更新 chat_id 为：${newId}${healthSuffix(result)}`, msg.message_id);
         try {
             await showTransportList(userId, mainMsgId);
         } catch (err) {

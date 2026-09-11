@@ -33,6 +33,46 @@ function safeHandler(fn) {
 // Web UI 服务引用（node index.js webui / node index.js test 时启用）
 let webServer = null;
 
+// 搬运收录链接活性巡检：启动 1 分钟后首查，之后每 6 小时一次；新失效的链接提醒管理员
+const TRANSPORT_CHECK_INTERVAL = 6 * 60 * 60 * 1000;
+const TRANSPORT_CHECK_FIRST_DELAY = 60 * 1000;
+
+function startTransportHealthCheck() {
+    const run = async () => {
+        try {
+            const { checkAllTransports, formatDeadReport, notifyAdmins } = require('./utils/linkHealth');
+            const summary = await checkAllTransports({ force: true, concurrency: 3 });
+            if (summary.newlyDead.length) {
+                const sent = await notifyAdmins(formatDeadReport(summary.newlyDead));
+                logger.warn(`搬运收录巡检：新失效 ${summary.newlyDead.length} 条，已提醒 ${sent} 位管理员`);
+                logOperation({
+                    action: 'transport_check',
+                    source: 'system',
+                    result: 'fail',
+                    target: { type: 'collection', id: 'transport' },
+                    counts: { chats: summary.newlyDead.length },
+                    detail: {
+                        total: summary.total, ok: summary.ok, dead: summary.dead.length,
+                        unknown: summary.unknown.length, newlyDead: summary.newlyDead.map(d => d.chat_name || d.chat_id),
+                        notified: sent
+                    }
+                }).catch(() => { });
+            } else {
+                logger.info(`搬运收录巡检：共 ${summary.total} 条，有效 ${summary.ok}，失效 ${summary.dead.length}，未知 ${summary.unknown.length}`);
+            }
+            if (summary.recovered.length) logger.success(`搬运收录巡检：${summary.recovered.length} 条链接已恢复可访问`);
+        } catch (err) {
+            logger.error(`搬运收录巡检失败: ${err.message}`);
+        }
+    };
+    const first = setTimeout(() => {
+        run();
+        const timer = setInterval(run, TRANSPORT_CHECK_INTERVAL);
+        if (typeof timer.unref === 'function') timer.unref();
+    }, TRANSPORT_CHECK_FIRST_DELAY);
+    if (typeof first.unref === 'function') first.unref();
+}
+
 // test 模式（node index test）：在 webui 基础上，日志额外复制一份到 test-log（启动时重置）
 const TEST_MODE = process.argv.includes('test');
 
@@ -233,6 +273,9 @@ async function start() {
         });
 
         logger.success('系统就绪，Telegram Bot 已启动并等待消息...');
+
+        // 搬运收录链接活性巡检（失效提醒管理员）
+        startTransportHealthCheck();
 
         // 可选：启动 Web UI 管理面板（node index.js webui / node index.js test）
         if (process.argv.includes('webui') || TEST_MODE) {

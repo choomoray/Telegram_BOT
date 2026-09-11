@@ -58,3 +58,18 @@ test('style.css 定义了深色与浅色两套主题变量', () => {
   assert.ok(css.includes(':root'), '缺少 :root 设计令牌');
   assert.ok(css.includes('html[data-theme="light"]'), '缺少浅色主题变量');
 });
+
+test('style.css：方格图必须声明 7 行，否则 grid-auto-flow: column 会排成一行', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  const block = (css.match(/\.cg-grid\s*\{[^}]*\}/) || [''])[0];
+  assert.ok(block, '缺少 .cg-grid 规则');
+  assert.match(block, /grid-template-rows:\s*repeat\(7,/, '.cg-grid 必须显式 7 行（周一…周日）');
+  assert.match(block, /grid-auto-flow:\s*column/, '.cg-grid 按列填充（每列一周）');
+  assert.match(block, /grid-auto-columns:\s*minmax\(9px,\s*1fr\)/, '列宽自适应撑满卡片（窄屏兜底 9px）');
+});
+
+test('style.css：选中的标签区必须重新打开 pointer-events（否则加减标签点不动）', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  assert.match(css, /\.tag-edit\.is-locked\s*\{[^}]*pointer-events:\s*none/, '未选中时禁用鼠标事件');
+  assert.match(css, /\.tag-edit\.is-active\s*\{[^}]*pointer-events:\s*auto/, '选中后必须恢复鼠标事件');
+});

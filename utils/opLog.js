@@ -82,6 +82,9 @@ const ACTIONS = {
 
     // ---------- 媒体其他操作 ----------
     media_password: { type: 2, category: 'media', label: '媒体密码设置' },
+    // 历史编号 23（LOG_TYPES.EDIT_TEXT）：旧数据只有 type，没有动作键，这里补一个正式名字，
+    // 避免统计报表出现 legacy_type_23 这类占位名
+    media_edit_text: { type: 23, category: 'media', label: '修改文本' },
 
     // ---------- 标签 ----------
     tag_add: { type: 26, category: 'tag', label: '标签添加' },
@@ -115,13 +118,39 @@ const ACTIONS = {
     article_delete: { type: 34, category: 'content', label: '文章删除' },
     collection_save: { type: 35, category: 'content', label: '合集保存' },
     collection_delete: { type: 35, category: 'content', label: '合集删除' },
-    transport_run: { type: 36, category: 'transport', label: '消息搬运' }
+    transport_run: { type: 36, category: 'transport', label: '消息搬运' },
+    transport_save: { type: 36, category: 'transport', label: '搬运收录保存' },
+    transport_delete: { type: 36, category: 'transport', label: '搬运收录删除' },
+    transport_check: { type: 36, category: 'transport', label: '收录链接活性检查' }
 };
 
 /** type -> action（反查，用于兼容旧 insertLog 调用与历史数据标签） */
 const ACTION_BY_TYPE = {};
 for (const [action, meta] of Object.entries(ACTIONS)) {
     if (ACTION_BY_TYPE[meta.type] === undefined) ACTION_BY_TYPE[meta.type] = action;
+}
+
+/**
+ * 历史日志编号 → 展示用中文名（覆盖 db/log.js 的 LOG_TYPES 全集）
+ * 仅用于「只有 type、没有 action/actionLabel」的旧数据兜底，
+ * 保证报表里任何历史类型都有可读名字，而不是 legacy_type_23 / legacy_type_undefined。
+ */
+const LEGACY_TYPE_LABELS = {
+    0: '机器人启动', 1: '媒体收录', 2: '媒体编辑', 3: '媒体删除',
+    11: '随机视频', 12: '随机图片', 13: '消息回复', 14: '媒体合并',
+    15: '媒体遮罩', 16: '帮助', 17: '查找', 18: '清理', 19: '删除模式',
+    20: '标记', 21: '媒体去遮罩', 22: '关键字查询', 23: '修改文本',
+    24: '设置更新', 25: '发送', 26: '标签操作', 27: '控制台登录',
+    28: '控制台数据操作', 29: '用户管理', 30: '封禁/解封', 31: '白名单',
+    32: '入群/离群', 33: '群组频道管理', 34: '文章', 35: '合集', 36: '搬运',
+    '-1': '未知操作'
+};
+
+/** 历史编号 → 展示名（未登记的编号给一个带编号的可读名） */
+function legacyTypeLabel(type) {
+    const n = Number(type);
+    if (!Number.isFinite(n)) return '未知操作';
+    return LEGACY_TYPE_LABELS[String(n)] || `历史类型 ${n}`;
 }
 
 /** 只保留有限数值字段，避免把任意对象写进统计字段 */
@@ -257,5 +286,7 @@ module.exports = {
     insertLog,
     getCatalog,
     actionLabel,
-    categoryLabel
+    categoryLabel,
+    legacyTypeLabel,
+    LEGACY_TYPE_LABELS
 };

@@ -10,7 +10,15 @@
   const THEME_KEY = 'webui_theme';
   const API = '/api';
   const ALL_KEY = '__all__';                        // 原始数据：跨集合浏览
-  const SEARCH_VIEWS = ['media', 'users', 'tags'];  // 支持顶部搜索的视图
+  const SEARCH_VIEWS = ['media', 'users', 'tags', 'transport', 'articles', 'collections']; // 支持顶部搜索的视图
+  const SEARCH_PLACEHOLDER = {
+    media: '搜索描述 / 标签，回车查询',
+    users: '搜索用户名 / ID，回车查询',
+    tags: '过滤标签名',
+    transport: '搜索名称 / 链接 / chat_id',
+    articles: '搜索文章标题 / 链接',
+    collections: '搜索合集名称'
+  };
   const THEME_MODES = ['auto', 'light', 'dark'];
 
   // 与 db/log.js 的 LOG_TYPES 对应（历史数据没有 action 时的兜底显示）
@@ -43,10 +51,18 @@
     clean: { previews: null, items: [] },
     tags: [],
     chats: [],
-    stats: { period: 'month', year: new Date().getFullYear(), month: new Date().getMonth() + 1, data: null },
+    transport: { q: '', status: 'all', page: 1, pageSize: 20, total: 0, totalPages: 1, items: [], counts: { all: 0, alive: 0, dead: 0, unchecked: 0 } },
+    articles: { q: '', page: 1, pageSize: 20, total: 0, totalPages: 1, items: [] },
+    collections: [],                       // 「原始数据」/ AI 面板用的集合名列表
+    collectionsView: { q: '', type: 'all', items: [], counts: { all: 0, collection: 0, misc: 0 } }, // 「合集 / 杂集」视图数据
+    dbstats: { data: null },
+    stats: { year: new Date().getFullYear(), data: null },
     oplogs: { page: 1, pageSize: 30, total: 0, totalPages: 1, items: [], category: 'all', result: 'all', q: '' },
     selectedRaw: null,
     detail: null,
+    detailSelectedFile: null,          // 媒体详情里当前选中的媒体（决定哪条标签可改）
+    detailTag: null,                   // 标签详情里当前查看的标签（异步加载媒体列表时防串台）
+    tagsMode: 'normal',                // 标签视图模式：normal | delete | sort
     logPaused: false, logFilter: 'all', logBuffer: [], loading: false
   };
 
@@ -144,6 +160,29 @@
     return `${Math.floor(mo / 12)} 年前`;
   }
   function fmtNum(n) { return (n === null || n === undefined) ? '—' : Number(n).toLocaleString('zh-CN'); }
+  /** 字节数 → 人类可读（B / KB / MB / GB）；null 返回 '—' */
+  function fmtBytes(n) {
+    if (n === null || n === undefined || !Number.isFinite(Number(n))) return '—';
+    const v = Number(n);
+    if (v < 1024) return `${v} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let val = v / 1024;
+    let i = 0;
+    while (val >= 1024 && i < units.length - 1) { val /= 1024; i++; }
+    return `${val >= 100 ? val.toFixed(0) : val.toFixed(val >= 10 ? 1 : 2)} ${units[i]}`;
+  }
+
+  /** 与 fmtBytes 相同，但固定保留两位小数（平均文档大小等需要精确读数的列） */
+  function fmtBytesFixed(n, digits = 2) {
+    if (n === null || n === undefined || !Number.isFinite(Number(n))) return '—';
+    const v = Number(n);
+    if (v < 1024) return `${v.toFixed(digits)} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let val = v / 1024;
+    let i = 0;
+    while (val >= 1024 && i < units.length - 1) { val /= 1024; i++; }
+    return `${val.toFixed(digits)} ${units[i]}`;
+  }
   function shortId(id, len = 22) {
     const s = String(id ?? '');
     return s.length > len ? s.slice(0, len) + '…' : s;
@@ -265,6 +304,8 @@
     setBadge('#nav-count-clean', c.cleanable);
     setBadge('#nav-count-tags', c.tags);
     setBadge('#nav-count-users', c.users);
+    // 数据库占用（失败不影响概览；服务端有缓存，不会每次打库）
+    state.dbstats.data = await apiGet('/db-stats').catch(() => state.dbstats.data);
     return data;
   }
 
@@ -290,6 +331,48 @@
     u.total = data.total || 0;
     u.page = data.page || 1;
     u.totalPages = Math.max(1, Math.ceil(u.total / (data.pageSize || u.pageSize)));
+    return data;
+  }
+
+  async function loadTransport() {
+    const t = state.transport;
+    const params = new URLSearchParams({ status: t.status, page: String(t.page), pageSize: String(t.pageSize) });
+    if (t.q) params.set('q', t.q);
+    const data = await apiGet('/transport?' + params.toString());
+    t.items = data.items || [];
+    t.total = data.total || 0;
+    t.page = data.page || 1;
+    t.totalPages = data.totalPages || 1;
+    t.counts = data.counts || t.counts;
+    return data;
+  }
+
+  async function loadArticles() {
+    const a = state.articles;
+    const params = new URLSearchParams({ withSubs: '1', page: String(a.page), pageSize: String(a.pageSize) });
+    if (a.q) params.set('q', a.q);
+    const data = await apiGet('/articles?' + params.toString());
+    a.items = data.items || [];
+    a.total = data.total || 0;
+    a.page = data.page || 1;
+    a.totalPages = data.totalPages || 1;
+    return data;
+  }
+
+  async function loadCollections() {
+    const c = state.collectionsView;
+    const params = new URLSearchParams({ withSubs: '1', type: c.type });
+    if (c.q) params.set('q', c.q);
+    const data = await apiGet('/collections?' + params.toString());
+    c.items = data.items || [];
+    c.counts = data.counts || c.counts;
+    c.subTotal = data.subTotal || 0;
+    return data;
+  }
+
+  async function loadDbStats(force = false) {
+    const data = await apiGet('/db-stats' + (force ? '?force=1' : ''));
+    state.dbstats.data = data;
     return data;
   }
 
@@ -334,8 +417,8 @@
 
   async function loadStats() {
     const s = state.stats;
-    const params = new URLSearchParams({ period: s.period, year: String(s.year) });
-    if (s.period === 'month') params.set('month', String(s.month));
+    // 报表统一按「年」统计：方格图与图表都覆盖整年（年份由顶栏 ◀ ▶ 切换）
+    const params = new URLSearchParams({ period: 'year', year: String(s.year) });
     const [report] = await Promise.all([apiGet('/stats?' + params.toString()), loadOpLogs()]);
     s.data = report;
     return report;
@@ -366,12 +449,26 @@
     </div>`;
   }
 
+  /** 字节类统计卡：值用 fmtBytes 渲染（statCard 会走千分位，不适合字节） */
+  function sizeCard(k, bytes, s, cls = '') {
+    return `<div class="stat ${cls}">
+      <div class="k">${k}</div>
+      <div class="v">${fmtBytes(bytes)}</div>
+      ${s ? `<div class="s">${esc(s)}</div>` : ''}
+    </div>`;
+  }
+
   function renderOverview() {
     const o = state.overview || {};
     const c = o.counts || {};
     const byType = o.mediaByType || {};
     const typeTotal = Object.values(byType).reduce((a, b) => a + b, 0) || 1;
     const typeOrder = ['photo', 'video', 'audio', 'document'];
+
+    const db = state.dbstats.data;
+    const dbCard = (db && db.available && db.totals)
+      ? sizeCard('🗄 数据库占用', db.totals.storageSize, `${fmtNum(db.totals.objects)} 个文档 · 索引 ${fmtBytes(db.totals.indexSize)}`)
+      : statCard('🗄 数据库占用', null, db && db.reason ? '当前套餐不可读取大小' : '统计中…', 'is-warn');
 
     const stats = [
       statCard('🖼 媒体总数', c.media, `共 ${fmtNum(c.groupList)} 个媒体组`),
@@ -380,7 +477,8 @@
       statCard('👥 用户', c.users, `白名单 ${fmtNum(c.whitelist)} · 封禁 ${fmtNum(c.banned)}`),
       statCard('🏷 标签', c.tags, '独立标签库'),
       statCard('📢 群组 / 频道', c.chats, `绑定对 ${fmtNum(c.bound)}`),
-      statCard('📊 操作日志', c.logs, '累计记录')
+      statCard('📊 操作日志', c.logs, '累计记录'),
+      dbCard
     ].join('');
 
     const typeBars = typeOrder.map(t => {
@@ -438,6 +536,10 @@
             <button class="chip" data-action="goto" data-view="clean">🧹 清理空描述组</button>
             <button class="chip" data-action="goto" data-view="tags">🏷 管理标签</button>
             <button class="chip" data-action="goto" data-view="users">👥 用户与封禁</button>
+            <button class="chip" data-action="goto" data-view="transport">🚚 搬运收录</button>
+            <button class="chip" data-action="goto" data-view="articles">📄 文章</button>
+            <button class="chip" data-action="goto" data-view="collections">📚 合集</button>
+            <button class="chip" data-action="goto" data-view="raw">🗄 数据库 / 原始数据</button>
             <button class="chip" data-action="goto" data-view="stats">📈 统计报表</button>
             <button class="chip" data-action="palette">🧠 AI 翻译</button>
           </div>
@@ -447,7 +549,12 @@
 
   /* ============================ 视图：媒体库 ============================ */
 
-  function mediaCard(item) {
+  /**
+   * 媒体组卡片（媒体库 / 标签详情共用同一套方块界面）
+   * @param {Object} item - /api/media 返回的媒体组
+   * @param {string} action - data-action 名（媒体库用 open-media；详情对话框内用 tag-media-open）
+   */
+  function mediaCard(item, action = 'open-media') {
     const p = item.preview;
     const thumb = p && p.thumbable
       ? `<img loading="lazy" decoding="async" src="${thumbUrl(p.file_unique_id)}" alt="">`
@@ -463,7 +570,7 @@
     const tags = (item.tags || []).slice(0, 4).map(t => `<span class="tag-pill">${esc(t)}</span>`).join('');
     const moreTags = (item.tags || []).length > 4 ? `<span class="tag-pill">+${item.tags.length - 4}</span>` : '';
 
-    return `<article class="media-card" data-action="open-media" data-group="${esc(item.group_id)}">
+    return `<article class="media-card" data-action="${esc(action)}" data-group="${esc(item.group_id)}">
       <div class="media-thumb">
         ${thumb}
         <div class="badges">
@@ -580,30 +687,179 @@
 
   function renderTags() {
     const q = state.search.trim().toLowerCase();
-    const tags = state.tags.filter(t => !q || t.name.toLowerCase().includes(q));
+    const mode = state.tagsMode || 'normal';
+    // 排序模式忽略搜索过滤：拖拽顺序必须是完整的标签顺序
+    const tags = mode === 'sort' ? state.tags.slice() : state.tags.filter(t => !q || t.name.toLowerCase().includes(q));
     const maxUse = Math.max(1, ...state.tags.map(t => t.usage || 0));
-    const cards = tags.map(t => `
-      <div class="tag-card" data-action="tag-media" data-tag="${esc(t.name)}"
-           title="点击查看该标签下的所有媒体组">
+    const pinnedCount = state.tags.filter(t => t.pin > 0).length;
+
+    const cards = tags.map(t => {
+      const cls = ['tag-card'];
+      if (mode === 'delete') cls.push('is-deleting');
+      const action = mode === 'delete' ? 'tag-delete' : (mode === 'sort' ? '' : 'tag-card-open');
+      const title = mode === 'sort' ? '按住拖动调整顺序'
+        : (mode === 'delete' ? '点击删除该标签' : '点击查看标签详情 / 置顶状态');
+      return `<div class="${cls.join(' ')}"${action ? ` data-action="${action}"` : ''} data-tag="${esc(t.name)}"
+           ${mode === 'sort' ? 'draggable="true"' : ''} title="${title}">
         <div class="top">
           <span class="name" title="${esc(t.name)}">${esc(t.name)}</span>
-          ${t.pin > 0 ? `<span class="tag accent">置顶 ${t.pin}</span>` : ''}
+          ${mode === 'sort'
+          ? '<span class="drag-hint">☰ 拖动</span>'
+          : (t.pin > 0 ? `<span class="tag accent pin-badge">📍 置顶 ${t.pin}</span>` : '')}
         </div>
         <div class="bar"><i style="width:${Math.round(((t.usage || 0) / maxUse) * 100)}%"></i></div>
         <div class="stat-row">
           <span>使用 <span class="mono">${fmtNum(t.usage)}</span> 次</span>
           <span>计数 <span class="mono">${fmtNum(t.count)}</span></span>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
     $('#view').innerHTML = `
       <div class="toolbar">
-        <span class="dim">独立标签库 <code>tags</code>；标签本身存在每条 <code>message.tags</code> 中，<b>点击标签查看它下面的所有媒体组</b></span>
+        <button class="btn btn-sm" data-action="tag-create">➕ 添加标签</button>
+        <button class="btn btn-sm ${mode === 'delete' ? 'btn-danger' : ''}" data-action="tag-mode" data-mode="delete">🗑️ 删除标签</button>
+        <button class="btn btn-sm ${mode === 'sort' ? 'btn-primary' : ''}" data-action="tag-mode" data-mode="sort">⭐ 置顶排序</button>
+        ${mode === 'sort'
+        ? '<button class="btn btn-primary btn-sm" data-action="tag-sort-save">💾 保存排序</button><button class="btn btn-ghost btn-sm" data-action="tag-sort-cancel">取消</button>'
+        : ''}
         <span class="grow"></span>
-        <span class="dim">共 ${fmtNum(state.tags.length)} 个标签${q ? ` · 过滤出 ${fmtNum(tags.length)} 个` : ''}</span>
+        <span class="dim">共 ${fmtNum(state.tags.length)} 个标签 · 置顶 ${fmtNum(pinnedCount)} 个${q && mode !== 'sort' ? ` · 过滤出 ${fmtNum(tags.length)} 个` : ''}</span>
       </div>
-      ${tags.length ? `<div class="tag-grid">${cards}</div>` : '<div class="empty"><div class="empty-ico">🏷</div><div>没有标签</div></div>'}`;
-    updatePageSub(`共 ${fmtNum(state.tags.length)} 个标签`);
+      ${mode === 'sort' ? '<div class="tag-hint">☰ 按住卡片拖动调整顺序（已忽略搜索过滤），松手后点「💾 保存排序」写入置顶位置：顺序 = 置顶 1..N，最多 40 个</div>' : ''}
+      ${mode === 'delete' ? '<div class="tag-hint">🗑️ 删除模式：点击卡片删除该标签，会同步从所有消息里移除；再点一次「🗑️ 删除标签」退出该模式</div>' : ''}
+      ${mode === 'normal' ? '<div class="tag-hint">💡 点击标签卡片查看详情（顶栏可一键切换置顶）；「⭐ 置顶排序」可拖动排序</div>' : ''}
+      ${tags.length ? `<div class="tag-grid${mode === 'sort' ? ' is-sorting' : ''}">${cards}</div>` : '<div class="empty"><div class="empty-ico">🏷</div><div>没有标签</div></div>'}`;
+    updatePageSub(`共 ${fmtNum(state.tags.length)} 个标签 · 置顶 ${fmtNum(pinnedCount)} 个`);
+  }
+
+  /** 重新拉取标签库并重渲染当前视图 */
+  async function reloadTags() {
+    const d = await apiGet('/tags');
+    state.tags = d.tags || [];
+  }
+
+  /**
+   * 标签详情（复用详情对话框）：
+   * 顶栏显示置顶状态（点击切换），正文直接列出该标签下的媒体组（无需再跳转媒体库）
+   */
+  function openTagDetail(name) {
+    const tag = state.tags.find(t => t.name === name);
+    if (!tag) { toast('标签不存在，请刷新后重试', true); return; }
+    state.detailTag = name;
+    const pinned = tag.pin > 0;
+    const dlg = $('#detail-dialog');
+    $('#detail-title').innerHTML = `🏷 ${esc(tag.name)}`;
+    // 正文一次渲染：顶部信息 + 媒体列表区（列表异步填充同一段 HTML，避免子元素引用失效）
+    $('#detail-body').innerHTML = tagDetailHtml(tag, pinned, '<div class="loading">正在加载媒体…</div>');
+    $('#detail-foot').innerHTML = `
+      <button class="btn btn-primary btn-sm" data-action="tag-detail-media" data-tag="${esc(tag.name)}">🖼 在媒体库中筛选</button>
+      <span class="spacer"></span>
+      <button class="btn btn-soft-danger btn-sm" data-action="tag-detail-delete" data-tag="${esc(tag.name)}">🗑 删除标签</button>
+      <button class="btn btn-ghost btn-sm" data-action="detail-close">关闭</button>`;
+    if (!dlg.open) dlg.showModal();
+    loadTagMediaInto(name);
+  }
+
+  /** 标签详情正文（媒体区内容由异步加载后整体重渲染） */
+  function tagDetailHtml(tag, pinned, mediaSection) {
+    return `
+      <div class="toolbar">
+        <button class="chip ${pinned ? 'is-active' : ''}" data-action="tag-detail-pin" data-tag="${esc(tag.name)}"
+                title="点击${pinned ? '取消置顶' : '置顶该标签'}">${pinned ? `📍 已置顶（位置 ${tag.pin}） · 点击取消` : '⭐ 未置顶 · 点击置顶'}</button>
+        <span class="spacer"></span>
+        <span class="dim">标签库 <code>tags</code></span>
+      </div>
+      <div class="stats">
+        ${statCard('📎 被引用', tag.usage, '含该标签的消息条数')}
+        ${statCard('🔢 使用计数', tag.count, '打标签 +1 / 移除 -1')}
+        ${statCard('📍 置顶位置', pinned ? tag.pin : null, pinned ? '按钮网格位置（每行 4 个）' : '未置顶')}
+      </div>
+      <div class="section" style="margin-top:14px">
+        <h4>该标签下的媒体组</h4>
+        ${mediaSection}
+      </div>
+      <div class="callout" style="margin-top:14px"><span>🏷</span><div>标签名统一大写；删除会同步从所有消息的 <code>tags</code> 中移除。</div></div>`;
+  }
+
+  /** 标签详情里的媒体组列表：与「媒体库」一致的方块卡片，点击直接打开媒体详情 */
+  async function loadTagMediaInto(name, limit = 12) {
+    let section;
+    try {
+      const d = await apiGet(`/media?scope=all&tag=${encodeURIComponent(name)}&page=1&pageSize=${limit}`);
+      const items = d.items || [];
+      section = items.length
+        ? `<div class="dim" style="font-size:11.5px;margin-bottom:10px">共 <b>${fmtNum(d.total)}</b> 个媒体组带该标签，此处显示最近 ${items.length} 个 · 点卡片直接打开媒体详情</div>
+           <div class="media-grid">${items.map(it => mediaCard(it, 'tag-media-open')).join('')}</div>
+           ${d.total > items.length ? `<div class="dim" style="margin-top:10px;font-size:11.5px">还有 ${fmtNum(d.total - items.length)} 个未显示，可点下方「🖼 在媒体库中筛选」查看全部</div>` : ''}`
+        : '<div class="empty">还没有任何媒体组使用该标签</div>';
+    } catch (err) {
+      section = `<div class="empty">❌ ${esc(err.message)}</div>`;
+    }
+    // 期间可能已经切到别的标签 / 打开媒体详情，避免把旧结果写进新内容
+    if (state.detailTag !== name) return;
+    const tag = state.tags.find(t => t.name === name);
+    if (!tag) return;
+    $('#detail-body').innerHTML = tagDetailHtml(tag, tag.pin > 0, section);
+  }
+
+  /** 切换标签置顶：置顶时取下一个空位（1..40），已置顶则取消 */
+  async function toggleTagPin(name) {
+    const tag = state.tags.find(t => t.name === name);
+    if (!tag) return;
+    let pin = 0;
+    if (!(tag.pin > 0)) {
+      const maxPin = Math.max(0, ...state.tags.map(t => t.pin || 0));
+      if (maxPin >= 40) { toast('置顶位置已满（最多 40 个）', true); return; }
+      pin = maxPin + 1;
+    }
+    const r = await apiPost('/tags/pin', { name, pin });
+    toast(pin > 0 ? `📍 「${name}」已置顶到位置 ${pin}` : `已取消「${name}」的置顶`);
+    await reloadTags();
+    if (state.view === 'tags') renderTags();
+    openTagDetail(name);
+  }
+
+  async function createTag() {
+    openForm({
+      title: '添加标签',
+      okText: '创建',
+      fields: [{ key: 'name', label: '标签名', required: true, hint: '最长 20 个字符，自动转大写；重名会被拒绝' }],
+      onSubmit: async (v) => {
+        const name = String(v.name || '').trim();
+        if (!name) { toast('请输入标签名', true); return; }
+        await apiPost('/tags/create', { name });
+        toast(`✅ 标签「${name.toUpperCase()}」已创建`);
+        await reloadTags();
+        if (state.view === 'tags') renderTags();
+      }
+    });
+  }
+
+  async function deleteTag(name) {
+    const tag = state.tags.find(t => t.name === name);
+    const ok = await confirmDialog({
+      title: '删除标签',
+      body: `<div>确定删除标签 <b>${esc(name)}</b> 吗？</div>
+             <div class="dim" style="margin-top:8px">会同步从 ${fmtNum(tag ? tag.usage : 0)} 条消息中移除该标签，且不可恢复。</div>`,
+      okText: '确认删除'
+    });
+    if (!ok) return;
+    const r = await apiPost('/tags/delete', { name, confirm: true });
+    toast(`🗑 标签已删除${r.synced ? `（同步清理 ${r.synced} 条消息）` : ''}`);
+    await reloadTags();
+    if (state.view === 'tags') renderTags();
+  }
+
+  /** 保存拖拽后的置顶顺序 */
+  async function saveTagOrder() {
+    const names = [...$('#view').querySelectorAll('.tag-card')].map(el => el.dataset.tag).filter(Boolean);
+    if (!names.length) { toast('没有可保存的顺序', true); return; }
+    const r = await apiPost('/tags/reorder', { names });
+    toast(`✅ 排序已保存（${fmtNum(r.updated)} 个标签写入置顶位置）`);
+    state.tagsMode = 'normal';
+    await reloadTags();
+    if (state.view === 'tags') renderTags();
   }
 
   /* ============================ 视图：用户 ============================ */
@@ -760,6 +1016,143 @@
     return `<span class="sub ${cls}">${arrow} ${Math.abs(delta)}% 环比上期</span>`;
   }
 
+  /* ---------- 每日操作量：GitHub 贡献方格 ---------- */
+
+  const CG_DAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
+
+  /** UTC 毫秒 → 北京时间 'YYYY-MM-DD' */
+  function cgDayKey(ms) {
+    return new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  }
+
+  /** 格林威治星期（0=周日）→ 以周一为首列的索引 */
+  function cgWeekIndex(dow) {
+    return (dow + 6) % 7;
+  }
+
+  /**
+   * 生成方格日历所需的自然日列表（整年：当年每一天 + 首尾周补齐的空格）
+   * @param {number} year
+   * @returns {Array<string|null>} 7 的整数倍，每 7 个为一列（周一→周日）
+   */
+  function cgBuildDays(year) {
+    const days = [];
+    const start = new Date(Date.UTC(year, 0, 1)).getUTCDay();
+    for (let i = 0; i < cgWeekIndex(start); i++) days.push(null);
+    for (let m = 1; m <= 12; m++) {
+      const total = new Date(Date.UTC(year, m, 0)).getUTCDate();
+      for (let d = 1; d <= total; d++) days.push(cgDayKey(Date.UTC(year, m - 1, d)));
+    }
+    while (days.length % 7 !== 0) days.push(null);
+    return days;
+  }
+
+  /**
+   * 按操作量分级（GitHub 式 5 档）：
+   * 0 = 空格底；其余按区间等分，量越大色越深（全部相同时统一 lv4）
+   * @param {number} count
+   * @param {number} max
+   * @returns {number} 0-4
+   */
+  function cgLevel(count, max) {
+    if (!count || count <= 0) return 0;
+    if (!max || max <= 0) return 1;
+    if (count >= max) return 4;
+    const step = max / 4;
+    return Math.min(4, Math.floor((count - 1) / step) + 1);
+  }
+
+  /**
+   * 方格总览（统计报表「每日操作量」）
+   * 版面：GitHub 全年贡献图 —— 7 行 = 周一…周日，每列一周，整年铺满；列宽自适应撑满卡片
+   * @param {number} year
+   * @param {Array} byDay - 服务端聚合的每日数据 [{day, count, media}]
+   * 悬停显示：日期 + 操作次数 + 媒体数
+   */
+  function contribGridHtml(year, byDay) {
+    const rows = cgBuildDays(year);
+    const map = new Map((byDay || []).map(x => [x.day, x]));
+    const max = Math.max(0, ...(byDay || []).map(x => x.count || 0));
+    const cols = Math.max(1, rows.length / 7);
+    const cells = rows.map(day => {
+      if (!day) return '<i class="cg-cell" data-empty="1" title=""></i>';
+      const row = map.get(day) || { count: 0, media: 0 };
+      const lv = cgLevel(row.count, max);
+      const title = `${day} 周${CG_DAY_LABELS[cgWeekIndex(new Date(day + 'T00:00:00Z').getUTCDay())]} · ${row.count} 次操作 · ${row.media || 0} 个媒体`;
+      return `<i class="cg-cell${lv ? ` lv${lv}` : ''}" title="${esc(title)}"></i>`;
+    }).join('');
+
+    // 每列上方标注月份（该列 7 天里首次出现的「1 号」或当年首日）
+    const labels = [];
+    for (let c = 0; c < cols; c++) {
+      let label = '';
+      for (const d of rows.slice(c * 7, c * 7 + 7)) {
+        if (!d) continue;
+        const mm = Number(d.slice(5, 7));
+        if (d.endsWith('-01') || d === `${year}-01-01`) { label = `${mm}月`; break; }
+      }
+      labels.push(`<span>${label}</span>`);
+    }
+
+    const legend = `<div class="cg-leg">
+      <span>少</span>
+      <i></i><i class="lv1"></i><i class="lv2"></i><i class="lv3"></i><i class="lv4"></i>
+      <span>多</span>
+      <span class="cg-tip">最高 ${fmtNum(max)} 次/天 · 色深随操作量递增</span>
+    </div>`;
+
+    return `<div class="cg-wrap">
+      <div class="cg-months">${labels.join('')}</div>
+      <div class="cg-row">
+        <div class="cg-days">${CG_DAY_LABELS.map(l => `<span>${l}</span>`).join('')}</div>
+        <div class="cg-grid">${cells}</div>
+      </div>
+      ${legend}
+    </div>`;
+  }
+
+  /**
+   * 活跃时间：北京时间每小时操作量（24 根柱，绿色 = 高峰）
+   * 高度用「行 = 1fr」精确换算比例，柱顶不会因 flex 收缩而失真；0 次的小时用底色短桩区分
+   */
+  function hourChartHtml(byHour) {
+    const hours = Array.from({ length: 24 }, (_, h) => {
+      const found = (byHour || []).find(x => Number(x.hour) === h);
+      return found ? { hour: h, count: found.count || 0, media: found.media || 0 } : { hour: h, count: 0, media: 0 };
+    });
+    const max = Math.max(0, ...hours.map(x => x.count));
+    const ranked = hours.slice().sort((a, b) => b.count - a.count);
+    const peak = ranked[0] || { hour: 0, count: 0 };
+    const second = ranked[1] || { hour: 0, count: 0 };
+    const total = hours.reduce((sum, x) => sum + x.count, 0);
+
+    const bars = hours.map(x => {
+      const h = max > 0 && x.count > 0 ? Math.max(3, Math.round((x.count / max) * 100)) : 0;
+      const isPeak = max > 0 && x.count > 0 && x.count === peak.count;
+      const label = `${String(x.hour).padStart(2, '0')}:00`;
+      const cls = ['col'];
+      if (isPeak) cls.push('is-peak');
+      if (x.count === 0) cls.push('is-zero');
+      if (x.hour % 6 === 0) cls.push('is-group');
+      return `<div class="${cls.join(' ')}" title="${label} · ${x.count} 次操作 · ${x.media} 个媒体">
+        <span class="v">${isPeak ? fmtNum(x.count) : ''}</span>
+        <i style="height:${x.count > 0 ? h : 0}%"></i>
+        <span class="h">${String(x.hour).padStart(2, '0')}</span>
+      </div>`;
+    }).join('');
+
+    let summary;
+    if (max > 0) {
+      const share = total > 0 ? Math.round((peak.count / total) * 100) : 0;
+      const pad = (n) => String(n).padStart(2, '0');
+      summary = `高峰 ${pad(peak.hour)}:00 · ${fmtNum(peak.count)} 次（占 ${share}%）`;
+      if (second.count > 0 && second.count !== peak.count) summary += ` · 次高 ${pad(second.hour)}:00 · ${fmtNum(second.count)} 次`;
+    } else {
+      summary = '本期没有操作记录';
+    }
+    return { bars, summary };
+  }
+
   function renderStats() {
     const s = state.stats;
     const d = s.data;
@@ -767,8 +1160,6 @@
 
     const t = d.totals || {};
     const prev = d.previous || {};
-    const years = [];
-    for (let y = new Date().getFullYear(); y >= new Date().getFullYear() - 4; y--) years.push(y);
 
     const cards = [
       `<div class="report-card"><div class="label">📊 操作总数</div><div class="value">${fmtNum(t.operations)}</div>${deltaHtml(prev.operationsDelta)}</div>`,
@@ -777,16 +1168,6 @@
       `<div class="report-card"><div class="label">📅 活跃天数</div><div class="value">${fmtNum(t.activeDays || 0)}</div><div class="sub">日均 ${t.avgPerDay || 0} 次操作</div></div>`,
       `<div class="report-card"><div class="label">⚠️ 失败操作</div><div class="value">${fmtNum((d.failures && d.failures.count) || 0)}</div><div class="sub">${d.failures && d.failures.count ? '可在下方日志中查看原因' : '全部成功'}</div></div>`
     ].join('');
-
-    const maxDay = Math.max(1, ...(d.byDay || []).map(x => x.count));
-    const chart = (d.byDay || []).map((x, i) => {
-      const h = Math.max(2, Math.round((x.count / maxDay) * 100));
-      const showLabel = (d.byDay.length <= 16) || (i % Math.ceil(d.byDay.length / 12) === 0);
-      return `<div class="col" title="${x.day}：${x.count} 次操作 · ${x.media} 个媒体">
-        <i style="height:${h}%"></i>
-        <span>${showLabel ? x.day.slice(8) : ''}</span>
-      </div>`;
-    }).join('') || '<div class="empty">本期没有操作记录</div>';
 
     const maxAction = Math.max(1, ...(d.byAction || []).map(a => a.count));
     const actionRows = (d.byAction || []).slice(0, 15).map(a => `
@@ -807,6 +1188,8 @@
       <div class="mini-row"><span class="tag">👤 ${esc(u.userId)}</span><span class="t"></span><span class="time">${fmtNum(u.count)} 次</span></div>`
     ).join('') || '<div class="empty">无用户数据</div>';
 
+    const hourChart = hourChartHtml(d.byHour);
+
     const o = state.oplogs;
     const catOptions = [{ v: 'all', l: '全部大类' }].concat(
       Object.entries((d.catalog && d.catalog.categories) || {}).map(([k, l]) => ({ v: k, l }))
@@ -824,39 +1207,50 @@
 
     $('#view').innerHTML = `
       <div class="toolbar">
-        <div class="tabs">
-          <button class="${s.period === 'month' ? 'is-active' : ''}" data-action="stats-period" data-period="month">月报</button>
-          <button class="${s.period === 'year' ? 'is-active' : ''}" data-action="stats-period" data-period="year">年报</button>
-        </div>
-        <select id="stats-year" style="width:auto">${years.map(y => `<option value="${y}" ${s.year === y ? 'selected' : ''}>${y} 年</option>`).join('')}</select>
-        <select id="stats-month" style="width:auto" ${s.period === 'year' ? 'disabled' : ''}>
-          ${Array.from({ length: 12 }, (_, i) => i + 1).map(m => `<option value="${m}" ${s.month === m ? 'selected' : ''}>${m} 月</option>`).join('')}
-        </select>
         <span class="tag accent">${esc(d.label)}</span>
         <span class="dim">统计区间 ${fmtTime(d.from)} ~ ${fmtTime(d.to)}${d.truncated ? ' · 仅统计最近 20000 条' : ''}</span>
+        <span class="grow"></span>
+        <span class="year-picker">
+          <button class="btn btn-sm" data-action="stats-year-prev" title="上一年" ${s.year <= 2000 ? 'disabled' : ''}>◀</button>
+          <b class="year-label">${s.year} 年</b>
+          <button class="btn btn-sm" data-action="stats-year-next" title="下一年" ${s.year >= 2100 ? 'disabled' : ''}>▶</button>
+        </span>
       </div>
       <div class="report-grid">${cards}</div>
-      <div class="grid-2">
-        <div class="card">
-          <div class="card-head"><h3>每日操作量</h3><span class="dim">柱高 = 操作次数，悬停看媒体数</span></div>
-          <div class="chart">${chart}</div>
+      <div class="card" style="margin-top:16px">
+        <div class="card-head">
+          <h3>每日操作量</h3>
+          <span class="dim">每格 = 一天，颜色越深操作越多（悬停看当天媒体数）· 7 行 = 周一…周日 · 每列一周</span>
+          <span class="spacer"></span>
+          <span class="dim">${s.year} 全年</span>
         </div>
+        ${contribGridHtml(s.year, d.byDay)}
+      </div>
+      <div class="grid-2">
         <div class="card">
           <div class="card-head"><h3>动作明细</h3><span class="dim">Top 15</span></div>
           ${actionRows}
         </div>
-      </div>
-      <div class="grid-2">
         <div class="card">
           <div class="card-head"><h3>大类分布</h3></div>
           ${categoryRows}
         </div>
+      </div>
+      <div class="grid-2">
         <div class="card">
           <div class="card-head"><h3>活跃用户</h3><span class="dim">按操作次数</span></div>
           <div class="mini-list">${userRows}</div>
         </div>
+        <div class="card">
+          <div class="card-head">
+            <h3>活跃时间</h3>
+            <span class="dim">北京时间每小时操作量 · 绿色 = 高峰</span>
+          </div>
+          <div class="chart">${hourChart.bars}</div>
+          <div class="hour-summary">${hourChart.summary}</div>
+        </div>
       </div>
-      <div class="card" style="margin-top:16px">
+      <div class="card stats-logs-card" style="margin-top:16px">
         <div class="card-head">
           <h3>操作日志明细</h3>
           <select id="oplog-category" style="width:auto">${catOptions}</select>
@@ -915,7 +1309,9 @@
     }
 
     $('#view').innerHTML = `
+      ${dbStatsSectionHtml()}
       <div class="raw-toolbar">
+        <b style="font-size:13px">📁 集合浏览</b>
         <select id="raw-collection" style="width:190px">${options}</select>
         <select id="raw-sort" style="width:132px" ${isAll ? 'disabled' : ''}>
           <option value="-1" ${r.sort === -1 ? 'selected' : ''}>最新在前</option>
@@ -928,7 +1324,10 @@
       </div>
       <div class="doc-list">${listHtml}</div>
       ${isAll ? '' : paginationHtml(r, 'raw-page')}`;
-    updatePageSub(isAll ? '跨集合浏览原始文档' : `${r.collection} · 共 ${fmtNum(r.total)} 条`);
+    const db = state.dbstats.data;
+    updatePageSub(db && db.available && db.totals
+      ? `数据库 ${db.database} · ${fmtNum(db.totals.objects)} 个文档 · ${fmtBytes(db.totals.storageSize)} 存储占用 · ${isAll ? '跨集合浏览' : `${r.collection} 共 ${fmtNum(r.total)} 条`}`
+      : (isAll ? '跨集合浏览原始文档' : `${r.collection} · 共 ${fmtNum(r.total)} 条`));
   }
 
   /* ============================ 视图：实时日志 ============================ */
@@ -949,10 +1348,137 @@
     renderLogList();
   }
 
+  /* ---------------- 详情：描述与标签区块 ---------------- */
+
+  /**
+   * 单条 message 的描述 + 标签编辑块
+   * @param {Object} m - { file_unique_id, text, tags, chat_id, message_id }
+   * @param {Object} [opts]
+   *   - noRecord: true 表示该媒体还没有文本记录（数据库里没有 message 文档），
+   *     保存描述时由后端自动补建 message
+   */
+  function msgBlockHtml(m, opts = {}) {
+    const file = esc(m.file_unique_id);
+    const text = m.text || '';
+    const tags = m.tags || [];
+    return `
+      <div class="msg-block${opts.noRecord ? ' no-record' : ''}" data-msg="${file}" data-action="detail-pick" data-file="${file}">
+        <div class="text msg-text" data-role="text">${text ? esc(text) : (opts.noRecord ? '（暂无描述 · 点选后可在下方补描述并打标签）' : '（空描述）')}</div>
+        <div class="editor msg-editor hidden" data-role="editor">
+          <textarea class="msg-input" data-role="input" placeholder="输入新的描述；留空保存 = 清空描述（该组变为可清理）">${esc(text)}</textarea>
+          <div class="editor-row">
+            <button class="btn btn-primary btn-sm" data-action="desc-save" data-file="${file}">💾 保存描述</button>
+            <button class="btn btn-ghost btn-sm" data-action="desc-cancel">取消</button>
+            <span class="dim">保存会同步修改 Telegram 上的描述；超 48 小时的消息只改数据库</span>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="tag-edit is-locked" data-role="tags">
+            <button class="btn btn-ghost btn-xs tag-add-btn" data-action="tag-add-prompt" data-file="${file}" disabled>➕ 添加标签</button>
+            <button class="btn btn-ghost btn-xs tag-cancel-btn hidden" data-action="tag-cancel" data-file="${file}">取消</button>
+            ${tags.map(t => `<span class="tag-pill">${esc(t)}<button data-action="tag-rename" data-file="${file}" data-tag="${esc(t)}" title="重命名「${esc(t)}」（同步所有消息）">✎</button><button data-action="tag-remove" data-file="${file}" data-tag="${esc(t)}" title="移除该标签">✕</button></span>`).join('')}
+          </span>
+          <span class="spacer"></span>
+          <button class="btn btn-ghost btn-xs" data-action="desc-edit">✏️ 编辑描述</button>
+        </div>
+        <div class="tag-picker hidden" data-role="tag-picker">
+          <div class="editor-row" style="margin-top:8px">
+            <input class="tag-input" data-role="tag-input" placeholder="输入标签名（回车添加，可新建）" style="flex:1;min-width:160px">
+            <button class="btn btn-sm btn-primary tag-add-submit" data-action="tag-add" data-file="${file}">➕ 添加</button>
+            <button class="btn btn-sm tag-cancel-submit" data-action="tag-cancel" data-file="${file}">取消</button>
+          </div>
+          <div class="tag-suggest">
+            ${(state.tags || []).filter(t => !tags.includes(t.name)).slice(0, 12)
+        .map(t => `<button class="chip" data-action="tag-add" data-file="${file}" data-tag="${esc(t.name)}">${esc(t.name)}</button>`).join('') || '<span class="dim">标签库为空，直接输入即可新建</span>'}
+          </div>
+        </div>
+        <div class="foot" style="margin-top:4px">
+          <span class="mono dim">${file}</span>
+          <span class="dim">·</span>
+          <span class="mono dim">${m.chat_id === null || m.chat_id === undefined ? '—' : esc(m.chat_id)} / ${m.message_id === null || m.message_id === undefined ? '—' : esc(m.message_id)}</span>
+          ${opts.noRecord ? '<span class="tag warn">无文本记录</span>' : ''}
+        </div>
+      </div>`;
+  }
+
+  /** 详情里已渲染的 message 块（按 file_unique_id） */
+  function detailMsgBlock(file) {
+    const body = $('#detail-body');
+    if (!body || !file) return null;
+    return [...body.querySelectorAll('.msg-block')].find(el => el.dataset.msg === file) || null;
+  }
+
+  /**
+   * 展开 / 收起某条媒体的标签选择区
+   * 展开时把「➕ 添加标签」右侧的「取消」一起显示出来（收起时隐藏并清空输入）
+   */
+  function setTagPicker(block, open) {
+    if (!block) return;
+    const picker = block.querySelector('.tag-picker');
+    if (!picker) return;
+    picker.classList.toggle('hidden', !open);
+    // 两处取消按钮：标签行「➕ 添加标签」后面 / 输入框「➕ 添加」后面
+    const cancelBtns = [block.querySelector('.tag-cancel-btn'), block.querySelector('.tag-cancel-submit')];
+    cancelBtns.forEach(el => { if (el) el.classList.toggle('hidden', !open); });
+    const input = block.querySelector('.tag-input');
+    if (!input) return;
+    if (open) input.focus();
+    else input.value = '';
+  }
+
+  /** 该媒体当前展示的标签（含本次会话里刚打过、还没写进 state.detail 的） */
+  function detailBlockTags(block) {
+    if (!block) return [];
+    return [...block.querySelectorAll('.tag-pill')].map(el => el.textContent.replace('✕', '').trim()).filter(Boolean);
+  }
+
+  /** 无文本记录的媒体：点选后即时补一个可写描述 / 打标签的区块（保存描述时后端自动补建记录） */
+  function ensureDetailBlock(file) {
+    if (detailMsgBlock(file)) return;
+    const body = $('#detail-body');
+    if (!body) return;
+    const strip = body.querySelector('.detail-strip');
+    let section = strip;
+    while (section && !section.classList.contains('section')) section = section.parentElement;
+    const host = section ? section.parentElement : null;
+    // 找不到「描述与标签」区块（异常结构）时不硬塞，避免把界面搞乱
+    if (!section || !host || typeof host.insertBefore !== 'function') return;
+    const media = ((state.detail && state.detail.media) || []).find(m => m.file_unique_id === file);
+    if (!media) return;
+    const msg = ((state.detail && state.detail.messages) || []).find(m => m.file_unique_id === file);
+    const pos = media.group || media.channel || {};
+    const html = msgBlockHtml(msg || {
+      file_unique_id: file,
+      text: '',
+      tags: [],
+      chat_id: pos.chat_id !== undefined ? pos.chat_id : media.message_id,
+      message_id: pos.message_id !== undefined ? pos.message_id : media.message_id
+    }, { noRecord: true });
+
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `<div class="section"><h4>描述与标签</h4>${html}</div>`;
+    const sectionEl = wrap.firstElementChild || wrap.children[0];
+    if (!sectionEl) return;
+    host.insertBefore(sectionEl, section);
+    // 原来的「该组没有描述」空态段落：已有编辑区后就没必要留着了
+    const emptyEl = section.querySelector('.empty');
+    if (emptyEl) emptyEl.remove();
+    const block = detailMsgBlock(file);
+    if (!block) return;
+    // 该媒体还没有任何文本记录 → 直接进入编辑态，省掉一次点击
+    // （用类选择器定位：与真实浏览器一致，也避免依赖属性选择器）
+    const textEl = block.querySelector('.msg-text');
+    const editorEl = block.querySelector('.msg-editor');
+    if (textEl) textEl.classList.add('hidden');
+    if (editorEl) editorEl.classList.remove('hidden');
+  }
+
   /* ============================ 详情对话框（描述 / 标签 / 跳转） ============================ */
 
   async function openMediaDetail(groupId, opts = {}) {
     const dlg = $('#detail-dialog');
+    state.detailTag = null;
+    const prevGroupId = state.detail && state.detail.group ? state.detail.group.group_id : null;
     if (!opts.keepScroll) {
       $('#detail-title').innerHTML = `<span class="mono">${esc(shortId(groupId, 40))}</span>`;
       $('#detail-body').innerHTML = '<div class="loading">正在加载媒体组…</div>';
@@ -968,6 +1494,8 @@
       return;
     }
     state.detail = data;
+    // 换了一个媒体组：清掉上一次的媒体选中态
+    if (prevGroupId !== groupId) state.detailSelectedFile = null;
 
     const g = data.group || {};
     const media = data.media || [];
@@ -975,8 +1503,21 @@
     const cleanable = g.cleanable;
     const link = telegramLink(data);
 
-    const strip = media.map(m => `
-      <div class="detail-item">
+    // 只有「1 个媒体 + 1 条文本」时直接帮用户选中：这种组改标签是唯一意图，省一次点击
+    if (!state.detailSelectedFile && media.length === 1 && messages.length === 1
+      && media[0].file_unique_id === messages[0].file_unique_id) {
+      state.detailSelectedFile = media[0].file_unique_id;
+    }
+
+    // 媒体缩略图条：点击即选中该媒体，随后即可补描述 / 改标签
+    // 没有文本记录的媒体同样可点选（选中后会在「描述与标签」区自动补出编辑块）
+    const msgFiles = new Set(messages.map(m => m.file_unique_id));
+    const strip = media.map(m => {
+      const hasMsg = msgFiles.has(m.file_unique_id);
+      return `
+      <div class="detail-item${hasMsg ? '' : ' no-msg'}"
+           data-action="detail-pick" data-file="${esc(m.file_unique_id)}"
+           title="${hasMsg ? '点击选中该媒体，随后可补描述 / 修改它的标签' : '该媒体还没有文本记录，点选后可补描述并打标签'}">
         ${m.thumbable
         ? `<img loading="lazy" decoding="async" src="${thumbUrl(m.file_unique_id)}" alt="">`
         : `<div class="ph">${typeIcon(m.media_type)}</div>`}
@@ -984,44 +1525,11 @@
           <span>#${m.subgroup} · ${typeLabel(m.media_type)}</span>
           <span class="mono">${m.video_time ? fmtDuration(m.video_time) : 'msg ' + m.message_id}</span>
         </div>
-      </div>`).join('') || '<div class="empty">该组没有媒体记录</div>';
+      </div>`;
+    }).join('') || '<div class="empty">该组没有媒体记录</div>';
 
-    // 每条 message：描述可直接编辑，标签可增删
-    const msgBlocks = messages.map(m => `
-      <div class="msg-block" data-msg="${esc(m.file_unique_id)}">
-        <div class="text" data-role="text">${esc(m.text || '（空描述）')}</div>
-        <div class="editor hidden" data-role="editor">
-          <textarea data-role="input" placeholder="输入新的描述；留空保存 = 清空描述（该组变为可清理）">${esc(m.text || '')}</textarea>
-          <div class="editor-row">
-            <button class="btn btn-primary btn-sm" data-action="desc-save" data-file="${esc(m.file_unique_id)}">💾 保存描述</button>
-            <button class="btn btn-ghost btn-sm" data-action="desc-cancel">取消</button>
-            <span class="dim">保存会同步修改 Telegram 上的描述；超 48 小时的消息只改数据库</span>
-          </div>
-        </div>
-        <div class="foot">
-          <span class="tag-edit" data-role="tags">
-            ${(m.tags || []).map(t => `<span class="tag-pill">${esc(t)}<button data-action="tag-remove" data-file="${esc(m.file_unique_id)}" data-tag="${esc(t)}" title="移除该标签">✕</button></span>`).join('') || '<span class="dim">（无标签）</span>'}
-          </span>
-          <span class="spacer"></span>
-          <button class="btn btn-ghost btn-xs" data-action="desc-edit">✏️ 编辑描述</button>
-          <button class="btn btn-ghost btn-xs" data-action="tag-add-prompt" data-file="${esc(m.file_unique_id)}">🏷 加标签</button>
-        </div>
-        <div class="hidden" data-role="tag-picker">
-          <div class="editor-row" style="margin-top:8px">
-            <input data-role="tag-input" placeholder="输入标签名（回车添加，可新建）" style="flex:1;min-width:160px">
-            <button class="btn btn-sm" data-action="tag-add" data-file="${esc(m.file_unique_id)}">➕ 添加</button>
-          </div>
-          <div class="tag-suggest">
-            ${(state.tags || []).filter(t => !(m.tags || []).includes(t.name)).slice(0, 12)
-        .map(t => `<button class="chip" data-action="tag-add" data-file="${esc(m.file_unique_id)}" data-tag="${esc(t.name)}">${esc(t.name)}</button>`).join('') || '<span class="dim">标签库为空，直接输入即可新建</span>'}
-          </div>
-        </div>
-        <div class="foot" style="margin-top:4px">
-          <span class="mono dim">${esc(m.file_unique_id)}</span>
-          <span class="dim">·</span>
-          <span class="mono dim">${esc(m.chat_id)} / ${esc(m.message_id)}</span>
-        </div>
-      </div>`).join('') || '<div class="empty">该组没有描述（空描述 · 可被清理）</div>';
+    // 每条 message：点选对应媒体后才解锁标签编辑（未选中时灰色不可点）
+    const msgBlocks = messages.map(m => msgBlockHtml(m)).join('') || '<div class="empty">该组没有描述（空描述 · 可被清理）</div>';
 
     const positions = [];
     if (g.group_id) positions.push(['group_id', g.group_id]);
@@ -1041,20 +1549,11 @@
       <div class="section">
         <h4>媒体（${media.length}）</h4>
         <div class="detail-strip">${strip}</div>
+        <div class="dim" style="font-size:11.5px;margin-top:8px">👆 点击上方任一媒体选中它，然后即可补描述、改标签；没有文本记录的媒体选中后会自动出现编辑区（保存时自动补建记录）</div>
       </div>
       <div class="section">
-        <h4>描述与标签（可直接修改）</h4>
+        <h4>描述与标签</h4>
         ${msgBlocks}
-        <div class="editor" style="margin-top:12px">
-          <div class="editor-row">
-            <b style="font-size:12.5px">整组操作</b>
-            <input data-role="group-tag-input" placeholder="给组内所有 media 添加同一个标签" style="flex:1;min-width:160px">
-            <button class="btn btn-sm" data-action="tag-group-add" data-group="${esc(groupId)}">🏷 添加到整组</button>
-          </div>
-          <div class="tag-suggest">
-            ${(state.tags || []).slice(0, 12).map(t => `<button class="chip" data-action="tag-group-add" data-group="${esc(groupId)}" data-tag="${esc(t.name)}">${esc(t.name)}</button>`).join('') || '<span class="dim">标签库为空，直接输入即可新建</span>'}
-          </div>
-        </div>
       </div>
       <div class="section">
         <h4>定位信息</h4>
@@ -1069,11 +1568,65 @@
         ? `<button class="btn btn-ghost btn-sm" data-action="detail-keep" data-group="${esc(groupId)}">🟢 标记为保留</button>`
         : `<button class="btn btn-soft-danger btn-sm" data-action="detail-cleanable" data-group="${esc(groupId)}">🟠 标记为可清理</button>`}
       <button class="btn btn-primary btn-sm" data-action="detail-close">关闭</button>`;
+
+    // 恢复上一次的媒体选中态（改完标签会整块重渲染）
+    applyDetailSelection();
+  }
+
+  /**
+   * 详情里的「选中媒体 → 高亮可改标签」状态：
+   *   未选中（常规）：所有标签区灰掉、不可点
+   *   选中且有标签：标签胶囊高亮，✕ 可直接移除
+   *   选中且没有标签：高亮「➕ 添加标签」按钮
+   *   选中且该媒体没有文本记录：自动补出可写描述 / 打标签的区块
+   */
+  function applyDetailSelection() {
+    const body = $('#detail-body');
+    const file = state.detailSelectedFile;
+    body.querySelectorAll('.detail-item').forEach(el => el.classList.remove('is-active'));
+    body.querySelectorAll('.msg-block').forEach(el => el.classList.remove('is-active'));
+    // 未选中的标签区加回 is-locked（CSS 里 pointer-events: none，防止误点）
+    body.querySelectorAll('.tag-edit').forEach(el => { el.classList.remove('is-active'); el.classList.add('is-locked'); });
+    body.querySelectorAll('.tag-add-btn').forEach(el => { el.disabled = true; el.classList.remove('is-highlight'); });
+    if (!file) return;
+
+    const strip = [...body.querySelectorAll('.detail-item')].find(el => el.dataset.file === file);
+    if (strip) strip.classList.add('is-active');
+    if (!detailMsgBlock(file)) ensureDetailBlock(file);
+    const block = detailMsgBlock(file);
+    if (!block) return;
+
+    block.classList.add('is-active');
+    const tagEdit = block.querySelector('.tag-edit');
+    const addBtn = block.querySelector('.tag-add-btn');
+    if (tagEdit) {
+      // 关键：移除 is-locked，否则 pointer-events: none 会让标签按钮全都点不动
+      tagEdit.classList.remove('is-locked');
+      tagEdit.classList.add('is-active');
+    }
+    if (addBtn) {
+      addBtn.disabled = false;
+      // 该媒体还没有标签 → 高亮「添加标签」
+      if (!block.querySelector('.tag-pill')) addBtn.classList.add('is-highlight');
+    }
+  }
+
+  /** 点击媒体（缩略图或描述块）：选中/取消选中 */
+  function selectDetailMedia(file) {
+    if (!file) return;
+    const detail = state.detail || {};
+    const media = (detail.media || []).find(m => m.file_unique_id === file);
+    if (!media) {
+      toast('该媒体不在当前媒体组里', true);
+      return;
+    }
+    state.detailSelectedFile = state.detailSelectedFile === file ? null : file;
+    applyDetailSelection();
   }
 
   /** 修改描述（空文本 = 清空描述） */
   async function saveDescription(fileUniqueId, block) {
-    const text = block.querySelector('[data-role="input"]').value;
+    const text = block.querySelector('.msg-input').value;
     const r = await apiPost('/media/description', { fileUniqueId, text });
     if (r.telegramEdited) toast('✅ 描述已更新（Telegram 同步完成）');
     else toast(`✅ 数据库已更新${r.telegramError ? `（Telegram 未同步：${r.telegramError}）` : ''}`, !r.telegramError ? false : true);
@@ -1083,8 +1636,37 @@
 
   async function applyMediaTags(fileUniqueId, { add = [], remove = [] }) {
     const r = await apiPost('/media/tags', { fileUniqueId, add, remove });
-    toast(`🏷 标签已更新（当前：${r.tags.join('、') || '无'}）`);
+    toast(`🏷 标签已更新（当前：${(r.tags || []).join('、') || '无'}）`);
     await openMediaDetail(state.detail.group.group_id);
+  }
+
+  /**
+   * 标签改名（全局）：媒体详情里点标签上的 ✎ 触发
+   * 会同步改写所有消息里的该标签，改完刷新标签库与当前详情
+   */
+  function renameTagForm(oldName) {
+    const groupId = state.detail && state.detail.group ? state.detail.group.group_id : null;
+    openForm({
+      title: `重命名标签「${oldName}」`,
+      okText: '改名',
+      fields: [{
+        key: 'name',
+        label: '新标签名',
+        value: oldName,
+        required: true,
+        hint: '最长 20 个字符，自动转大写；改名会同步所有消息里的该标签'
+      }],
+      onSubmit: async (v) => {
+        const to = String(v.name || '').trim();
+        if (!to) { toast('请输入新标签名', true); return; }
+        if (to.toUpperCase() === oldName.toUpperCase()) { toast('新名字与原名字相同'); return; }
+        const r = await apiPost('/tags/rename', { name: oldName, to });
+        toast(`✅ 标签「${oldName}」已改名为「${r.name}」，同步 ${fmtNum(r.synced || 0)} 条消息`);
+        await reloadTags();
+        if (state.view === 'tags') renderTags();
+        if (groupId) await openMediaDetail(groupId);
+      }
+    });
   }
 
   /* ============================ 分页 ============================ */
@@ -1112,6 +1694,404 @@
     if (el) el.textContent = text;
   }
 
+  /* ============================ 搬运收录 ============================ */
+
+  function transportStatusTag(it) {
+    if (it.alive === true) return '<span class="tag ok">✅ 有效</span>';
+    if (it.alive === false) return '<span class="tag danger">❌ 失效</span>';
+    return '<span class="tag">❔ 未检查</span>';
+  }
+
+  function renderTransport() {
+    const t = state.transport;
+    const c = t.counts || {};
+    const chips = [
+      ['all', `全部 ${fmtNum(c.all)}`],
+      ['alive', `✅ 有效 ${fmtNum(c.alive)}`],
+      ['dead', `❌ 失效 ${fmtNum(c.dead)}`],
+      ['unchecked', `❔ 未检查 ${fmtNum(c.unchecked)}`]
+    ].map(([v, label]) => `<button class="chip ${t.status === v ? 'is-active' : ''}" data-action="transport-status" data-status="${v}">${label}</button>`).join('');
+
+    const rows = t.items.map(it => `<tr>
+      <td>${transportStatusTag(it)}</td>
+      <td><b>${esc(it.chat_name)}</b></td>
+      <td class="num mono">${esc(it.chat_id)}</td>
+      <td><button class="btn btn-ghost btn-xs" data-action="transport-open" data-id="${esc(it.chat_id)}" ${it.link ? '' : 'disabled'}>↗ Telegram</button></td>
+      <td class="num">${fmtNum(it.num)}</td>
+      <td class="dim" style="font-size:11.5px">${it.last_check_at
+        ? `${fmtAgo(it.last_check_at)}${it.last_check_error ? `<br><span class="muted-2" title="${esc(it.last_check_error)}">${esc(shortId(it.last_check_error, 36))}</span>` : ''}`
+        : '—'}</td>
+      <td class="right">
+        <button class="btn btn-ghost btn-xs" data-action="transport-check" data-id="${esc(it.chat_id)}" title="检查该链接活性">🔄</button>
+        <button class="btn btn-ghost btn-xs" data-action="transport-edit" data-id="${esc(it.chat_id)}" title="编辑">✏️</button>
+        <button class="btn btn-ghost btn-xs" data-action="transport-delete" data-id="${esc(it.chat_id)}" data-name="${esc(it.chat_name)}" title="删除">🗑</button>
+      </td>
+    </tr>`).join('');
+
+    $('#view').innerHTML = `
+      <div class="toolbar">
+        <div class="chips">${chips}</div>
+        <button class="btn btn-sm" data-action="transport-create">➕ 新增收录</button>
+        <button class="btn btn-sm" data-action="transport-check-all">🔍 全部检查活性</button>
+        <span class="dim">共 ${fmtNum(t.total)} 条${t.q ? ` · 搜索「${esc(t.q)}」` : ''}</span>
+        <span class="grow"></span>
+        <label class="switch">每页
+          <select id="transport-pagesize" style="width:auto">
+            ${[20, 50, 100].map(n => `<option value="${n}" ${t.pageSize === n ? 'selected' : ''}>${n}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>活性</th><th>名称</th><th>chat_id</th><th>跳转</th><th>搬运次数</th><th>最近检查</th><th class="right">操作</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="7"><div class="empty">没有符合条件的收录记录</div></td></tr>'}</tbody>
+        </table>
+      </div>
+      ${paginationHtml(t, 'transport-page')}`;
+    updatePageSub(`搬运收录 ${fmtNum(c.all)} 条 · ✅ 有效 ${fmtNum(c.alive)} ／ ❌ 失效 ${fmtNum(c.dead)} ／ ❔ 未检查 ${fmtNum(c.unchecked)}`);
+  }
+
+  function transportForm(item) {
+    const existing = !!item;
+    openForm({
+      title: existing ? `编辑收录 ${item.chat_name || item.chat_id}` : '新增搬运收录',
+      okText: existing ? '保存修改' : '创建',
+      fields: [
+        { key: 'chat_id', label: 'chat_id', type: 'number', value: existing ? item.chat_id : '', required: true, readonly: existing, hint: existing ? 'chat_id 为唯一键，不可修改' : '被搬运的频道/群组 ID，如 -1001234567890' },
+        { key: 'chat_name', label: '名称', value: existing ? item.chat_name : '' },
+        { key: 'url', label: '收录链接', value: existing ? item.url : '', required: true, hint: 't.me 链接或频道 ID；用于跳转与活性检查' },
+        { key: 'num', label: '搬运次数', type: 'number', value: existing ? item.num : 0, hint: '仅影响排序与展示，不触发搬运' }
+      ],
+      onSubmit: async (v) => {
+        if (existing) {
+          await apiPost('/transport/update', {
+            chat_id: Number(item.chat_id),
+            patch: { chat_name: v.chat_name, url: v.url, num: Number(v.num) || 0 }
+          });
+          toast('✅ 收录已更新');
+        } else {
+          await apiPost('/transport/create', {
+            chat_id: Number(v.chat_id), chat_name: v.chat_name, url: v.url, num: Number(v.num) || 0
+          });
+          toast('✅ 收录已创建');
+        }
+        await show('transport');
+      }
+    });
+  }
+
+  async function deleteTransport(id, name) {
+    const ok = await confirmDialog({
+      title: '删除搬运收录',
+      body: `<div>确定删除 <b>${esc(name || id)}</b>（chat_id=${esc(id)}）的收录记录吗？</div>
+             <div class="dim" style="margin-top:8px">仅删除搬运列表中的这一条，不影响 Telegram 里的频道与已收录媒体。</div>`,
+      okText: '确认删除'
+    });
+    if (!ok) return;
+    await apiPost('/transport/delete', { chat_id: Number(id), confirm: true });
+    toast('🗑 已删除收录记录');
+    await show('transport');
+  }
+
+  async function checkTransport(id) {
+    toast('🔍 正在检查该链接…');
+    const r = await apiPost('/transport/check', { chat_id: Number(id) });
+    const it = r.item || {};
+    if (it.alive === true) toast('✅ 链接有效');
+    else if (it.alive === false) toast(`❌ 链接已失效：${shortId(it.last_check_error || '不可访问', 60)}`, true);
+    else toast(`❔ 暂时无法判定：${shortId(it.last_check_error || '', 60)}`, true);
+    await show('transport');
+  }
+
+  async function checkAllTransport() {
+    toast('🔍 正在检查全部收录链接，请稍候…');
+    const r = await apiPost('/transport/check', {});
+    const s = r.summary || {};
+    toast(`🔍 检查完成：✅ 有效 ${s.ok || 0} ／ ❌ 失效 ${s.dead || 0} ／ ❔ 未知 ${s.unknown || 0}`, (s.dead || 0) > 0);
+    await show('transport');
+  }
+
+  /* ============================ 文章 ============================ */
+
+  function renderArticles() {
+    const a = state.articles;
+    const cards = a.items.map(it => {
+      const title = esc(it.title || '（无标题）');
+      const head = it.link
+        ? `<a href="${esc(it.link)}" target="_blank" rel="noopener">${title}</a>`
+        : title;
+      const subs = (it.subs || []).map(s => `<div class="mini-row">
+          <span class="t">${s.link ? `<a href="${esc(s.link)}" target="_blank" rel="noopener">${esc(s.title || s.link)}</a>` : esc(s.title || '（无标题）')}</span>
+          <span class="time mono">#${esc(s.id)}</span>
+          <button class="btn btn-ghost btn-xs" data-action="article-sub-edit" data-id="${esc(s.id)}" title="编辑子文章">✏️</button>
+          <button class="btn btn-ghost btn-xs" data-action="article-sub-delete" data-id="${esc(s.id)}" data-name="${esc(s.title || '')}" title="删除子文章">🗑</button>
+        </div>`).join('') || '<div class="dim" style="font-size:12px">（暂无子文章）</div>';
+      return `<div class="card" style="margin-bottom:12px">
+        <div class="card-head">
+          <h3>#${esc(it.id)} ${head}</h3>
+          <span class="dim">${fmtNum(it.subCount)} 篇子文章 · 更新 ${fmtAgo(it.updated_at)}</span>
+        </div>
+        <div class="mini-list">${subs}</div>
+        <div class="editor-row" style="margin-top:8px">
+          <button class="btn btn-ghost btn-xs" data-action="article-sub-add" data-id="${esc(it.id)}">➕ 子文章</button>
+          <button class="btn btn-ghost btn-xs" data-action="article-edit" data-id="${esc(it.id)}">✏️ 编辑</button>
+          <button class="btn btn-ghost btn-xs" data-action="article-delete" data-id="${esc(it.id)}" data-name="${esc(it.title || '')}">🗑 删除</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    $('#view').innerHTML = `
+      <div class="toolbar">
+        <button class="btn btn-sm" data-action="article-create">➕ 新增文章</button>
+        <span class="dim">共 ${fmtNum(a.total)} 篇文章${a.q ? ` · 搜索「${esc(a.q)}」` : ''} · 子文章随文章一起增删改</span>
+        <span class="grow"></span>
+        <label class="switch">每页
+          <select id="articles-pagesize" style="width:auto">
+            ${[20, 50, 100].map(n => `<option value="${n}" ${a.pageSize === n ? 'selected' : ''}>${n}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      ${a.items.length ? cards : '<div class="empty"><div class="empty-ico">📄</div><div>还没有文章，点「➕ 新增文章」创建</div></div>'}
+      ${paginationHtml(a, 'articles-page')}`;
+    updatePageSub(`文章 ${fmtNum(a.total)} 篇`);
+  }
+
+  function articleForm(item) {
+    const existing = !!item;
+    openForm({
+      title: existing ? `编辑文章 #${item.id}` : '新增文章',
+      okText: existing ? '保存修改' : '创建',
+      fields: [
+        { key: 'title', label: '标题', value: existing ? item.title : '', required: true },
+        { key: 'link', label: '链接', value: existing ? item.link : '', placeholder: 'https://telegra.ph/...' }
+      ],
+      onSubmit: async (v) => {
+        if (existing) {
+          await apiPost('/articles/update', { id: Number(item.id), patch: { title: v.title, link: v.link } });
+          toast('✅ 文章已更新');
+        } else {
+          await apiPost('/articles/create', { title: v.title, link: v.link });
+          toast('✅ 文章已创建');
+        }
+        await show('articles');
+      }
+    });
+  }
+
+  function subArticleForm(articleId, sub) {
+    const existing = !!sub;
+    openForm({
+      title: existing ? `编辑子文章 #${sub.id}` : `新增子文章（文章 #${articleId}）`,
+      okText: existing ? '保存修改' : '创建',
+      fields: [
+        { key: 'title', label: '标题', value: existing ? sub.title : '', required: true },
+        { key: 'link', label: '链接', value: existing ? sub.link : '', placeholder: 'https://telegra.ph/...' }
+      ],
+      onSubmit: async (v) => {
+        if (existing) {
+          await apiPost('/articles/sub/update', { id: Number(sub.id), patch: { title: v.title, link: v.link } });
+          toast('✅ 子文章已更新');
+        } else {
+          await apiPost('/articles/sub/create', { article_id: Number(articleId), title: v.title, link: v.link });
+          toast('✅ 子文章已创建');
+        }
+        await show('articles');
+      }
+    });
+  }
+
+  async function deleteArticle(id, name) {
+    const ok = await confirmDialog({
+      title: '删除文章',
+      body: `<div>确定删除文章 <b>${esc(name || `#${id}`)}</b>（#${esc(id)}）吗？</div>
+             <div class="dim" style="margin-top:8px">该文章下的所有子文章会一并删除，且不可恢复。</div>`,
+      okText: '确认删除'
+    });
+    if (!ok) return;
+    const r = await apiPost('/articles/delete', { id: Number(id), confirm: true });
+    toast(`🗑 文章已删除${r.removedSubs ? `（含 ${r.removedSubs} 篇子文章）` : ''}`);
+    await show('articles');
+  }
+
+  async function deleteSubArticle(id, name) {
+    const ok = await confirmDialog({
+      title: '删除子文章',
+      body: `<div>确定删除子文章 <b>${esc(name || `#${id}`)}</b> 吗？</div>`,
+      okText: '确认删除'
+    });
+    if (!ok) return;
+    await apiPost('/articles/sub/delete', { id: Number(id), confirm: true });
+    toast('🗑 子文章已删除');
+    await show('articles');
+  }
+
+  /* ============================ 合集 / 杂集 ============================ */
+
+  function renderCollections() {
+    const c = state.collectionsView;
+    const counts = c.counts || {};
+    const chips = [['all', `全部 ${fmtNum(counts.all)}`], ['collection', `📚 合集 ${fmtNum(counts.collection)}`], ['misc', `📦 杂集 ${fmtNum(counts.misc)}`]]
+      .map(([v, label]) => `<button class="chip ${c.type === v ? 'is-active' : ''}" data-action="collection-type" data-type="${v}">${label}</button>`).join('');
+
+    const cards = c.items.map(it => {
+      const subs = (it.subs || []).map(s => `<div class="mini-row">
+          <span class="t">${s.link ? `<a href="${esc(s.link)}" target="_blank" rel="noopener">${esc(s.name || s.link)}</a>` : esc(s.name || '（未命名）')}</span>
+          <span class="time mono">#${esc(s.id)}</span>
+          <button class="btn btn-ghost btn-xs" data-action="collection-sub-edit" data-id="${esc(s.id)}" title="编辑子项">✏️</button>
+          <button class="btn btn-ghost btn-xs" data-action="collection-sub-delete" data-id="${esc(s.id)}" data-name="${esc(s.name || '')}" title="删除子项">🗑</button>
+        </div>`).join('') || '<div class="dim" style="font-size:12px">（暂无子项）</div>';
+      return `<div class="card" style="margin-bottom:12px">
+        <div class="card-head">
+          <h3>#${esc(it.id)} ${esc(it.name || '（未命名）')}</h3>
+          <span class="dim">${it.type === 'misc' ? '📦 杂集' : '📚 合集'} · ${fmtNum(it.subCount)} 个子项 · 更新 ${fmtAgo(it.updated_at)}</span>
+        </div>
+        <div class="mini-list">${subs}</div>
+        <div class="editor-row" style="margin-top:8px">
+          <button class="btn btn-ghost btn-xs" data-action="collection-sub-add" data-id="${esc(it.id)}">➕ 子项</button>
+          <button class="btn btn-ghost btn-xs" data-action="collection-edit" data-id="${esc(it.id)}">✏️ 编辑</button>
+          <button class="btn btn-ghost btn-xs" data-action="collection-delete" data-id="${esc(it.id)}" data-name="${esc(it.name || '')}">🗑 删除</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    $('#view').innerHTML = `
+      <div class="toolbar">
+        <div class="chips">${chips}</div>
+        <button class="btn btn-sm" data-action="collection-create" data-type="collection">➕ 新增合集</button>
+        <button class="btn btn-sm" data-action="collection-create" data-type="misc">➕ 新增杂集</button>
+        <span class="dim">共 ${fmtNum(c.items.length)} 个${c.q ? ` · 搜索「${esc(c.q)}」` : ''} · 子项共 ${fmtNum(c.subTotal || 0)} 个</span>
+      </div>
+      ${c.items.length ? cards : '<div class="empty"><div class="empty-ico">📚</div><div>还没有合集 / 杂集，点上方按钮创建</div></div>'}`;
+    updatePageSub(`合集 ${fmtNum(counts.collection)} 个 · 杂集 ${fmtNum(counts.misc)} 个`);
+  }
+
+  function collectionForm(item, defaultType) {
+    const existing = !!item;
+    openForm({
+      title: existing ? `编辑${item.type === 'misc' ? '杂集' : '合集'} #${item.id}` : `新增${defaultType === 'misc' ? '杂集' : '合集'}`,
+      okText: existing ? '保存修改' : '创建',
+      fields: [
+        { key: 'name', label: '名称', value: existing ? item.name : '', required: true },
+        {
+          key: 'type', label: '类型', type: 'select', value: existing ? item.type : (defaultType || 'collection'),
+          options: [{ v: 'collection', l: '📚 合集' }, { v: 'misc', l: '📦 杂集' }]
+        }
+      ],
+      onSubmit: async (v) => {
+        if (existing) {
+          await apiPost('/collections/update', { id: Number(item.id), patch: { name: v.name, type: v.type } });
+          toast('✅ 已更新');
+        } else {
+          await apiPost('/collections/create', { name: v.name, type: v.type });
+          toast('✅ 已创建');
+        }
+        await show('collections');
+      }
+    });
+  }
+
+  function subCollectionForm(collectionId, sub) {
+    const existing = !!sub;
+    openForm({
+      title: existing ? `编辑子项 #${sub.id}` : `新增子项（合集 #${collectionId}）`,
+      okText: existing ? '保存修改' : '创建',
+      fields: [
+        { key: 'name', label: '名称', value: existing ? sub.name : '', required: true },
+        { key: 'link', label: '链接', value: existing ? sub.link : '', placeholder: 'https://t.me/...' }
+      ],
+      onSubmit: async (v) => {
+        if (existing) {
+          await apiPost('/collections/sub/update', { id: Number(sub.id), patch: { name: v.name, link: v.link } });
+          toast('✅ 子项已更新');
+        } else {
+          await apiPost('/collections/sub/create', { collection_id: Number(collectionId), name: v.name, link: v.link });
+          toast('✅ 子项已创建');
+        }
+        await show('collections');
+      }
+    });
+  }
+
+  async function deleteCollection(id, name) {
+    const ok = await confirmDialog({
+      title: '删除合集',
+      body: `<div>确定删除 <b>${esc(name || `#${id}`)}</b>（#${esc(id)}）吗？</div>
+             <div class="dim" style="margin-top:8px">该合集下的所有子项会一并删除，且不可恢复。</div>`,
+      okText: '确认删除'
+    });
+    if (!ok) return;
+    const r = await apiPost('/collections/delete', { id: Number(id), confirm: true });
+    toast(`🗑 已删除${r.removedSubs ? `（含 ${r.removedSubs} 个子项）` : ''}`);
+    await show('collections');
+  }
+
+  async function deleteSubCollection(id, name) {
+    const ok = await confirmDialog({
+      title: '删除子项',
+      body: `<div>确定删除子项 <b>${esc(name || `#${id}`)}</b> 吗？</div>`,
+      okText: '确认删除'
+    });
+    if (!ok) return;
+    await apiPost('/collections/sub/delete', { id: Number(id), confirm: true });
+    toast('🗑 子项已删除');
+    await show('collections');
+  }
+
+  /* ============================ 数据库存储（并入「原始数据」） ============================ */
+
+  /** 数据库存储统计区块：整库汇总卡片 + 各集合明细表 */
+  function dbStatsSectionHtml() {
+    const d = state.dbstats.data;
+    if (!d) return '<div class="callout"><span>🗄</span><div>数据库统计加载中…</div></div>';
+    const t = d.totals || {};
+    const rows = (d.collections || []).map(c => `<tr>
+      <td><b class="mono">${esc(c.name)}</b> <span class="dim">${esc(c.label)}</span></td>
+      <td class="num">${fmtNum(c.count)}</td>
+      <td class="num">${fmtBytes(c.size)}</td>
+      <td class="num">${fmtBytes(c.storageSize)}</td>
+      <td class="num">${fmtBytes(c.indexSize)}</td>
+      <td class="num">${fmtNum(c.nindexes)}</td>
+      <td class="num">${fmtBytesFixed(c.avgObjSize)}</td>
+    </tr>`).join('');
+
+    const stats = d.available && t
+      ? [
+        statCard('🗄 集合数', t.collections, 'database: ' + (d.database || '—')),
+        statCard('📄 文档总数', t.objects, '整库 objects'),
+        sizeCard('💾 存储占用', t.storageSize, 'storageSize（磁盘实际占用）', 'is-accent'),
+        sizeCard('📦 数据体积', t.dataSize, 'dataSize（未压缩）'),
+        sizeCard('🔑 索引占用', t.indexSize, `${fmtNum(t.indexes)} 个索引`),
+        sizeCard('📐 平均文档', t.avgObjSize, 'avgObjSize')
+      ].join('')
+      : statCard('🗄 数据库统计', null, '当前套餐不允许读取存储大小', 'is-warn');
+
+    return `
+      <div class="toolbar">
+        <b style="font-size:13px">🗄 数据库存储</b>
+        <button class="btn btn-sm" data-action="dbstats-refresh">🔄 重新统计</button>
+        <span class="dim">库名 <code>${esc(d.database || '—')}</code> · 统计时间 ${fmtTime(d.at)}${d.available ? '' : ' · 已降级'}</span>
+      </div>
+      <div class="stats">${stats}</div>
+      ${d.available ? '' : `<div class="callout" style="margin:14px 0"><span>⚠️</span><div><b>无法读取存储大小：</b>${esc(d.reason || '未知原因')}<br>
+        当前仅在支持 <code>dbStats</code> / <code>collStats</code> 的 MongoDB 部署上显示大小；文档数仍可在下方跨集合浏览中查看。</div></div>`}
+      <div class="card" style="margin-bottom:18px">
+        <div class="card-head"><h3>各集合明细</h3><span class="dim">按数据体积降序</span></div>
+        <div class="table-wrap table-scroll">
+          <table>
+            <thead><tr><th>集合</th><th class="num">文档数</th><th class="num">数据体积</th><th class="num">存储占用</th><th class="num">索引占用</th><th class="num">索引数</th><th class="num">平均文档</th></tr></thead>
+            <tbody>${rows || '<tr><td colspan="7"><div class="empty">没有集合数据</div></td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  async function refreshDbStats() {
+    toast('🔄 正在重新统计…');
+    await loadDbStats(true);
+    if (state.view === 'raw') renderRaw(); else await show(state.view);
+    toast('✅ 统计已更新');
+  }
+
   /* ============================ 视图调度 ============================ */
 
   const VIEW_META = {
@@ -1129,13 +2109,26 @@
       load: async () => { const d = await apiGet('/groups'); state.chats = d.items || []; },
       render: renderChats
     },
+    transport: { title: '搬运收录', load: loadTransport, render: renderTransport },
+    articles: { title: '文章', load: loadArticles, render: renderArticles },
+    collections: { title: '合集 / 杂集', load: loadCollections, render: renderCollections },
     stats: { title: '统计报表', load: loadStats, render: renderStats },
-    raw: { title: '原始数据', load: loadRaw, render: renderRaw },
+    raw: {
+      title: '原始数据',
+      // 「原始数据」= 数据库存储统计 + 集合浏览（原来的「数据库」视图已并入这里）
+      load: async () => { await Promise.all([loadRaw(), loadDbStats(false).catch(() => { })]); },
+      render: renderRaw
+    },
     logs: { title: '实时日志', load: async () => { }, render: renderLogs }
   };
 
   function setSearchVisible(view) {
-    $('#search-wrap').classList.toggle('hidden', !SEARCH_VIEWS.includes(view));
+    const visible = SEARCH_VIEWS.includes(view);
+    $('#search-wrap').classList.toggle('hidden', !visible);
+    if (visible) {
+      const input = $('#global-search');
+      if (input) input.placeholder = SEARCH_PLACEHOLDER[view] || '搜索，回车查询';
+    }
   }
 
   async function show(view) {
@@ -1143,6 +2136,8 @@
     state.view = view;
     document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('is-active', b.dataset.view === view));
     $('#page-title').textContent = VIEW_META[view].title;
+    // 统计报表：让底部「操作日志明细」撑满剩余高度（否则内容悬在中间、不贴底）
+    $('#view').classList.toggle('view-fill', view === 'stats');
     setSearchVisible(view);
 
     if (state.loading) return;
@@ -1169,6 +2164,41 @@
 
   function bindViewEvents() {
     const view = $('#view');
+    let dragTagName = null; // 标签排序：正在拖拽的标签名
+
+    // 标签「置顶排序」：拖动卡片即时换位，松手后由「保存排序」落库
+    view.addEventListener('dragstart', (e) => {
+      if (state.view !== 'tags' || state.tagsMode !== 'sort') return;
+      const card = e.target && e.target.closest ? e.target.closest('.tag-card') : null;
+      if (!card) return;
+      dragTagName = card.dataset.tag;
+      card.classList.add('is-dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        try { e.dataTransfer.setData('text/plain', dragTagName); } catch { /* 某些浏览器会抛错 */ }
+      }
+    });
+    view.addEventListener('dragover', (e) => {
+      if (state.view !== 'tags' || state.tagsMode !== 'sort' || !dragTagName) return;
+      const card = e.target && e.target.closest ? e.target.closest('.tag-card') : null;
+      if (!card) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      const dragging = view.querySelector('.tag-card.is-dragging');
+      if (!dragging || dragging === card) return;
+      const rect = typeof card.getBoundingClientRect === 'function' ? card.getBoundingClientRect() : null;
+      const after = rect && rect.width > 0 ? (e.clientX - rect.left) > rect.width / 2 : false;
+      const grid = card.parentElement;
+      if (grid) grid.insertBefore(dragging, after ? card.nextSibling : card);
+    });
+    view.addEventListener('drop', (e) => {
+      if (state.view === 'tags' && state.tagsMode === 'sort') e.preventDefault();
+    });
+    view.addEventListener('dragend', () => {
+      const dragging = view.querySelector('.tag-card.is-dragging');
+      if (dragging) dragging.classList.remove('is-dragging');
+      dragTagName = null;
+    });
 
     view.addEventListener('click', async (e) => {
       const el = e.target.closest('[data-action]');
@@ -1212,7 +2242,23 @@
           case 'tag-media':
             state.media.tag = el.dataset.tag;
             state.media.page = 1;
+            if ($('#detail-dialog').open) $('#detail-dialog').close();
             await show('media'); break;
+          // 标签视图：详情 / 增删 / 置顶排序
+          case 'tag-card-open': openTagDetail(el.dataset.tag); break;
+          case 'tag-create': createTag(); break;
+          case 'tag-delete': await deleteTag(el.dataset.tag); break;
+          case 'tag-mode': {
+            const mode = el.dataset.mode;
+            state.tagsMode = state.tagsMode === mode ? 'normal' : mode;
+            renderTags();
+            break;
+          }
+          case 'tag-sort-save': await saveTagOrder(); break;
+          case 'tag-sort-cancel':
+            state.tagsMode = 'normal';
+            renderTags();
+            break;
           case 'clear-tag':
             state.media.tag = '';
             state.media.page = 1;
@@ -1224,9 +2270,59 @@
           case 'chat-create': chatForm(null); break;
           case 'chat-edit': chatForm(state.chats.find(c => String(c.id) === el.dataset.id)); break;
           case 'chat-delete': await deleteChat(el.dataset.id, el.dataset.name); break;
-          // 报表
-          case 'stats-period':
-            state.stats.period = el.dataset.period;
+          // 搬运收录 CRUD + 链接活性检查
+          case 'transport-create': transportForm(null); break;
+          case 'transport-edit': transportForm(state.transport.items.find(x => String(x.chat_id) === el.dataset.id)); break;
+          case 'transport-delete': await deleteTransport(el.dataset.id, el.dataset.name); break;
+          case 'transport-check': await checkTransport(el.dataset.id); break;
+          case 'transport-check-all': await checkAllTransport(); break;
+          case 'transport-status':
+            state.transport.status = el.dataset.status;
+            state.transport.page = 1;
+            await show('transport'); break;
+          case 'transport-page': await pageTo(state.transport, el, show); break;
+          case 'transport-open': {
+            const it = state.transport.items.find(x => String(x.chat_id) === el.dataset.id);
+            if (it && it.link) window.open(it.link, '_blank', 'noopener');
+            break;
+          }
+          // 文章 / 子文章 CRUD
+          case 'article-create': articleForm(null); break;
+          case 'article-edit': articleForm(state.articles.items.find(x => String(x.id) === el.dataset.id)); break;
+          case 'article-delete': await deleteArticle(el.dataset.id, el.dataset.name); break;
+          case 'article-sub-add': subArticleForm(el.dataset.id, null); break;
+          case 'article-sub-edit': {
+            const parent = state.articles.items.find(x => (x.subs || []).some(s => String(s.id) === el.dataset.id));
+            const sub = parent && (parent.subs || []).find(s => String(s.id) === el.dataset.id);
+            subArticleForm(parent ? parent.id : null, sub);
+            break;
+          }
+          case 'article-sub-delete': await deleteSubArticle(el.dataset.id, el.dataset.name); break;
+          case 'articles-page': await pageTo(state.articles, el, show); break;
+          // 合集 / 杂集 CRUD
+          case 'collection-create': collectionForm(null, el.dataset.type); break;
+          case 'collection-edit': collectionForm(state.collectionsView.items.find(x => String(x.id) === el.dataset.id), null); break;
+          case 'collection-delete': await deleteCollection(el.dataset.id, el.dataset.name); break;
+          case 'collection-type':
+            state.collectionsView.type = el.dataset.type;
+            await show('collections'); break;
+          case 'collection-sub-add': subCollectionForm(el.dataset.id, null); break;
+          case 'collection-sub-edit': {
+            const parent = state.collectionsView.items.find(x => (x.subs || []).some(s => String(s.id) === el.dataset.id));
+            const sub = parent && (parent.subs || []).find(s => String(s.id) === el.dataset.id);
+            subCollectionForm(parent ? parent.id : null, sub);
+            break;
+          }
+          case 'collection-sub-delete': await deleteSubCollection(el.dataset.id, el.dataset.name); break;
+          // 数据库存储统计
+          case 'dbstats-refresh': await refreshDbStats(); break;
+          // 报表：统一按年统计，顶栏 ◀ ▶ 切换年份
+          case 'stats-year-prev':
+            state.stats.year = Math.max(2000, state.stats.year - 1);
+            state.stats.data = null;
+            await show('stats'); break;
+          case 'stats-year-next':
+            state.stats.year = Math.min(2100, state.stats.year + 1);
             state.stats.data = null;
             await show('stats'); break;
           default: break;
@@ -1243,7 +2339,9 @@
       const action = el.dataset.action.replace('-input', '');
       const pager = action === 'media-page' ? state.media
         : action === 'users-page' ? state.users
-          : action === 'oplog-page' ? state.oplogs : state.raw;
+          : action === 'transport-page' ? state.transport
+            : action === 'articles-page' ? state.articles
+              : action === 'oplog-page' ? state.oplogs : state.raw;
       const v = parseInt(el.value, 10);
       if (v >= 1 && v <= pager.totalPages) {
         pager.page = v;
@@ -1277,6 +2375,14 @@
         state.users.pageSize = parseInt(el.value, 10) || 20;
         state.users.page = 1;
         await show('users');
+      } else if (el.id === 'transport-pagesize') {
+        state.transport.pageSize = parseInt(el.value, 10) || 20;
+        state.transport.page = 1;
+        await show('transport');
+      } else if (el.id === 'articles-pagesize') {
+        state.articles.pageSize = parseInt(el.value, 10) || 20;
+        state.articles.page = 1;
+        await show('articles');
       } else if (el.id === 'raw-collection') {
         state.raw.collection = el.value;
         state.raw.page = 1;
@@ -1285,14 +2391,6 @@
         state.raw.sort = parseInt(el.value, 10) || -1;
         state.raw.page = 1;
         await show('raw');
-      } else if (el.id === 'stats-year') {
-        state.stats.year = parseInt(el.value, 10);
-        state.stats.data = null;
-        await show('stats');
-      } else if (el.id === 'stats-month') {
-        state.stats.month = parseInt(el.value, 10);
-        state.stats.data = null;
-        await show('stats');
       } else if (el.id === 'oplog-category') {
         state.oplogs.category = el.value;
         state.oplogs.page = 1;
@@ -1617,6 +2715,9 @@
       if (state.view === 'media') { state.media.q = v; state.media.page = 1; show('media'); }
       else if (state.view === 'users') { state.users.q = v; state.users.page = 1; show('users'); }
       else if (state.view === 'tags') { show('tags'); }
+      else if (state.view === 'transport') { state.transport.q = v; state.transport.page = 1; show('transport'); }
+      else if (state.view === 'articles') { state.articles.q = v; state.articles.page = 1; show('articles'); }
+      else if (state.view === 'collections') { state.collectionsView.q = v; show('collections'); }
     };
     input.addEventListener('input', () => {
       sync();
@@ -1667,43 +2768,74 @@
           case 'detail-keep': await setGroupCleanable(el.dataset.group, false); break;
           case 'desc-edit': {
             const block = el.closest('.msg-block');
-            block.querySelector('[data-role="text"]').classList.add('hidden');
-            block.querySelector('[data-role="editor"]').classList.remove('hidden');
-            block.querySelector('[data-role="input"]').focus();
+            block.querySelector('.msg-text').classList.add('hidden');
+            block.querySelector('.msg-editor').classList.remove('hidden');
+            block.querySelector('.msg-editor textarea').focus();
             break;
           }
           case 'desc-cancel': {
             const block = el.closest('.msg-block');
-            block.querySelector('[data-role="editor"]').classList.add('hidden');
-            block.querySelector('[data-role="text"]').classList.remove('hidden');
+            block.querySelector('.msg-editor').classList.add('hidden');
+            block.querySelector('.msg-text').classList.remove('hidden');
             break;
           }
           case 'desc-save': await saveDescription(el.dataset.file, el.closest('.msg-block')); break;
+          case 'detail-pick': {
+            // 点媒体/描述块 = 选中；点编辑区、标签区、表单控件不算（避免误取消选中）
+            const t = e.target;
+            if (t.closest('.msg-editor, .tag-picker, .tag-edit')) break;
+            if (/^(INPUT|TEXTAREA|BUTTON|SELECT)$/.test(t.tagName || '')) break;
+            // 标签区的按钮虽在 .tag-edit 内，但按钮本身已由上面拦下；
+            // 这里再兜一层：按钮/链接的点击永远不改变选中态
+            if (t.closest('button, a, label, .btn')) break;
+            selectDetailMedia(el.dataset.file);
+            break;
+          }
           case 'tag-add-prompt': {
             const block = el.closest('.msg-block');
-            const picker = block.querySelector('[data-role="tag-picker"]');
-            picker.classList.toggle('hidden');
-            const input = block.querySelector('[data-role="tag-input"]');
-            if (input && !picker.classList.contains('hidden')) input.focus();
+            const picker = block.querySelector('.tag-picker');
+            setTagPicker(block, picker.classList.contains('hidden'));
+            break;
+          }
+          case 'tag-cancel': {
+            // 取消：收起标签选择区、清空输入（不写库）
+            setTagPicker(el.closest('.msg-block'), false);
             break;
           }
           case 'tag-add': {
-            const tag = el.dataset.tag || el.closest('.msg-block').querySelector('[data-role="tag-input"]').value.trim();
+            // 定点按钮带 data-tag；输入框的「➕ 添加」改为取脚本里已渲染的值
+            const block = el.closest('.msg-block');
+            const input = block && block.querySelector('.tag-input');
+            const tag = el.dataset.tag || (input ? input.value.trim() : '');
+            const file = el.dataset.file || (block ? block.dataset.msg : '');
             if (!tag) { toast('请输入标签名', true); break; }
-            await applyMediaTags(el.dataset.file, { add: [tag] });
+            if (!file) { toast('未找到目标媒体，请重新打开详情', true); break; }
+            await applyMediaTags(file, { add: [tag] });
             break;
           }
           case 'tag-remove': await applyMediaTags(el.dataset.file, { remove: [el.dataset.tag] }); break;
-          case 'tag-group-add': {
-            const target = state.detail && state.detail.group ? state.detail.group.group_id : el.dataset.group;
-            const groupBlock = el.closest('.editor');
-            const tag = el.dataset.tag || (groupBlock.querySelector('[data-role="group-tag-input"]') || {}).value;
-            if (!tag || !String(tag).trim()) { toast('请输入标签名', true); break; }
-            const r = await apiPost('/media/tags', { groupId: target, add: [String(tag).trim()] });
-            toast(`🏷 已给整组添加标签（当前组内标签：${r.tags.join('、') || '无'}）`);
-            await openMediaDetail(target);
+          case 'tag-rename': {
+            const oldName = el.dataset.tag;
+            renameTagForm(oldName);
             break;
           }
+          // 标签详情：顶栏切换置顶 / 直接打开该标签下的媒体 / 删除
+          case 'tag-detail-pin': await toggleTagPin(el.dataset.tag); break;
+          case 'tag-media-open': {
+            const groupId2 = el.dataset.group;
+            dlg.close();
+            await openMediaDetail(groupId2);
+            break;
+          }
+          case 'tag-detail-media': {
+            const name = el.dataset.tag;
+            dlg.close();
+            state.media.tag = name;
+            state.media.page = 1;
+            await show('media');
+            break;
+          }
+          case 'tag-detail-delete': await deleteTag(el.dataset.tag); break;
           default: break;
         }
       } catch (err) {
@@ -1711,7 +2843,7 @@
       }
     });
 
-    // 标签输入框回车 = 添加（单条 message 或整组）
+    // 标签输入框回车 = 添加（作用于选中的那条 message）
     dlg.addEventListener('keydown', async (e) => {
       if (e.key !== 'Enter') return;
       const input = e.target;
@@ -1719,18 +2851,11 @@
       e.preventDefault();
       try {
         if (input.dataset.role === 'tag-input') {
-          const block = input.closest('.msg-block');
-          const file = block.querySelector('[data-action="tag-add"]').dataset.file;
+          const block = input.closest ? input.closest('.msg-block') : null;
+          const file = (block && block.dataset.msg) || '';
           const tag = input.value.trim();
+          if (!file) { toast('未找到目标媒体，请重新打开详情', true); return; }
           if (tag) await applyMediaTags(file, { add: [tag] });
-        } else if (input.dataset.role === 'group-tag-input') {
-          const tag = input.value.trim();
-          const groupId = state.detail && state.detail.group ? state.detail.group.group_id : null;
-          if (tag && groupId) {
-            const r = await apiPost('/media/tags', { groupId, add: [tag] });
-            toast(`🏷 已给整组添加标签（当前组内标签：${r.tags.join('、') || '无'}）`);
-            await openMediaDetail(groupId);
-          }
         }
       } catch (err) {
         toast(err.message, true);

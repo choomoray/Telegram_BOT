@@ -2,7 +2,7 @@
 
 一个功能丰富的 Telegram Bot，基于 Node.js 开发，用于群组/频道媒体消息的自动收录、检索、回复与管理，并集成群组管理和用户权限控制。
 
-**版本:** 0.5.3 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
+**版本:** 0.5.9 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
 
 ---
 
@@ -447,8 +447,27 @@ function generateGroupIdFromMessage(msg) { ... }
 - 分批发送（Telegram 限制每批最多 10 条）
 - 错误重试
 
-#### tagUi.js — 标签按钮键盘（两区版面）
+#### linkHealth.js — 收录链接活性检查
 
+`/transport` 列表、控制台「搬运收录」与每 6 小时的巡检任务共用：
+
+| 导出 | 功能 |
+|------|------|
+| `checkTransportLink(record)` | 实测单条：**优先按链接里的 `t.me/<username>` 探测**（机器人通常并不在搬运来源频道里，直接按 chat_id 查会得到 "chat not found"，早期实现因此把所有公开频道误报为失效）→ `ok`；公开用户名解析失败（频道已删除/改名/被封）→ `dead`；机器人能按 chat_id 访问但已被踢/退出 → `dead`；**私有/消息链接**（`t.me/c/…`）无权验证 → `unknown`（绝不判死）；429/网络/5xx → `unknown` |
+| `checkAllTransports({ records, concurrency, force, maxAgeMs, onResult })` | 并发检查（默认 4，带节流与 429 兜底）并写回数据库；返回 `{ total, checked, ok, dead, newlyDead, recovered, unknown, skipped }` |
+| `formatDeadReport(deadList)` | 失效清单文本（名称 / chat_id / 链接 / 原因），通知与菜单共用 |
+| `notifyAdmins(text)` | 发送给 `ADMIN_CHAT_ID`（逗号分隔的多个管理员） |
+| `transportLinkUrl(record)` | 见 `utils/tgLink.js`（重新导出） |
+| `publicUsernameOf(url)` / `rateLimitRetryAfter(err)` | 从链接里取公开用户名；从 429 错误里取建议重试秒数 |
+| `isDeadError(err)` / `isTransientError(err)` | 区分"链接失效"与"临时故障"（**429/5xx/网络一律算临时**，绝不算失效） |
+
+**检查触发点：** ① 机器人 `/transport` 进列表时自动补查从未检查或超过 6 小时的记录（每次最多 8 条，不阻塞渲染，查完刷新列表并私聊提醒新失效项）；② 菜单/明细里的「🔍 检查链接活性」（全量）与「检查该链接活性」（单条）；③ 新增收录 / 改链接 / 改 chat_id 后立即实测并回显结论；④ `index.js` 每 6 小时全量巡检，新失效的链接提醒管理员（结果记为 `transport_check` 操作日志）。
+
+#### tgLink.js — Telegram 链接（纯函数）
+
+`transportLinkUrl({ chat_id, url })`：有 http(s) 链接就用它；否则用 chat_id 推导 `https://t.me/c/<内部ID>`——**仅当形如 `-100` + 至少 9 位**（真正的超级群/频道）才推导，避免 `-1002` 这类普通群被误判成「频道 2」。控制台与机器人共用，保证跳转链接口径一致。
+
+#### tagUi.js — 标签按钮键盘（两区版面）
 `/send` 打标签面板与 `/tag` 标签模式共用：
 
 | 导出 | 功能 |
@@ -456,7 +475,7 @@ function generateGroupIdFromMessage(msg) { ... }
 | `buildTagKeyboard(tags, opts)` | 单区列表：每行 4 个、每页 40 个 + 翻页按钮；`marker` 可给按钮加 `✅`/`+` 前缀 |
 | `buildTagRegionKeyboard(applied, library, opts)` | **两区版面**（上区已有标签 / 下区标签库，见下） |
 | `splitTagInput(text)` | 手动输入解析（空格 / `、` / `,` 分隔，去重保留首现） |
-| `matchTagsInText(text, tags)` | 文本中识别已存在的标签（子串匹配，大小写不敏感） |
+| `matchTagsInText(text, tags)` | 文本中识别已存在的标签（大小写不敏感）。**纯英文/数字标签按整词匹配**（`hello` 不会在 `hello` 里匹配出 `h`/`e`/`he`/`el`，需要片段请自行加标签）；含中文等非 ASCII 字符的标签仍按子串匹配 |
 | `paginate(items, page)` | 分页切片（每页 40 个） |
 
 **两区版面**（`/send` 发送成功后的打标签面板、`/tag` → 修改消息标签 → 🏷️ 添加标签）：
@@ -624,7 +643,7 @@ module.exports = {
 
 **查看统计的两种方式：**
 - 机器人内 `/log`：近 7 天明细（大类 → 动作）+ 本月 / 本年汇总 + 活跃时段条形图（时间口径按北京时间，兼容无 `action` 的历史数据）
-- Web UI「统计报表」：月报 / 年报（环比、每日趋势、动作明细、大类分布、活跃用户、失败统计）+ 可筛选的操作日志明细表
+- Web UI「统计报表」：统一**按年统计**（顶栏右上角 ◀ ▶ 切换年份）、环比、**每日操作量 GitHub 全年方格图**、动作明细、大类分布、活跃用户、**活跃时间**、失败统计 + 可筛选的操作日志明细表
 
 **索引**（`db/index.js`）：`time -1`、`date -1`、`{action,date}`、`{category,date}`、`{userId,date}`、`{result,date}`
 
@@ -684,11 +703,30 @@ module.exports = {
 
 | 函数 | 功能 |
 |------|------|
-| `upsertTransport(transport)` | 插入或更新搬运记录 |
-| `getAllTransports()` | 获取所有搬运源 |
+| `upsertTransport(transport)` | 插入或更新搬运记录（更新会作废旧活性结论） |
+| `getAllTransports()` | 获取所有搬运源（按搬运次数降序） |
 | `getTransportByChatId(chatId)` | 按 chat_id 查询 |
 | `deleteTransport(chatId)` | 删除搬运记录 |
+| `createTransport({ chat_id, chat_name, url, num })` | 新建收录记录（控制台用，重复 chat_id 返回 `{ ok:false, error }`） |
+| `updateTransport(chatId, { chat_name, url, num })` | 修改收录记录（改链接后清空 `alive`/`last_check_*`，等待重查） |
+| `updateTransportStatus(chatId, { status, error, chatName, previousAlive })` | 写回活性检查结论（`alive`：true/false/未知保持原值 + `last_check_at/status/error`） |
+| `getTransportHealth()` | 活性巡检用列表（等价于 `getAllTransports`） |
 | `extractChatInfo(url, bot)` | 从 t.me 链接解析出群组 chat_id 和名称 |
+
+> **活性字段：** `alive`（true=有效 / false=失效 / null=未检查）、`last_check_at`、`last_check_status`（ok/dead/unknown）、`last_check_error`。由 `utils/linkHealth.js` 写入，机器人、控制台与巡检任务共用同一份结论。
+
+#### db/dbStats.js — 数据库存储统计
+
+控制台「数据库」视图与概览卡片共用（15 秒缓存，避免频繁打 Atlas）：
+
+| 函数 | 功能 |
+|------|------|
+| `getDbStats({ force })` | 整库 `dbStats` + 逐集合 `collStats`：集合名/中文名、`count`、`size`、`storageSize`、`indexSize`、`nindexes`、`avgObjSize`、整库 totals；按数据体积降序 |
+| `getDbStatsSummary()` | 概览卡片用的精简版（`objects`/`collections`/`storageSize`/`dataSize`/`indexSize`） |
+| `clearDbStatsCache()` | 手动失效缓存 |
+| `COLLECTION_LABELS` | 集合名 → 中文名映射 |
+
+> **降级策略：** 若部署（部分共享集群 / 受限账号）不允许 `dbStats` 或 `collStats`，自动退回 `estimatedDocumentCount()` 只取文档数，并在返回值里给出 `available:false` + `reason`；前端据此显示原因而不是报错。实测 MongoDB Atlas 免费版（M0）该两条命令**可用**，因此大小/占用能正常显示。
 
 #### db/log.js — 操作日志
 
@@ -826,7 +864,7 @@ for (const file of commandFiles) {
 | `/random_videos [N]` | randomVideos.js | 随机视频 | 可按时长筛选；可指定数量：N 1~10 直接发送 N 个视频媒体，N>=11 以标题列表展示 |
 | `/search` | search.js | 搜索模式 | 进入 search 模式，后续消息全部作为查询 |
 | `/setting` | setting.js | 全局设置 | 进入 setting 模式，显示设置面板内联键盘 |
-| `/transport` | transport.js | 搬运管理 | 进入 transport 模式，管理搬运链接的 CRUD |
+| `/transport` | transport.js | 搬运管理 | 进入 transport 模式，管理搬运链接的 CRUD；列表带**活性徽标**（✅ 有效 / ❌ 失效 / ❔ 未检查）与失效原因，进模式时自动补查过期记录，可「🔍 检查链接活性」全量实测；新增 / 改链接 / 改 chat_id 后立即实测并把结论直接回给用户 |
 
 #### handlers/modes/ — 模式系统
 
@@ -922,15 +960,18 @@ node index.js webui       # 或 npm run start:webui
 
 | 视图 | 内容 |
 |------|------|
-| 📊 概览 | 媒体 / 有描述 / 可清理组 / 用户 / 标签 / 聊天 / 日志 统计卡片、媒体类型分布、最近操作、最新媒体组（可点开详情）、快捷入口 |
+| 📊 概览 | 媒体 / 有描述 / 可清理组 / 用户 / 标签 / 聊天 / 日志 统计卡片、**数据库占用卡片（storageSize + 文档数 + 索引占用，取不到时标注"当前套餐不可读取大小"）**、媒体类型分布、最近操作、最新媒体组（可点开详情）、快捷入口 |
 | 🖼 媒体库 | 以 `group_list` 为单位的媒体组卡片：**图片与视频封面缩略图**（服务端代理 Telegram `getFile`）、描述摘要（空描述标为「可清理」）、标签、类型/组数/位置；筛选「全部 / 有描述 / 可清理」+ 顶部搜索（按 `message.text`）+ **标签筛选**（从「标签」视图点进来，可用胶囊清除）+ 分页；点开为详情对话框 |
-| 📋 媒体详情 | 媒体缩略图条、**一键「↗ 跳转 Telegram 查看」**（在「复制 group_id」之前，按群组位置/频道位置生成 `t.me/c/…` 链接）、**在线改描述**（保存会同步 Telegram caption，超 48 小时只改库并提示）、**在线增删标签**（逐条 media 或整组批量，可新建标签，自动维护标签库计数）、一键「标记为可清理 / 保留」（改写 `group_list.is_delete`） |
+| 📋 媒体详情 | 媒体缩略图条、**一键「↗ 跳转 Telegram 查看」**、**在线改描述**（保存会同步 Telegram caption，超 48 小时只改库并提示）、**点选媒体后改标签**（点缩略图或描述块选中该媒体：已有标签高亮、点 ✕ 直接移除；没有标签则高亮「➕ 添加标签」；未选中时标签区置灰不可点。原「整组操作」已移除，标签按 message 独立）、一键「标记为可清理 / 保留」（改写 `group_list.is_delete`） |
 | 🧹 清理中心 | 按「一周前 / 一个月前 / 全部」给出**精确**的待清理组数与媒体数（`POST /api/clean` 预览），确认后执行与机器人 `/clean` 相同的删除逻辑；下方为可清理组预览 |
-| 🏷 标签 | 标签库卡片：置顶位置、使用次数（`message.tags` 统计）、计数，按使用量排序 + 搜索过滤；**点击标签直接跳到该标签下的全部媒体组** |
+| 🏷 标签 | 顶栏三个按钮：**➕ 添加标签**（表单新建，自动大写、重名拒绝）、**🗑️ 删除标签**（进入删除模式后点卡片二次确认删除，会同步清理所有 message）、**⭐ 置顶排序**（进入排序模式后**直接拖动卡片排序**，保存即按顺序写入置顶位置 1..N）；卡片显示置顶位置、使用次数、计数，**点击卡片进入标签详情**——详情顶栏显示置顶状态（`📍 已置顶（位置 N）` / `⭐ 未置顶`），**点一下即切换**置顶/取消置顶，正文**直接列出该标签下的媒体组（与「媒体库」同款方块卡片，点卡片直接打开媒体详情）**，底部可跳转到媒体库筛选全部；顶部搜索可过滤标签名 |
 | 👥 用户 | 用户表（名称 / ID / 状态 / 白名单 / 所在群组数 / 最近活跃），筛选「全部 / 白名单 / 已封禁」+ 搜索（名称或纯数字 ID）+ 分页；**支持新增 / 编辑（名称、状态、白名单、所在群组）/ 删除** |
 | 📢 群组 / 频道 | `channel_group` 记录与频道↔群组绑定关系（含绑定对象名称解析）；**支持新增 / 编辑 / 删除，绑定为双向写入**（改绑会清理旧对端，删除会解除对端绑定） |
-| 📈 统计报表 | **月报 / 年报**：操作总数、媒体产出、媒体组产出、活跃天数、失败次数（带环比）、每日柱状趋势、动作明细 Top15、大类分布、活跃用户，以及可筛选（大类 / 结果 / 关键词）的操作日志明细表 —— 面向"月表和年终统计"设计 |
-| 🗂 原始数据 | 原「数据库浏览」能力：单集合分页浏览 / 「全部数据库」跨集合概览、文档 JSON 就地修改与删除、插入模板 |
+| 🚚 搬运收录 | `transport` 记录表：**活性徽标**（✅ 有效 / ❌ 失效 / ❔ 未检查）、名称、`chat_id`、**一键「↗ Telegram」跳转**、搬运次数、最近检查时间与失败原因；筛选「全部 / 有效 / 失效 / 未检查」+ 搜索（名称 / 链接 / chat_id）+ 分页；**支持新增 / 编辑 / 删除**，并可按行「🔄 检查活性」或「🔍 全部检查活性」（检查结果写回数据库，与机器人共用同一份结论） |
+| 📄 文章 | `article` 卡片：标题（可点开链接）、子文章列表、更新时间、子文章数；**支持文章与子文章的增 / 改 / 删**（删除文章会级联删除子文章） |
+| 📚 合集 / 杂集 | `collection`（合集）与 `misc`（杂集）卡片：名称、子项列表（可点开链接）、子项数；按类型筛选 + 搜索；**支持合集/杂集与子项的增 / 改 / 删**（删除会级联删除子项） |
+| 📈 统计报表 | **统一按年统计**（顶栏右上角 `◀ 2026 年 ▶` 切换年份，无月报/年报页签）：操作总数、媒体产出、媒体组产出、活跃天数、失败次数（带环比）、**每日操作量 GitHub 全年方格图**（独占整条：7 行 = 周一…周日、每列一周，列宽自适应撑满卡片、窄屏横向滚动；整年每格一天，列顶标注月份，颜色随操作量分 5 档加深，悬停看当天媒体数）、动作明细 Top15、大类分布、活跃用户、**活跃时间**（北京时间 24 小时分布，0 次的小时用底色短桩区分，高峰柱标绿并在柱顶标出次数），以及可筛选（大类 / 结果 / 关键词）的操作日志明细表 —— 面向"年终统计"设计；底部明细表**撑满剩余高度**（表格内部滚动，不再悬在页面中间）。历史日志只有旧编号（`type`）时也都有可读中文名（如 23 → 「修改文本」），不再出现 `legacy_type_23` 之类的占位名 |
+| 🗄 数据库 / 原始数据 | **数据库存储统计 + 原始数据浏览合并为一个视图**：顶部为整库汇总卡（集合数 / 文档总数 / 存储占用 / 数据体积 / 索引占用 / 平均文档）与**各集合明细表**（文档数、数据体积、磁盘占用、索引占用、索引数、平均文档——平均文档保留两位小数），可「🔄 重新统计」；套件不允许 `dbStats`/`collStats` 时自动降级为仅文档数并给出原因。下方为**集合浏览**：单集合分页浏览 / 「全部数据库」跨集合概览、文档 JSON 就地修改与删除、插入模板 |
 | 📡 实时日志 | SSE 日志全屏视图，级别筛选（信息 / 成功 / 警告 / 错误）、暂停与清空 |
 
 **AI 操作台（Ctrl/⌘ + K 或左下角「AI 翻译」）：**
@@ -973,6 +1014,21 @@ node index.js webui       # 或 npm run start:webui
 | `GET /api/stats` | 月报 / 年报（`period=month|year&year=&month=`）：汇总、环比、每日趋势、动作/大类/用户分布、失败统计 |
 | `POST /api/users/create` \| `update` \| `delete` | 用户增 / 改（名称、状态、白名单、所在群组）/ 删（需 `confirm: true`） |
 | `POST /api/groups/create` \| `update` \| `delete` | 群组/频道增 / 改（含绑定，双向写入）/ 删（需 `confirm: true`，同时解除对端绑定） |
+| `GET /api/transport` | 搬运收录列表（`status=all\|alive\|dead\|unchecked`、`q` 名称/链接/chat_id、分页），返回 ✅/❌/❔ 活性状态、可点击 `link` 与四类计数 |
+| `POST /api/transport/create` \| `update` \| `delete` | 收录记录增 / 改（名称、链接、次数；改链接会作废旧活性结论）/ 删（需 `confirm: true`） |
+| `POST /api/transport/check` | 活性检查：带 `chat_id` 检查单条并写回结论；不带则全量检查，返回 `summary`（有效 / 失效 / 未知 / 新失效列表） |
+| `GET /api/articles` | 文章列表（`q` 标题/链接、分页、`withSubs=1` 附带子文章） |
+| `POST /api/articles/create` \| `update` \| `delete` | 文章增（自增 id）/ 改（标题、链接）/ 删（级联删除子文章，需 `confirm: true`） |
+| `POST /api/articles/sub/create` \| `update` \| `delete` | 子文章增 / 改 / 删（自动刷新父文章 `updated_at`） |
+| `GET /api/collections` | 合集/杂集列表（`type=all\|collection\|misc`、`q` 名称、`withSubs=1` 附带子项） |
+| `POST /api/collections/create` \| `update` \| `delete` | 合集/杂集增 / 改（名称、类型）/ 删（级联删除子项，需 `confirm: true`） |
+| `POST /api/collections/sub/create` \| `update` \| `delete` | 子项增 / 改 / 删（自动刷新父合集 `updated_at`） |
+| `GET /api/db-stats` | 数据库存储统计（整库 `dbStats` + 各集合 `collStats`，15 秒缓存；`force=1` 强制重算，取不到时返回 `available:false` + 原因） |
+| `POST /api/tags/create` | 新建标签（自动大写、≤20 字符、重名 409） |
+| `POST /api/tags/delete` | 删除标签（需 `confirm: true`，同步从所有 `message.tags` 移除） |
+| `POST /api/tags/rename` | 标签改名（`{ name, to }`，自动大写；同步改写所有 `message.tags`，重名 409 / 不存在 404） |
+| `POST /api/tags/pin` | 设置 / 取消置顶（`{ name, pin }`，`pin=0` 取消，上限 40） |
+| `POST /api/tags/reorder` | 按 `{ names: [...] }` 顺序批量写置顶位置 1..N（控制台拖拽排序保存用） |
 
 **实现要点：**
 - 使用 Node 内置 `http` 模块，无新增 npm 依赖（DeepSeek 调用使用 Node 内置 fetch）
@@ -1118,7 +1174,7 @@ handleGroupEditedMessage()
 | `/log` | 查看操作统计 | commands/log.js |
 | `/help` | 显示命令列表按钮 | commands/help.js |
 | `/setting` | 全局设置面板 | modes/settingMode.js |
-| `/transport` | 搬运链接管理 | modes/transportMode.js |
+| `/transport` | 搬运链接管理（列表带活性徽标与失效原因，进入时自动补查过期记录；支持全量/单条活性检查，新增与改链接后立即实测） | modes/transportMode.js、utils/linkHealth.js |
 | `/password` | 媒体文件密码设置 | modes/passwordMode.js |
 | `/manage` | 管理面板（群组/用户/白名单） | modes/manage/ |
 | `/exit` | 退出当前模式 | commands/exit.js |
@@ -1200,7 +1256,42 @@ handleGroupEditedMessage()
 
 ## 版本历史
 
-### v0.5.6（当前）
+### v0.5.9（当前）
+- **统计报表「每日操作量」统一为 GitHub 全年方格**：去掉「月报 / 年报」页签，报表统一按年统计，年份改为顶栏右上角 `◀ 2026 年 ▶` 左右切换（2000~2100 边界禁用）；方格图独占一条长卡片，**7 行 = 周一…周日、每列一周**，整年每格一天、列顶标注 1~12 月，列宽 `minmax(9px, 1fr)` 自适应撑满卡片（窄屏横向滚动），颜色随操作量分 5 档加深；移除右侧「最活跃的日子」。
+  - 修掉「方格只排成一行」的根因：`grid-auto-flow: column` 未显式声明行数时会把所有格子铺在第一行，现显式 `grid-template-rows: repeat(7, auto)` 并加静态回归测试守卫。
+- **新增「活跃时间」卡片**（排在「活跃用户」之后）：`/api/stats` 新增 `byHour`（北京时间整点 24 个小时桶，含媒体产出）；前端 24 根柱、**00~23 全部标注刻度**，0 次的小时用底色短桩区分（不再像有活动），每 6 小时一条淡分隔线，高峰柱标绿并在柱顶标出次数，底部汇总「高峰 HH:00 · N 次（占 X%）· 次高 …」；柱高改由 `grid-template-rows: 14px 1fr 13px` 精确换算，不再被 flex 收缩压扁。
+- **标签详情直接列媒体**：点标签卡片后正文用**与「媒体库」同款方块卡片**列出该标签下的媒体组（缩略图 / 状态徽标 / 描述 / 标签 / 媒体数），点卡片直接打开媒体详情，页脚保留「🖼 在媒体库中筛选」查看全部。
+- **修复媒体详情里标签根本点不动**（`pointer-events` 陷阱）：`.tag-edit.is-locked` 设了 `pointer-events: none`，选中后只加 `is-active` 而没有移除 `is-locked`，导致「➕ 添加标签」、标签上的 ✎/✕ 在浏览器里全部点不动（测试桩不实现 CSS 所以未暴露）。现在选中时移除 `is-locked`、未选中时加回，并补 `.tag-edit.is-active { pointer-events: auto }` 与静态 CSS 守卫。
+- **标签增删改齐全**：
+  - ➕ 添加标签：展开选择区，可点推荐标签或输入回车添加；**「➕ 添加标签」后面新增「取消」**（输入框那一行的「➕ 添加」后面也有），取消即收起并清空输入、不写库；
+  - ✕ 移除已有标签；**新增 ✎ 改名**（`POST /api/tags/rename`，自动大写、重名 409、不存在 404，同步改写所有 `message.tags`）；
+  - 只有一个媒体的组打开即自动选中，标签区直接可点。
+- **无文本记录的媒体也能补描述 + 打标签**：缩略图统一可点选，选中后自动补出「描述与标签」编辑块（虚线框 + `无文本记录` 标记，直接进入编辑态），保存描述时后端自动补建 `message` 记录。
+- **自动识别标签改为整词匹配**（`utils/tagUi.js: matchTagsInText`）：纯英文/数字标签按整词匹配，`hello` 不会再被拆成 `h`/`e`/`he`/`el`（`helloworld`、`a_hd_b` 也不命中）；含中文等非 ASCII 字符的标签仍按子串匹配（中文没有词边界，`这是HD画质` 仍能识别 `HD`）；正则元字符标签已转义。需要片段匹配时自行在标签库另加标签。
+- 测试：`tests/webuiViews.test.js` 扩充为 30 项（方格整年格数与色深分级、年份左右切换与边界禁用、活跃时间 24 小时与高峰、标签详情方块卡片、标签增删改与取消按钮、无文本记录媒体补描述、单媒体自动选中）；`tests/webui.test.js` 新增标签改名与 `byHour` 聚合用例（并让内存假集合支持 `tags.$` 位置更新）；`tests/tags.test.js` 新增英文整词匹配用例；`tests/uiStatic.test.js` 新增方格 7 行与标签区 `pointer-events` 静态守卫。全量 **199 项通过**。
+
+### v0.5.8
+- **控制台媒体详情改为「点选媒体再改标签」**：移除整组操作块；点击缩略图或描述块选中该媒体 → 已有标签高亮、点 ✕ 直接移除；该媒体没有标签则高亮「➕ 添加标签」；未选中时标签区置灰不可点（`pointer-events:none` + 按钮 `disabled`）。改完标签整块重渲染后仍保留选中态。标签仍按 message 独立，`POST /api/media/tags` 的整组用法保留（机器人侧在用）。
+- **修复收录链接活性误报失效**（`utils/linkHealth.js`）：原实现直接 `getChat(chat_id)`，而机器人通常并不在搬运来源频道里，38 条记录全部返回 "chat not found" → 被误判为 ❌ 失效。现在改为**优先按链接里的 `t.me/<username>` 探测**（实测 6/6 恢复为 ✅，并回填了最新频道名）；公开用户名解析失败才算 `dead`；私有/消息链接（`t.me/c/…`）机器人无权验证时判 `unknown` 而不是失效；**429 限流不再计入失效**（返回 `unknown` + `retry_after`，单条手动检查可按建议等待重试一次），批量检查加节流。
+- **统计报表**：底部「操作日志明细」改为撑满剩余高度、表格内部滚动（原先悬在页面中间不贴底）；历史日志编号补齐可读名称——`type=23` 现在是「修改文本」（`media_edit_text`），`-1`/缺失编号显示「未知操作」，不再出现 `legacy_type_23` 这类占位名（`utils/opLog.js` 新增 `LEGACY_TYPE_LABELS` / `legacyTypeLabel()`）。
+- **「数据库」视图并入「原始数据」**：顶部为数据库存储统计（整库汇总卡 + 各集合明细表），下方为集合浏览；概览与导航同步调整；**平均文档大小保留两位小数**（新增 `fmtBytesFixed`）。
+- **标签视图增强**：顶栏新增「➕ 添加标签 / 🗑️ 删除标签 / ⭐ 置顶排序」；点卡片进入标签详情，详情顶栏显示置顶状态并可**点击切换**（置顶时自动取下一个空位，满 40 提示）；「置顶排序」模式下可**直接拖动卡片排序**，保存后按顺序写入置顶位置 1..N（`db/tags.js: reorderTags` + `POST /api/tags/reorder`）。新增接口 `POST /api/tags/{create,delete,pin,reorder}`。
+- 测试：新增 `tests/linkHealth.test.js`（11 项：公开链接判活、私有链接不判死、429 不算失效、重试一次等）；`tests/webui.test.js` 新增标签接口与历史类型命名用例；`tests/webuiViews.test.js` 升级为带「HTML → DOM 树」解析的交互测试（媒体详情点选高亮、标签详情置顶切换、拖拽排序保存等 13 项）。
+
+### v0.5.7
+- **控制台新增 4 个视图**（`webui/public/app.js` + `index.html` 导航）：
+  - **🚚 搬运收录**：`transport` 增删改查 + 活性徽标（✅/❌/❔）+ 失效原因 + 「↗ Telegram」跳转（`utils/tgLink.js` 统一推导，修掉 `-1002` 被误判为频道的边界问题）+ 状态筛选/搜索/分页 + 单条与全量活性检查。
+  - **📄 文章**、**📚 合集 / 杂集**：父项与子项的增删改查（删除级联、自动维护父项 `updated_at`、id 业务自增），带搜索与类型筛选。
+  - **🗄 数据库**：整库 `dbStats` + 逐集合 `collStats`（文档数 / 数据体积 / 磁盘占用 / 索引占用 / 索引数 / 平均文档大小，按体积排序，15 秒缓存，可手动重算）；取不到时降级为仅文档数并给出原因。概览页新增「🗄 数据库占用」卡片。
+- **搬运收录链接活性检查**（`utils/linkHealth.js`，机器人与控制台共用同一份结论）：
+  - 判定：`getChat` 成功且机器人在群内 → ✅ 有效；会话不存在 / 机器人被踢 → ❌ 失效；网络/限流/5xx → ❔ 未知（不算失效）；结论写回 `transport.alive / last_check_at / last_check_status / last_check_error`。
+  - 触发点：机器人 `/transport` 列表自动补查过期（>6h）记录并私聊提醒新失效项；菜单/明细可全量或单条检查；新增、改链接、改 chat_id 后立即实测并回显；`index.js` 每 6 小时全量巡检，**新失效的链接提醒管理员**（`ADMIN_CHAT_ID`）并记 `transport_check` 日志。
+  - 机器人列表与管理界面显示活性徽标、统计行与失效原因。
+- 新增 `db/transport.js` 的 `createTransport / updateTransport / updateTransportStatus / getTransportHealth`，新增 `db/dbStats.js`、`utils/linkHealth.js`、`utils/tgLink.js`；新增操作日志动作 `transport_save / transport_delete / transport_check`。
+- 新增接口：`GET /api/transport`、`POST /api/transport/{create,update,delete,check}`、`GET /api/articles`、`POST /api/articles/{create,update,delete}`、`POST /api/articles/sub/{create,update,delete}`、`GET /api/collections`、`POST /api/collections/{create,update,delete}`、`POST /api/collections/sub/{create,update,delete}`、`GET /api/db-stats`。
+- 测试：`tests/webui.test.js` 新增 13 项领域接口用例（含活性检查注入、级联删除、降级分支），新增 `tests/tgLink.test.js`（链接推导边界）；新增 `tests/webuiViews.test.js`（用最小 DOM 桩在 Node 里**真跑** `public/app.js`，覆盖四个新视图的渲染、筛选/动作请求、字节格式化、降级提示，并回归"视图状态桶不得污染 `state.collections`"）；未登录 401 清单同步补齐新接口。
+
+### v0.5.6
 - **标签按钮改为两区版面**（`/send` 发送成功后的打标签面板、`/tag` → 修改消息标签 → 🏷️ 添加标签）：
   - **上区=已有标签**（作用目标上已打上的标签，置顶显示，按钮 `✅名称`，点击移除）；
   - **下区=标签库正常显示**（置顶标签 `pin>0` 按位置排在最前，其余按使用次数，按钮 `+名称`，点击添加）；

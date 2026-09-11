@@ -35,7 +35,30 @@ function splitTagInput(text) {
 }
 
 /**
- * 在文本中识别已存在的标签（子串匹配，大小写不敏感）
+ * 纯拉丁字母 / 数字 / 下划线的标签：按「整词」匹配，不做子串拆分
+ * （标签 hello 只认 hello，不会在 hello 里匹配出 h / e / he / el）
+ */
+const LATIN_TAG_RE = /^[A-Za-z0-9_]+$/;
+
+/**
+ * 整词匹配：标签两侧必须是文本边界（非 [A-Za-z0-9_] 字符）
+ * 中日韩等非拉丁字符天然算边界，因此「这是HD画质」仍能识别 HD
+ * @param {string} text
+ * @param {string} name
+ * @returns {boolean}
+ */
+function hasWholeWord(text, name) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // \b 是 ASCII 单词边界：前后紧邻 [A-Za-z0-9_] 时不算整词（如 hello 中的 he）
+    return new RegExp(`\\b${escaped}\\b`, 'i').test(text);
+}
+
+/**
+ * 在文本中识别已存在的标签（大小写不敏感）
+ * 匹配规则（用户要求）：
+ *  - 纯英文/数字标签：整词匹配，绝不把单词拆成片段（hello ≠ h / e / he / el）
+ *  - 含中文等非 ASCII 字符的标签：沿用子串匹配，中文没有词边界
+ * 需要片段匹配时，请自行在标签库里另外添加对应标签
  * @param {string} text - 媒体文本（caption）
  * @param {Array} tags - 标签对象数组 [{name}]
  * @returns {string[]} 文本中出现的标签名（按标签库顺序）
@@ -45,9 +68,11 @@ function matchTagsInText(text, tags) {
     const matched = [];
     for (const t of tags) {
         if (!t || !t.name) continue;
-        if (text.toLowerCase().includes(t.name.toLowerCase())) {
-            matched.push(t.name);
-        }
+        const name = String(t.name);
+        const hit = LATIN_TAG_RE.test(name)
+            ? hasWholeWord(text, name)
+            : text.toLowerCase().includes(name.toLowerCase());
+        if (hit) matched.push(t.name);
     }
     return matched;
 }
