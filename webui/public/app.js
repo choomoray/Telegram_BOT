@@ -56,6 +56,10 @@
     collections: [],                       // 「原始数据」/ AI 面板用的集合名列表
     collectionsView: { q: '', type: 'all', items: [], counts: { all: 0, collection: 0, misc: 0 } }, // 「合集 / 杂集」视图数据
     dbstats: { data: null },
+    random: {
+      types: [], tags: [], tagMode: 'any', q: '', duration: 'all', scope: 'all', count: 6,
+      items: [], total: 0
+    },
     stats: { year: new Date().getFullYear(), metric: 'all', data: null },
     oplogs: { page: 1, pageSize: 30, total: 0, totalPages: 1, items: [], category: 'all', result: 'all', q: '' },
     selectedRaw: null,
@@ -298,6 +302,11 @@
   }
   function typeIcon(t) { return (TYPE_META[t] || { icon: '📎' }).icon; }
   function typeLabel(t) { return (TYPE_META[t] || { label: t || '未知' }).label; }
+  /** 预览图右下角的文件类型角标：图片 / 视频 / 音频 / 文件（未知类型不显示） */
+  function typeBadgeHtml(mediaType) {
+    if (!mediaType || !TYPE_META[mediaType]) return '';
+    return `<span class="thumb-type" title="${esc(typeLabel(mediaType))}">${typeIcon(mediaType)} ${esc(typeLabel(mediaType))}</span>`;
+  }
   function fmtDuration(sec) {
     const s = Number(sec) || 0;
     const m = Math.floor(s / 60);
@@ -533,6 +542,29 @@
     return report;
   }
 
+  /** 随机推荐：按当前筛选条件抽一批（类型 / 标签 / 关键词 / 时长 / 范围 / 数量） */
+  async function loadRandom() {
+    const r = state.random;
+    const params = new URLSearchParams({ count: String(r.count) });
+    if (r.types.length) params.set('types', r.types.join(','));
+    if (r.tags.length) {
+      params.set('tags', r.tags.join(','));
+      params.set('tagMode', r.tagMode);
+    }
+    if (r.q) params.set('q', r.q);
+    if (r.duration && r.duration !== 'all') params.set('duration', r.duration);
+    if (r.scope && r.scope !== 'all') params.set('scope', r.scope);
+    const [data] = await Promise.all([
+      apiGet('/random?' + params.toString()),
+      (state.tags && state.tags.length)
+        ? Promise.resolve()
+        : apiGet('/tags').then(d => { state.tags = d.tags || []; }).catch(() => { })
+    ]);
+    r.items = data.items || [];
+    r.total = data.total || 0;
+    return data;
+  }
+
   async function loadOpLogs() {
     const o = state.oplogs;
     const params = new URLSearchParams({ page: String(o.page), pageSize: String(o.pageSize) });
@@ -682,6 +714,7 @@
     return `<article class="media-card" data-action="${esc(action)}" data-group="${esc(item.group_id)}">
       <div class="media-thumb">
         ${thumb}
+        ${typeBadgeHtml(p ? p.media_type : null)}
         <div class="badges">
           <span class="tag ${item.cleanable ? 'warn' : 'ok'}">${item.cleanable ? '可清理' : '保留'}</span>
           ${typeTags}
@@ -1482,6 +1515,106 @@
       : (isAll ? '跨集合浏览原始文档' : `${r.collection} · 共 ${fmtNum(r.total)} 条`));
   }
 
+  /* ============================ 视图：随机推荐 ============================ */
+
+  const RANDOM_DURATIONS = [
+    ['all', '全部时长'], ['<1min', '1 分钟以内'], ['<3min', '3 分钟以内'],
+    ['1-5min', '1-5 分钟'], ['5-30min', '5-30 分钟'], ['>30min', '30 分钟以上'], ['>1h', '1 小时以上']
+  ];
+
+  /** 随机推荐卡片：单条媒体（点卡片进媒体组详情，↗ 直接跳 Telegram） */
+  function randomCardHtml(item) {
+    const thumb = item.thumbable
+      ? `<img loading="lazy" decoding="async" src="${thumbUrl(item.file_unique_id)}" alt="">`
+      : `<span class="ph">${typeIcon(item.media_type)}</span>`;
+    const link = item.chat_id && item.message_id
+      ? `https://t.me/c/${toLinkChatId(item.chat_id)}/${item.message_id}`
+      : null;
+    const text = item.text
+      ? esc(item.text.length > 90 ? item.text.slice(0, 90) + '…' : item.text)
+      : '空描述（可清理）';
+    const tags = (item.tags || []).slice(0, 4).map(t => `<span class="tag-pill">${esc(t)}</span>`).join('');
+    return `<article class="media-card" data-action="open-media" data-group="${esc(item.group_id)}" title="打开该媒体组详情（可改描述 / 改标签）">
+      <div class="media-thumb">
+        ${thumb}
+        ${typeBadgeHtml(item.media_type)}
+        <div class="badges">
+          <span class="tag ${item.cleanable ? 'warn' : 'ok'}">${item.cleanable ? '可清理' : '保留'}</span>
+          ${item.mark ? `<span class="tag">★ ${fmtNum(item.mark)}</span>` : ''}
+        </div>
+      </div>
+      <div class="media-body">
+        <div class="media-text ${item.text ? '' : 'is-empty'}">${text}</div>
+        <div class="tags-line">${tags}</div>
+        <div class="media-meta">
+          <span>${typeIcon(item.media_type)} ${typeLabel(item.media_type)}</span>
+          ${item.video_time ? `<span>· ${fmtDuration(item.video_time)}</span>` : ''}
+          <span class="spacer"></span>
+          ${link ? `<a class="btn btn-ghost btn-xs" href="${link}" target="_blank" rel="noopener" title="在 Telegram 打开">↗</a>` : ''}
+        </div>
+      </div>
+    </article>`;
+  }
+
+  function renderRandom() {
+    const r = state.random;
+    const items = r.items || [];
+    const chip = (active, action, data, label) =>
+      `<button class="chip ${active ? 'is-active' : ''}" data-action="${action}" ${data}>${label}</button>`;
+
+    const typeChips = Object.keys(TYPE_META)
+      .map(t => chip(r.types.includes(t), 'random-type', `data-type="${t}"`, `${typeIcon(t)} ${typeLabel(t)}`))
+      .join('') + chip(!r.types.length, 'random-type', 'data-type=""', '全部类型');
+    const scopeChips = [['all', '全部'], ['kept', '保留（有描述）'], ['cleanable', '可清理']]
+      .map(([v, l]) => chip(r.scope === v, 'random-scope', `data-scope="${v}"`, l)).join('');
+    const tagChips = (state.tags || []).slice(0, 30)
+      .map(t => chip(r.tags.includes(t.name), 'random-tag', `data-tag="${esc(t.name)}"`, esc(t.name))).join('');
+    const durationOptions = RANDOM_DURATIONS
+      .map(([v, l]) => `<option value="${v}" ${r.duration === v ? 'selected' : ''}>${l}</option>`).join('');
+    const countOptions = [3, 6, 12, 24]
+      .map(n => `<option value="${n}" ${r.count === n ? 'selected' : ''}>抽 ${n} 个</option>`).join('');
+
+    const cards = items.length
+      ? items.map(randomCardHtml).join('')
+      : `<div class="empty"><div class="empty-ico">🎲</div><div>这组条件下一个都没抽到，换个筛选或点「重置条件」再试</div></div>`;
+
+    $('#view').innerHTML = `
+      <div class="toolbar">
+        <span class="tag accent">🎲 随机推荐</span>
+        <span class="dim">候选 ${fmtNum(r.total)} 个 · 本次抽出 ${fmtNum(items.length)} 个</span>
+        <span class="grow"></span>
+        <button class="btn btn-primary btn-sm" data-action="random-roll">🎲 换一批</button>
+        <button class="btn btn-sm" data-action="random-reset">↺ 重置条件</button>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head">
+          <h3>筛选条件</h3>
+          <span class="dim">类型 / 标签 / 关键词 / 时长 / 范围 / 数量 可任意组合（比机器人上的两个随机更自由）</span>
+        </div>
+        <div class="filter-rows">
+          <div class="filter-row"><span class="k">类型</span><div class="chips">${typeChips}</div></div>
+          <div class="filter-row"><span class="k">时长</span>
+            <select id="random-duration" style="width:auto">${durationOptions}</select>
+            <select id="random-count" style="width:auto">${countOptions}</select>
+            <span class="dim">时长只对带时长的视频生效</span>
+          </div>
+          <div class="filter-row"><span class="k">范围</span><div class="chips">${scopeChips}</div></div>
+          <div class="filter-row"><span class="k">标签</span>
+            <div class="chips">
+              ${tagChips || '<span class="dim">标签库为空</span>'}
+              ${tagChips ? chip(r.tagMode === 'all', 'random-tagmode', '', r.tagMode === 'all' ? '需同时含全部标签' : '含任一标签') : ''}
+            </div>
+          </div>
+          <div class="filter-row"><span class="k">关键词</span>
+            <input id="random-q" value="${esc(r.q)}" placeholder="匹配描述，回车生效" style="flex:1;min-width:180px">
+            <button class="btn btn-sm" data-action="random-roll">🔍 抽取</button>
+          </div>
+        </div>
+      </div>
+      <div class="media-grid">${cards}</div>`;
+    updatePageSub(`随机推荐 · 候选 ${fmtNum(r.total)} 个 · 本次 ${fmtNum(items.length)} 个`);
+  }
+
   /* ============================ 视图：实时日志 ============================ */
 
   function renderLogs() {
@@ -1739,9 +1872,12 @@
       <div class="detail-item${hasMsg ? '' : ' no-msg'}"
            data-action="detail-pick" data-file="${esc(m.file_unique_id)}"
            title="${hasMsg ? '点击选中该媒体，随后可补描述 / 修改它的标签' : '该媒体还没有文本记录，点选后可补描述并打标签'}">
-        ${m.thumbable
+        <div class="detail-thumb">
+          ${m.thumbable
         ? `<img loading="lazy" decoding="async" src="${thumbUrl(m.file_unique_id)}" alt="">`
         : `<div class="ph">${typeIcon(m.media_type)}</div>`}
+          ${typeBadgeHtml(m.media_type)}
+        </div>
         <div class="cap">
           <span>#${m.subgroup} · ${typeLabel(m.media_type)}</span>
           <span class="mono">${m.video_time ? fmtDuration(m.video_time) : 'msg ' + m.message_id}</span>
@@ -2343,6 +2479,7 @@
   const VIEW_META = {
     overview: { title: '概览', load: loadOverview, render: renderOverview },
     media: { title: '媒体库', load: loadMedia, render: renderMedia },
+    random: { title: '随机推荐', load: loadRandom, render: renderRandom },
     clean: { title: '清理中心', load: loadClean, render: renderClean },
     tags: {
       title: '标签',
@@ -2472,6 +2609,42 @@
             state.users.page = 1;
             await show('users'); break;
           case 'clean-run': await runClean(el.dataset.scope); break;
+          // 随机推荐：筛选条件变化后立即重抽
+          case 'random-roll':
+            if (state.view === 'random') {
+              const qInput = $('#random-q');
+              if (qInput) state.random.q = String(qInput.value || '').trim();
+            }
+            await loadRandom();
+            renderRandom();
+            break;
+          case 'random-type': {
+            const t = el.dataset.type || '';
+            state.random.types = !t ? []
+              : (state.random.types.includes(t)
+                ? state.random.types.filter(x => x !== t)
+                : [...state.random.types, t]);
+            await loadRandom(); renderRandom(); break;
+          }
+          case 'random-tag': {
+            const t = el.dataset.tag;
+            state.random.tags = state.random.tags.includes(t)
+              ? state.random.tags.filter(x => x !== t)
+              : [...state.random.tags, t];
+            await loadRandom(); renderRandom(); break;
+          }
+          case 'random-tagmode':
+            state.random.tagMode = state.random.tagMode === 'all' ? 'any' : 'all';
+            await loadRandom(); renderRandom(); break;
+          case 'random-scope':
+            state.random.scope = el.dataset.scope || 'all';
+            await loadRandom(); renderRandom(); break;
+          case 'random-reset':
+            state.random = {
+              types: [], tags: [], tagMode: 'any', q: '', duration: 'all', scope: 'all', count: 6,
+              items: [], total: 0
+            };
+            await loadRandom(); renderRandom(); break;
           case 'raw-collection':
             state.raw.collection = el.dataset.collection;
             state.raw.page = 1;
@@ -2582,6 +2755,13 @@
 
     view.addEventListener('keydown', async (e) => {
       const el = e.target;
+      // 随机推荐关键词：回车即重抽（与全局搜索一致的交互）
+      if (e.key === 'Enter' && el && el.id === 'random-q') {
+        state.random.q = String(el.value || '').trim();
+        await loadRandom();
+        renderRandom();
+        return;
+      }
       if (e.key !== 'Enter' || !el.dataset || !el.dataset.action) return;
       if (!el.dataset.action.endsWith('-input')) return;
       const action = el.dataset.action.replace('-input', '');
@@ -2653,6 +2833,14 @@
         // 每日操作量方格图：切换查看项（纯前端重绘，不重新请求）
         state.stats.metric = el.value || 'all';
         renderStats();
+      } else if (el.id === 'random-duration') {
+        state.random.duration = el.value || 'all';
+        await loadRandom();
+        renderRandom();
+      } else if (el.id === 'random-count') {
+        state.random.count = parseInt(el.value, 10) || 6;
+        await loadRandom();
+        renderRandom();
       }
     });
   }

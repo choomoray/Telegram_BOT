@@ -402,6 +402,17 @@ function fixtures() {
             };
         },
         '/api/oplogs': { total: 0, page: 1, pageSize: 30, totalPages: 1, items: [], catalog: { categories: {}, actions: [] } },
+        '/api/random': (req) => {
+            const params = new URLSearchParams(String(req.url).split('?')[1] || '');
+            const types = (params.get('types') || '').split(',').filter(Boolean);
+            const count = Number(params.get('count')) || 6;
+            const all = [
+                { group_id: '-100_1', file_unique_id: 'AQAD1', media_type: 'photo', subgroup: 1, video_time: null, thumbable: true, text: '随机抽到的图片', tags: ['JK'], chat_id: -1001234567890, message_id: 11, group: { chat_id: -1001234567890, message_id: 11 }, channel: null, cleanable: false, mark: 1 },
+                { group_id: '-100_1', file_unique_id: 'AQAD2', media_type: 'video', subgroup: 1, video_time: 30, thumbable: false, text: '', tags: [], chat_id: -1001234567890, message_id: 12, group: { chat_id: -1001234567890, message_id: 12 }, channel: null, cleanable: true, mark: 0 }
+            ];
+            const items = (types.length ? all.filter(i => types.includes(i.media_type)) : all).slice(0, count);
+            return { total: items.length, count: items.length, items, filters: { types, count, q: params.get('q') || '' } };
+        },
     };
 }
 
@@ -496,6 +507,56 @@ test('文章 / 合集视图：渲染与表单', async () => {
     assert.match((await goto(env, 'collections')).innerHTML, /子项X/);
     await act(env, { action: 'collection-type', type: 'misc' });
     assert.ok(env.requests.some(r => r.url.includes('type=misc')));
+});
+
+// ---------------- 随机推荐 ----------------
+
+test('随机推荐：类型/标签/时长/范围/数量 筛选面板 + 抽出媒体卡片（带类型角标）', async () => {
+    const env = await boot();
+    const view = await goto(env, 'random');
+    const html = view.innerHTML;
+
+    assert.ok(env.requests.some(r => r.url.startsWith('/api/random?')), '进入即抽一批');
+    assert.match(html, /🎲 随机推荐/);
+    assert.match(html, /筛选条件/);
+    // 筛选控件：类型 chips / 时长 / 数量 / 范围 / 标签 / 关键词
+    assert.match(html, /data-action="random-type" data-type="photo"/);
+    assert.match(html, /data-action="random-type" data-type="video"/);
+    assert.match(html, /data-action="random-type" data-type="audio"/);
+    assert.match(html, /data-action="random-type" data-type="document"/);
+    assert.match(html, /data-action="random-type" data-type=""[^>]*>全部类型/);
+    assert.match(html, /<select id="random-duration"/);
+    assert.match(html, /<select id="random-count"/);
+    assert.match(html, /data-action="random-scope" data-scope="cleanable"/);
+    assert.match(html, /data-action="random-tag" data-tag="AAA"/, '标签库可多选');
+    assert.match(html, /<input id="random-q"/);
+    assert.match(html, /data-action="random-roll"/);
+
+    // 抽出的卡片：可进详情 + 类型角标 + Telegram 跳转
+    assert.match(html, /data-action="open-media" data-group="-100_1"/);
+    assert.match(html, /随机抽到的图片/);
+    assert.match(html, /class="thumb-type"[^>]*>🖼 图片</, '图片角标');
+    assert.match(html, /class="thumb-type"[^>]*>🎬 视频</, '视频角标');
+    assert.match(html, /https:\/\/t\.me\/c\/1234567890\/11/, '带 Telegram 跳转');
+});
+
+test('随机推荐：点类型筛选即重抽（请求带 types），重置条件回到默认', async () => {
+    const env = await boot();
+    const view = await goto(env, 'random');
+
+    await view.fire('click', { target: { closest: () => ({ dataset: { action: 'random-type', type: 'video' } }) } });
+    await tick();
+    assert.ok(env.requests.some(r => r.url.includes('/api/random?') && r.url.includes('types=video')), '按类型重抽');
+    // 只选了视频 → 卡片只剩视频，且角标是视频
+    const html = env.document.querySelector('#view').innerHTML;
+    assert.ok(!html.includes('随机抽到的图片'), '图片被筛掉');
+    assert.match(html, /value="video"[^>]*class="chip is-active"|chip is-active" data-action="random-type" data-type="video"/);
+
+    await view.fire('click', { target: { closest: () => ({ dataset: { action: 'random-reset' } }) } });
+    await tick();
+    const after = env.document.querySelector('#view').innerHTML;
+    assert.match(after, /chip is-active" data-action="random-type" data-type=""|data-action="random-type" data-type=""[^>]*>全部类型/, '重置后回到全部类型');
+    assert.match(after, /随机抽到的图片/);
 });
 
 // ---------------- 数据库视图：集合浏览 + 集合明细整合 ----------------

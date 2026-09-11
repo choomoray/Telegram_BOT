@@ -32,7 +32,7 @@ const { reMatchMessageTags, clearMessageTags } = require('../utils/tagSync');
 const { removeLevelSuffix } = require('../utils/levelExtractor');
 const { updateMessageDb } = require('../handlers/modes/editMode');
 const { resolveEditTargets, editCaptionWithFallback } = require('../utils/editTarget');
-const { sortMediaDocsByPosition, mediaPositionMessageId } = require('../db/media');
+const { sortMediaDocsByPosition, mediaPositionMessageId, resolveMediaPosition } = require('../db/media');
 const { transportLinkUrl } = require('../utils/tgLink');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -685,6 +685,125 @@ async function handleMediaDetail(D, url) {
  * 清理空数据：POST /api/clean { scope, confirm }
  * 未带 confirm: true 时只预览（返回将要清理的组数与媒体数，不删除）
  */
+/** 随机推荐的时长档位（与机器人 /random_videos 的 TIME_FILTERS 一致） */
+const RANDOM_DURATION_FILTERS = {
+    all: null,
+    '<1min': { $lt: 60 },
+    '<3min': { $lt: 180 },
+    '1-5min': { $gte: 60, $lte: 300 },
+    '5-30min': { $gte: 300, $lte: 1800 },
+    '>30min': { $gt: 1800 },
+    '>1h': { $gt: 3600 }
+};
+
+/** 从 total 个位置里随机取 want 个不重复下标（碰撞过多时按顺序补齐） */
+function pickRandomOffsets(total, want) {
+    const n = Math.min(want, total);
+    const picked = new Set();
+    let guard = 0;
+    while (picked.size < n && guard++ < n * 50) picked.add(Math.floor(Math.random() * total));
+    for (let i = 0; picked.size < n && i < total; i++) picked.add(i);
+    return [...picked];
+}
+
+/**
+ * 随机推荐：GET /api/random
+ *   比机器人上的两个随机更自由：类型 / 标签（任一·全部）/ 关键词 / 视频时长 / 范围 / 数量 都能组合
+ *   - types=photo,video,audio,document（不传 = 全部类型）
+ *   - tags=A,B & tagMode=any|all
+ *   - q=关键词（匹配描述）
+ *   - duration=all|<1min|<3min|1-5min|5-30min|>30min|>1h（只对视频有 video_time 的生效）
+ *   - scope=all|kept|cleanable（按 group_list.is_delete 判定是否有描述）
+ *   - count=1..24（默认 6）
+ */
+async function handleRandom(D, url) {
+    const p = (k) => (url.searchParams.get(k) || '').trim();
+    const types = p('types').split(',').map(s => s.trim().toLowerCase()).filter(t => MEDIA_TYPE_ORDER.includes(t));
+    const tags = p('tags').split(',').map(s => normalizeTagName(s)).filter(Boolean);
+    const tagMode = p('tagMode') === 'all' ? 'all' : 'any';
+    const keyword = p('q');
+    const duration = Object.prototype.hasOwnProperty.call(RANDOM_DURATION_FILTERS, p('duration')) ? p('duration') : 'all';
+    const scope = ['kept', 'cleanable'].includes(p('scope')) ? p('scope') : 'all';
+    const count = Math.min(24, Math.max(1, parseInt(p('count'), 10) || 6));
+    const filters = { types, tags, tagMode, q: keyword, duration, scope, count };
+    const empty = { status: 200, data: { total: 0, count: 0, items: [], filters } };
+
+    const filter = {};
+    if (types.length) filter.media_type = { $in: types };
+    if (RANDOM_DURATION_FILTERS[duration]) filter.video_time = RANDOM_DURATION_FILTERS[duration];
+
+    // 标签 / 关键词：先在 message 里筛出候选媒体（标签按 message 独立存储）
+    if (tags.length || keyword) {
+        const mFilter = {};
+        // 标签是数组字段：用 $or / $and 逐标签匹配（Mongo 与测试内存集合语义一致）
+        if (tags.length) mFilter[tagMode === 'all' ? '$and' : '$or'] = tags.map(t => ({ tags: t }));
+        if (keyword) mFilter.text = { $regex: escapeRegex(keyword), $options: 'i' };
+        const msgs = await D.getCollection(COLLECTIONS.MESSAGE).find(mFilter).limit(5000).toArray();
+        const ids = [...new Set(msgs.map(m => m.file_unique_id).filter(Boolean))];
+        if (!ids.length) return empty;
+        filter.file_unique_id = { $in: ids };
+    }
+
+    // 范围（有没有描述）按 group_list.is_delete 判定
+    if (scope !== 'all') {
+        const gl = await D.getCollection(COLLECTIONS.GROUP_LIST)
+            .find(scope === 'cleanable' ? { is_delete: { $gt: 0 } } : { is_delete: 0 })
+            .limit(5000)
+            .toArray();
+        const ids = [...new Set(gl.map(g => g.group_id).filter(Boolean))];
+        if (!ids.length) return empty;
+        filter.group_id = { $in: ids };
+    }
+
+    const mediaCol = D.getCollection(COLLECTIONS.MEDIA);
+    const total = await mediaCol.countDocuments(filter);
+    const docs = [];
+    for (const offset of pickRandomOffsets(total, count)) {
+        const hit = await mediaCol.find(filter).sort({ _id: 1 }).skip(offset).limit(1).toArray();
+        if (hit[0]) docs.push(hit[0]);
+    }
+    if (!docs.length) return { status: 200, data: { total, count: 0, items: [], filters } };
+
+    const fileIds = [...new Set(docs.map(d => d.file_unique_id).filter(Boolean))];
+    const groupIds = [...new Set(docs.map(d => d.group_id).filter(Boolean))];
+    const [msgs, groups] = await Promise.all([
+        fileIds.length ? D.getCollection(COLLECTIONS.MESSAGE).find({ file_unique_id: { $in: fileIds } }).toArray() : [],
+        groupIds.length ? D.getCollection(COLLECTIONS.GROUP_LIST).find({ group_id: { $in: groupIds } }).toArray() : []
+    ]);
+    const msgByFile = new Map(msgs.map(m => [m.file_unique_id, m]));
+    const groupById = new Map(groups.map(g => [g.group_id, g]));
+
+    return {
+        status: 200,
+        data: {
+            total,
+            count: docs.length,
+            filters,
+            items: docs.map(doc => {
+                const msg = msgByFile.get(doc.file_unique_id) || null;
+                const g = groupById.get(doc.group_id) || null;
+                const pos = resolveMediaPosition(doc);
+                return {
+                    group_id: doc.group_id,
+                    file_unique_id: doc.file_unique_id,
+                    media_type: doc.media_type ?? null,
+                    subgroup: doc.subgroup ?? null,
+                    video_time: doc.video_time ?? null,
+                    thumbable: !!(doc.media_type === 'photo' || doc.thumb_file_id),
+                    text: msg ? (msg.text || '') : '',
+                    tags: msg && Array.isArray(msg.tags) ? msg.tags : [],
+                    chat_id: pos ? pos.chatId : null,
+                    message_id: pos ? pos.messageId : null,
+                    group: doc.group ?? null,
+                    channel: doc.channel ?? null,
+                    cleanable: !!(g && (g.is_delete || 0) > 0),
+                    mark: g ? (g.mark || 0) : 0
+                };
+            })
+        }
+    };
+}
+
 async function handleClean(D, url, body) {
     const scope = body.scope;
     const now = Date.now();
@@ -2461,6 +2580,7 @@ const ROUTES = [
     ['GET', /^\/api\/overview$/, handleOverview],
     ['GET', /^\/api\/media$/, handleMediaList],
     ['GET', /^\/api\/media\/detail$/, handleMediaDetail],
+    ['GET', /^\/api\/random$/, handleRandom],
     ['POST', /^\/api\/clean$/, handleClean],
     ['GET', /^\/api\/tags$/, handleTags],
     ['GET', /^\/api\/users$/, handleUsers],

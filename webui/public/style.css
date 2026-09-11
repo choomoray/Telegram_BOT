@@ -361,6 +361,18 @@ select { appearance: none; padding-right: 26px;
 .media-thumb .ph { font-size: 30px; opacity: .55; }
 .media-thumb .badges { position: absolute; left: 8px; top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
 .media-thumb .badges .tag { backdrop-filter: blur(6px); background: color-mix(in srgb, var(--surface) 78%, transparent); }
+/* 预览图右下角的文件类型角标（图片 / 视频 / 音频 / 文件） */
+.thumb-type {
+  position: absolute; right: 6px; bottom: 6px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 650; line-height: 1.5; color: #fff;
+  background: rgba(3, 7, 14, .62); border: 1px solid rgba(255, 255, 255, .16);
+  backdrop-filter: blur(6px); pointer-events: none;
+}
+/* 详情媒体条：图片外面包一层定位容器，角标贴在图片上（不压到下面的说明行） */
+.detail-thumb { position: relative; display: block; }
+
 .media-body { padding: 11px 12px 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
 .media-text {
   font-size: 12.5px; color: var(--text); line-height: 1.5;
@@ -700,6 +712,12 @@ html[data-theme="light"] {
 .db-table tbody tr[data-action]:hover { background: var(--hover); }
 .db-table tbody tr.is-active { background: var(--accent-soft); }
 .db-table tbody tr.is-active td:first-child b { color: var(--accent); }
+
+/* ---------- 随机推荐：筛选条件面板 ---------- */
+.filter-rows { display: flex; flex-direction: column; gap: 10px; }
+.filter-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.filter-row .k { width: 48px; flex-shrink: 0; color: var(--text-3); font-size: 12px; }
+.filter-row input { min-width: 160px; }
 
 /* ---------- 统计报表：底部日志表撑满剩余高度（否则悬在中间、不贴底） ---------- */
 .view-fill { display: flex; flex-direction: column; }

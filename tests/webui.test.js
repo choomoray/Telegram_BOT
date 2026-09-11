@@ -952,6 +952,54 @@ test('GET /api/media/detail：新结构 media（无顶层 message_id）也能按
     });
 });
 
+// ---------------- 随机推荐 ----------------
+
+test('GET /api/random：类型 / 标签 / 关键词 / 范围 / 时长 / 数量 组合筛选后随机抽', async () => {
+    const deps = makeMemoryDeps(makeDomainData());
+    await withDomain(deps, async (b, auth) => {
+        // 类型：只抽图片（fixture 里 3 张图片）
+        const photos = await domainReq(b, auth, '/api/random?types=photo&count=2');
+        assert.strictEqual(photos.status, 200);
+        assert.strictEqual(photos.body.count, 2, '按 count 抽取');
+        assert.ok(photos.body.items.every(i => i.media_type === 'photo'), '只抽图片');
+        assert.ok(photos.body.total >= 2, '返回候选总数');
+        const first = photos.body.items[0];
+        assert.deepStrictEqual(Object.keys(first).sort(), [
+            'channel', 'chat_id', 'cleanable', 'file_unique_id', 'group', 'group_id', 'mark',
+            'media_type', 'message_id', 'subgroup', 'tags', 'text', 'thumbable', 'video_time'
+        ].sort());
+
+        // 标签：JK（fixture 里 AQAD1 / AQAD21 带 JK）
+        const tagged = await domainReq(b, auth, '/api/random?tags=JK&count=5');
+        assert.ok(tagged.body.items.length >= 1);
+        assert.ok(tagged.body.items.every(i => i.tags.includes('JK')), '按标签过滤');
+
+        // 关键词：匹配描述
+        const kw = await domainReq(b, auth, '/api/random?q=' + encodeURIComponent('写真') + '&count=5');
+        assert.strictEqual(kw.body.items.length, 1);
+        assert.strictEqual(kw.body.items[0].file_unique_id, 'AQAD1');
+
+        // 范围：可清理组（-100_2 is_delete 为时间戳）
+        const cleanable = await domainReq(b, auth, '/api/random?scope=cleanable&count=5');
+        assert.ok(cleanable.body.items.length >= 2);
+        assert.ok(cleanable.body.items.every(i => i.cleanable === true), '只抽可清理的媒体');
+
+        // 时长：只对带 video_time 的视频生效（fixture 里只有 AQAD2 有 30 秒）
+        const shortVideos = await domainReq(b, auth, '/api/random?types=video&duration=' + encodeURIComponent('<1min') + '&count=5');
+        assert.strictEqual(shortVideos.body.items.length, 1);
+        assert.strictEqual(shortVideos.body.items[0].file_unique_id, 'AQAD2');
+        assert.ok(shortVideos.body.items.every(i => i.media_type === 'video'));
+        const longVideos = await domainReq(b, auth, '/api/random?types=video&duration=' + encodeURIComponent('>30min') + '&count=5');
+        assert.strictEqual(longVideos.body.items.length, 0, '没有匹配时就返回空');
+
+        // 无候选时不报错
+        const none = await domainReq(b, auth, '/api/random?tags=NOPE&count=5');
+        assert.strictEqual(none.status, 200);
+        assert.deepStrictEqual(none.body.items, []);
+        assert.strictEqual(none.body.total, 0);
+    });
+});
+
 // ---------------- 清理 ----------------
 
 test('POST /api/clean 非法 scope 返回 400', async () => {
