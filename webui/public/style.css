@@ -699,6 +699,14 @@ html[data-theme="light"] {
 /* 无文本记录的媒体：点选后可在详情里补描述 / 打标签（虚线边框 + 提示文案） */
 .msg-block.no-record { border-left-style: dashed; border-left-color: var(--text-3); }
 .msg-block.no-record .text { color: var(--text-3); font-style: italic; }
+/* 「描述与标签」区：所有 message 块 + 可能存在的置顶「新增描述」块 */
+.detail-msg-list { display: flex; flex-direction: column; }
+/* 新增描述块：点选没有描述的媒体时临时生成，置顶显示，全局只有一个 */
+.msg-block.is-draft {
+  border-left-style: dashed; border-color: var(--accent);
+  background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent-soft);
+}
+.msg-block.is-draft .msg-input { border-color: var(--accent); }
 /* 常规（未选中）时标签区灰掉且不可点 */
 .tag-edit.is-locked { opacity: .5; filter: grayscale(.4); pointer-events: none; }
 /* 选中后必须重新打开鼠标事件，否则「➕ 添加标签」和标签上的 ✕ / ✎ 都点不动 */

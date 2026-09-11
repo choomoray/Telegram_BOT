@@ -1391,16 +1391,24 @@
    * @param {Object} [opts]
    *   - noRecord: true 表示该媒体还没有文本记录（数据库里没有 message 文档），
    *     保存描述时由后端自动补建 message
+   *   - isDraft: true 表示这是「点选无描述媒体」时临时生成的置顶新增块（全局只有一个）
+   *   - idx: 原始顺序（重排时用来还原顺序）
    */
   function msgBlockHtml(m, opts = {}) {
     const file = esc(m.file_unique_id);
     const text = m.text || '';
     const tags = m.tags || [];
+    const cls = ['msg-block'];
+    if (opts.noRecord) cls.push('no-record');
+    if (opts.isDraft) cls.push('is-draft');
+    const placeholder = opts.isDraft
+      ? '输入该媒体的描述，保存后自动建立文本记录'
+      : '输入新的描述；留空保存 = 清空描述（该组变为可清理）';
     return `
-      <div class="msg-block${opts.noRecord ? ' no-record' : ''}" data-msg="${file}" data-action="detail-pick" data-file="${file}">
+      <div class="${cls.join(' ')}" data-msg="${file}" data-idx="${opts.idx === undefined ? '' : opts.idx}" data-action="detail-pick" data-file="${file}">
         <div class="text msg-text" data-role="text">${text ? esc(text) : (opts.noRecord ? '（暂无描述 · 点选后可在下方补描述并打标签）' : '（空描述）')}</div>
         <div class="editor msg-editor hidden" data-role="editor">
-          <textarea class="msg-input" data-role="input" placeholder="输入新的描述；留空保存 = 清空描述（该组变为可清理）">${esc(text)}</textarea>
+          <textarea class="msg-input" data-role="input" placeholder="${placeholder}">${esc(text)}</textarea>
           <div class="editor-row">
             <button class="btn btn-primary btn-sm" data-action="desc-save" data-file="${file}">💾 保存描述</button>
             <button class="btn btn-ghost btn-sm" data-action="desc-cancel">取消</button>
@@ -1431,7 +1439,8 @@
           <span class="mono dim">${file}</span>
           <span class="dim">·</span>
           <span class="mono dim">${m.chat_id === null || m.chat_id === undefined ? '—' : esc(m.chat_id)} / ${m.message_id === null || m.message_id === undefined ? '—' : esc(m.message_id)}</span>
-          ${opts.noRecord ? '<span class="tag warn">无文本记录</span>' : ''}
+          ${opts.isDraft ? '<span class="tag accent">🆕 新增描述</span>' : ''}
+          ${opts.noRecord && !opts.isDraft ? '<span class="tag warn">无文本记录</span>' : ''}
         </div>
       </div>`;
   }
@@ -1461,51 +1470,76 @@
     else input.value = '';
   }
 
-  /** 该媒体当前展示的标签（含本次会话里刚打过、还没写进 state.detail 的） */
-  function detailBlockTags(block) {
-    if (!block) return [];
-    return [...block.querySelectorAll('.tag-pill')].map(el => el.textContent.replace('✕', '').trim()).filter(Boolean);
+  /** 「描述与标签」区里承载所有 message 块的容器 */
+  function detailMsgList() {
+    const body = $('#detail-body');
+    if (!body) return null;
+    return body.querySelector('.detail-msg-list');
   }
 
-  /** 无文本记录的媒体：点选后即时补一个可写描述 / 打标签的区块（保存描述时后端自动补建记录） */
-  function ensureDetailBlock(file) {
-    if (detailMsgBlock(file)) return;
-    const body = $('#detail-body');
-    if (!body) return;
-    const strip = body.querySelector('.detail-strip');
-    let section = strip;
-    while (section && !section.classList.contains('section')) section = section.parentElement;
-    const host = section ? section.parentElement : null;
-    // 找不到「描述与标签」区块（异常结构）时不硬塞，避免把界面搞乱
-    if (!section || !host || typeof host.insertBefore !== 'function') return;
-    const media = ((state.detail && state.detail.media) || []).find(m => m.file_unique_id === file);
-    if (!media) return;
-    const msg = ((state.detail && state.detail.messages) || []).find(m => m.file_unique_id === file);
-    const pos = media.group || media.channel || {};
-    const html = msgBlockHtml(msg || {
-      file_unique_id: file,
-      text: '',
-      tags: [],
-      chat_id: pos.chat_id !== undefined ? pos.chat_id : media.message_id,
-      message_id: pos.message_id !== undefined ? pos.message_id : media.message_id
-    }, { noRecord: true });
-
+  /** 把一段 HTML 变成可插入的节点（真实浏览器用 template，桩环境退化到 div） */
+  function elementFromHtml(html) {
     const wrap = document.createElement('div');
-    wrap.innerHTML = `<div class="section"><h4>描述与标签</h4>${html}</div>`;
-    const sectionEl = wrap.firstElementChild || wrap.children[0];
-    if (!sectionEl) return;
-    host.insertBefore(sectionEl, section);
-    // 原来的「该组没有描述」空态段落：已有编辑区后就没必要留着了
-    const emptyEl = section.querySelector('.empty');
-    if (emptyEl) emptyEl.remove();
-    const block = detailMsgBlock(file);
-    if (!block) return;
-    // 该媒体还没有任何文本记录 → 直接进入编辑态，省掉一次点击
-    // （用类选择器定位：与真实浏览器一致，也避免依赖属性选择器）
-    const textEl = block.querySelector('.msg-text');
-    const editorEl = block.querySelector('.msg-editor');
-    if (textEl) textEl.classList.add('hidden');
-    if (editorEl) editorEl.classList.remove('hidden');
+    wrap.innerHTML = html;
+    return wrap.firstElementChild || (wrap.children && wrap.children[0]) || null;
+  }
+
+  /**
+   * 重排「描述与标签」区（该区域位于媒体条下方，与原有描述块同区）：
+   *  1. 选中的媒体**还没有描述** → 在区域**置顶**放一个「新增描述」块；
+   *     全局只有这一个，点另一条没有描述的媒体时它跟着切换过去；
+   *  2. 选中的媒体**已有描述** → 它自己的块**置顶显示**（不新增块）；
+   *  3. 没选中（或选中被取消）→ 不显示新增块，块回到原始顺序。
+   * 只重建「新增块」，已有块靠移动排序，避免打断用户正在输入的内容。
+   */
+  function layoutDetailBlocks() {
+    const list = detailMsgList();
+    if (!list) return null;
+    const file = state.detailSelectedFile;
+
+    // 1) 清掉上一次的新增块（保证任何时候最多一个）
+    [...list.querySelectorAll('.is-draft')].forEach(el => el.remove());
+
+    // 2) 已有块按渲染时的原始顺序排好（data-idx）
+    const blocks = [...list.querySelectorAll('.msg-block')]
+      .sort((a, b) => Number(a.dataset.idx || 0) - Number(b.dataset.idx || 0));
+
+    // 3) 选中的媒体没有文本记录时才新建「新增描述」块
+    const pinned = file ? blocks.find(el => el.dataset.msg === file) : null;
+    let draft = null;
+    if (file && !pinned) {
+      const media = ((state.detail && state.detail.media) || []).find(m => m.file_unique_id === file);
+      if (media) {
+        const pos = media.group || media.channel || {};
+        draft = elementFromHtml(msgBlockHtml({
+          file_unique_id: file,
+          text: '',
+          tags: [],
+          chat_id: pos.chat_id !== undefined ? pos.chat_id : media.message_id,
+          message_id: pos.message_id !== undefined ? pos.message_id : media.message_id
+        }, { noRecord: true, isDraft: true, idx: -1 }));
+      }
+    }
+
+    // 4) 排序：新增块/选中块置顶，其余保持原始顺序
+    const ordered = [];
+    if (draft) ordered.push(draft);
+    if (pinned) ordered.push(pinned);
+    for (const el of blocks) if (el !== pinned) ordered.push(el);
+    ordered.forEach(el => list.appendChild(el));
+
+    // 5) 空态提示：区域里有块时隐藏
+    const emptyEl = list.querySelector('.empty');
+    if (emptyEl) emptyEl.classList.toggle('hidden', ordered.length > 0);
+
+    // 6) 新增块直接进入编辑态（省掉一次「✏️ 编辑描述」）
+    if (draft) {
+      const textEl = draft.querySelector('.msg-text');
+      const editorEl = draft.querySelector('.msg-editor');
+      if (textEl) textEl.classList.add('hidden');
+      if (editorEl) editorEl.classList.remove('hidden');
+    }
+    return draft;
   }
 
   /* ============================ 详情对话框（描述 / 标签 / 跳转） ============================ */
@@ -1564,7 +1598,9 @@
     }).join('') || '<div class="empty">该组没有媒体记录</div>';
 
     // 每条 message：点选对应媒体后才解锁标签编辑（未选中时灰色不可点）
-    const msgBlocks = messages.map(m => msgBlockHtml(m)).join('') || '<div class="empty">该组没有描述（空描述 · 可被清理）</div>';
+    // data-idx 记录原始顺序，供「选中的块置顶」重排时还原
+    const msgBlocks = messages.map((m, i) => msgBlockHtml(m, { idx: i })).join('')
+      || '<div class="empty">该组没有描述（空描述 · 可被清理）</div>';
 
     const positions = [];
     if (g.group_id) positions.push(['group_id', g.group_id]);
@@ -1584,11 +1620,11 @@
       <div class="section">
         <h4>媒体（${media.length}）</h4>
         <div class="detail-strip">${strip}</div>
-        <div class="dim" style="font-size:11.5px;margin-top:8px">👆 点击上方任一媒体选中它，然后即可补描述、改标签；没有文本记录的媒体选中后会自动出现编辑区（保存时自动补建记录）</div>
+        <div class="dim" style="font-size:11.5px;margin-top:8px">👆 点击上方任一媒体即可补描述、改标签：点没有描述的媒体会在下面「描述与标签」顶部出现一个新增编辑区（同一时间只有一个，保存时自动补建记录）；点已有描述的媒体则把它自己的编辑区置顶</div>
       </div>
       <div class="section">
         <h4>描述与标签</h4>
-        ${msgBlocks}
+        <div class="detail-msg-list">${msgBlocks}</div>
       </div>
       <div class="section">
         <h4>定位信息</h4>
@@ -1623,11 +1659,14 @@
     // 未选中的标签区加回 is-locked（CSS 里 pointer-events: none，防止误点）
     body.querySelectorAll('.tag-edit').forEach(el => { el.classList.remove('is-active'); el.classList.add('is-locked'); });
     body.querySelectorAll('.tag-add-btn').forEach(el => { el.disabled = true; el.classList.remove('is-highlight'); });
+
+    // 「描述与标签」区重排：新增块只跟着选中的无描述媒体，已有描述则把它的块置顶
+    layoutDetailBlocks();
+
     if (!file) return;
 
     const strip = [...body.querySelectorAll('.detail-item')].find(el => el.dataset.file === file);
     if (strip) strip.classList.add('is-active');
-    if (!detailMsgBlock(file)) ensureDetailBlock(file);
     const block = detailMsgBlock(file);
     if (!block) return;
 

@@ -65,13 +65,41 @@ function makeElement(sel = '') {
             const fns = listeners[type] || [];
             return Promise.all(fns.map(fn => fn(ev || {})));
         },
-        appendChild(child) { if (child) { children.push(child); if (child.parentElement !== undefined) child.parentElement = el; } },
-        prepend(child) { if (child) { children.unshift(child); if (child.parentElement !== undefined) child.parentElement = el; } },
+        appendChild(child) {
+            if (!child) return child;
+            // 真实 DOM 的 appendChild 是「移动」：先从原父节点摘掉，不能重复挂
+            const p = child.parentElement;
+            if (p && p.children) {
+                const i = p.children.indexOf(child);
+                if (i >= 0) p.children.splice(i, 1);
+            }
+            children.push(child);
+            if (child.parentElement !== undefined) child.parentElement = el;
+            return child;
+        },
+        prepend(child) {
+            if (!child) return child;
+            const p = child.parentElement;
+            if (p && p.children) {
+                const i = p.children.indexOf(child);
+                if (i >= 0) p.children.splice(i, 1);
+            }
+            children.unshift(child);
+            if (child.parentElement !== undefined) child.parentElement = el;
+            return child;
+        },
         insertBefore(node, ref) {
+            if (!node) return node;
+            const p = node.parentElement;
+            if (p && p.children) {
+                const i = p.children.indexOf(node);
+                if (i >= 0) p.children.splice(i, 1);
+            }
             children = children.filter(c => c !== node);
             const idx = ref ? children.indexOf(ref) : -1;
             if (idx >= 0) children.splice(idx, 0, node); else children.push(node);
             if (node) node.parentElement = el;
+            return node;
         },
         get nextSibling() {
             const p = el.parentElement;
@@ -79,7 +107,12 @@ function makeElement(sel = '') {
             const i = p.children.indexOf(el);
             return i >= 0 ? (p.children[i + 1] || null) : null;
         },
-        remove() { },
+        remove() {
+            const p = el.parentElement;
+            if (!p || !p.children) return;
+            const i = p.children.indexOf(el);
+            if (i >= 0) p.children.splice(i, 1);
+        },
         focus() { },
         setAttribute() { },
         removeAttribute() { },
@@ -693,30 +726,101 @@ test('标签详情：直接列出该标签下的媒体组并可点开（无需�
     assert.match(env.document.querySelector('#detail-body').innerHTML, /有标签的描述/);
 });
 
-// ---------------- 媒体详情：无文本记录的媒体也能补描述 + 打标签 ----------------
+// ---------------- 媒体详情：「描述与标签」区的新增块与置顶 ----------------
 
-test('媒体详情：点选没有文本记录的媒体 → 自动出现描述编辑区与可点标签按钮', async () => {
+/** 「描述与标签」区里按 DOM 顺序排列的块 */
+function msgBlocksOf(body) {
+    const list = body.querySelector('.detail-msg-list');
+    return list ? list.querySelectorAll('.msg-block') : [];
+}
+/** 块是否直接挂在「描述与标签」区的容器里（而不是另开一段 section） */
+function isInsideMsgList(block) {
+    let n = block;
+    while (n) {
+        if (n.classList && n.classList.contains('detail-msg-list')) return true;
+        if (n.classList && n.classList.contains('section')) return false;
+        n = n.parentElement;
+    }
+    return false;
+}
+
+test('媒体详情：点选没有描述的媒体 → 在「描述与标签」区置顶出现唯一的新增块', async () => {
     const env = await boot();
     await goto(env, 'media');
     await act(env, { action: 'open-media', group: '-100_3' });
 
     const body = env.document.querySelector('#detail-body');
+    const sectionsBefore = body.querySelectorAll('.section').length;
     assert.match(body.innerHTML, /该组没有描述/, '初始是空态提示');
-    assert.strictEqual(body.querySelectorAll('.msg-block').length, 0, '没有 message 时先不渲染编辑块');
+    assert.strictEqual(msgBlocksOf(body).length, 0, '没有 message 时先不渲染块');
 
     await actDialog(env, { action: 'detail-pick', file: 'AQAD31' }, { tagName: 'DIV' });
 
-    const block = body.querySelectorAll('.msg-block').find(b => b.dataset.msg === 'AQAD31');
-    assert.ok(block, '点选后自动补出该媒体的描述 / 标签区块');
-    assert.ok(block.classList.contains('no-record'), '标记为「无文本记录」');
+    let blocks = msgBlocksOf(body);
+    assert.strictEqual(blocks.length, 1, '只出现一个新增块');
+    const block = blocks[0];
+    assert.strictEqual(block.dataset.msg, 'AQAD31');
+    assert.ok(block.classList.contains('is-draft'), '标记为新增（草稿）块');
+    assert.ok(block.classList.contains('no-record'));
     assert.ok(block.classList.contains('is-active'), '选中的媒体块高亮');
+    assert.ok(isInsideMsgList(block), '新增块落在「描述与标签」区的容器里，不再另开一段');
+    assert.strictEqual(body.querySelectorAll('.section').length, sectionsBefore, 'section 数量不变（没有多出一段）');
+    assert.strictEqual((body.innerHTML.match(/<h4>描述与标签<\/h4>/g) || []).length, 1, '「描述与标签」标题只有一个');
+    assert.ok(body.querySelector('.detail-msg-list').children.some(c => c.tagName === 'H4') === false, '容器里只有块，不重复标题');
     assert.ok(!block.querySelector('.msg-editor').classList.contains('hidden'), '直接进入描述编辑态');
     assert.strictEqual(block.querySelector('.tag-add-btn').disabled, false, '添加标签按钮可点');
     assert.ok(block.querySelector('.tag-add-btn').classList.contains('is-highlight'), '没有标签时高亮添加按钮');
     assert.strictEqual(block.querySelector('.tag-add-submit').dataset.file, 'AQAD31');
+    assert.strictEqual(body.querySelector('.detail-msg-list').querySelectorAll('.empty').length, 1, '空态提示仍在同一容器里');
 
-    // 另一个媒体还没被点选，不会凭空出现编辑块
-    assert.ok(!body.querySelectorAll('.msg-block').some(b => b.dataset.msg === 'AQAD32'));
+    // 改点另一条没有描述的媒体 → 新增块跟着切换，数量仍为 1
+    await actDialog(env, { action: 'detail-pick', file: 'AQAD32' }, { tagName: 'DIV' });
+    blocks = msgBlocksOf(body);
+    assert.strictEqual(blocks.length, 1, '仍然只有一个新增块（同步切换）');
+    assert.strictEqual(blocks[0].dataset.msg, 'AQAD32');
+    assert.ok(blocks[0].classList.contains('is-draft'));
+
+    // 取消选中 → 新增块消失
+    await actDialog(env, { action: 'detail-pick', file: 'AQAD32' }, { tagName: 'DIV' });
+    assert.strictEqual(msgBlocksOf(body).length, 0, '没有选中时不显示新增块');
+});
+
+test('媒体详情：点已有描述的媒体 → 不新增块，把它自己的编辑区置顶', async () => {
+    const env = await boot();
+    await goto(env, 'media');
+    await act(env, { action: 'open-media', group: '-100_1' });
+    const body = env.document.querySelector('#detail-body');
+
+    // 原始顺序：AQAD1、AQAD2
+    assert.deepStrictEqual(msgBlocksOf(body).map(b => b.dataset.msg), ['AQAD1', 'AQAD2']);
+
+    // 点第二个（已有描述）→ 它的块置顶，且不出现新增块
+    await actDialog(env, { action: 'detail-pick', file: 'AQAD2' }, { tagName: 'DIV' });
+    assert.deepStrictEqual(msgBlocksOf(body).map(b => b.dataset.msg), ['AQAD2', 'AQAD1'], 'AQAD2 置顶');
+    assert.strictEqual(body.querySelectorAll('.is-draft').length, 0, '有描述的媒体不会新增块');
+
+    // 点第一个 → 换它置顶
+    await actDialog(env, { action: 'detail-pick', file: 'AQAD1' }, { tagName: 'DIV' });
+    assert.deepStrictEqual(msgBlocksOf(body).map(b => b.dataset.msg), ['AQAD1', 'AQAD2'], 'AQAD1 置顶');
+
+    // 取消选中 → 回到原始顺序
+    await actDialog(env, { action: 'detail-pick', file: 'AQAD1' }, { tagName: 'DIV' });
+    assert.deepStrictEqual(msgBlocksOf(body).map(b => b.dataset.msg), ['AQAD1', 'AQAD2']);
+    assert.strictEqual(body.querySelectorAll('.is-draft').length, 0);
+});
+
+test('媒体详情：先点无描述媒体再点有描述媒体 → 新增块收起、改置顶已有块', async () => {
+    const env = await boot();
+    await goto(env, 'media');
+    await act(env, { action: 'open-media', group: '-100_3' });
+    const body = env.document.querySelector('#detail-body');
+
+    await actDialog(env, { action: 'detail-pick', file: 'AQAD31' }, { tagName: 'DIV' });
+    assert.strictEqual(body.querySelectorAll('.is-draft').length, 1, '无描述媒体 → 出现新增块');
+
+    // 换到有描述的组（fixture：-100_1 的两条都有描述）
+    await act(env, { action: 'open-media', group: '-100_1' });
+    assert.strictEqual(body.querySelectorAll('.is-draft').length, 0, '切到有描述的组 → 没有新增块');
 });
 
 test('媒体详情：无文本记录媒体保存描述 → 提交 fileUniqueId 与文本', async () => {
