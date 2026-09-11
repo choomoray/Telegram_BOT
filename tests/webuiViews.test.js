@@ -260,7 +260,8 @@ function fixtures() {
             counts: { all: 1, collection: 1, misc: 0 }, subTotal: 1
         },
         '/api/media': (req) => {
-            if (req.url.includes('tag=AAA')) {
+            // 标签详情：只要该标签下的媒体组
+            if (req.url.includes('tag=')) {
                 return {
                     total: 1, page: 1, pageSize: 12, totalPages: 1,
                     items: [{
@@ -272,7 +273,17 @@ function fixtures() {
                     }]
                 };
             }
-            return { total: 0, page: 1, pageSize: 12, totalPages: 1, items: [] };
+            // 媒体库列表：始终给一张卡片，供「点卡片进详情」用例使用
+            return {
+                total: 1, page: 1, pageSize: 24, totalPages: 1,
+                items: [{
+                    group_id: '-100_1', is_group: 2, is_delete: 0, cleanable: false,
+                    mediaCount: 2, subgroups: 1, types: ['photo', 'video'],
+                    preview: { file_unique_id: 'AQAD1', media_type: 'photo', thumbable: true },
+                    text: '有标签的描述', tags: ['JK'],
+                    group: { chat_id: -100, message_id: 11 }, channel: null
+                }]
+            };
         },
         '/api/media/detail': (req) => {
             // 默认组 -100_1；-100_3 是「有媒体但完全没有文本记录」的组；-100_4 是只有一个媒体的组
@@ -467,6 +478,32 @@ test('「原始数据」仍能拿到集合名列表（视图状态桶未互相�
     const html = (await goto(env, 'raw')).innerHTML;
     assert.match(html, /option value="transport"/);
     assert.match(html, /option value="media"/);
+});
+
+// ---------------- 媒体库：点卡片进详情 ----------------
+
+test('媒体库：点媒体卡片能进入详情（data-action 必须是 open-media，不能是 map 传进来的索引）', async () => {
+    const env = await boot();
+    const view = await goto(env, 'media');
+
+    // 卡片必须是 open-media：一旦写成 mediaCard(item, index) 这种裸函数引用，
+    // Array.map 会把索引当第二参传进去 → data-action="0" → 点了没反应
+    assert.match(view.innerHTML, /class="media-card" data-action="open-media" data-group="-100_1"/);
+    assert.ok(!/data-action="\d+"/.test(view.innerHTML), '不能出现数字 action');
+    assert.match(view.innerHTML, /有标签的描述/);
+
+    const card = view.querySelectorAll('.media-card').find(c => c.dataset.group === '-100_1');
+    assert.ok(card, '媒体卡片已渲染');
+
+    // 走真实 DOM 路径：点击缩略图 → closest('[data-action]') 向上找到卡片
+    await view.fire('click', {
+        target: { closest: (sel) => (sel === '[data-action]' ? card : null), tagName: 'IMG' }
+    });
+    await tick();
+
+    assert.ok(env.document.querySelector('#detail-dialog').open, '详情对话框已打开');
+    assert.match(env.document.querySelector('#detail-body').innerHTML, /有标签的描述/);
+    assert.match(env.document.querySelector('#detail-title').innerHTML, /-100_1/);
 });
 
 // ---------------- 媒体详情：点选媒体后高亮可改标签 ----------------
@@ -822,6 +859,47 @@ test('媒体详情：只有一个媒体的组自动选中，标签区直接可�
     // 直接就能移除已有标签
     await actDialog(env, { action: 'tag-remove', file: 'AQAD41', tag: 'JK' }, { tagName: 'BUTTON' });
     assert.deepStrictEqual(lastRequest(env, '/api/media/tags', 'POST').body, { fileUniqueId: 'AQAD41', add: [], remove: ['JK'] });
+});
+
+test('媒体详情：标签输入支持空格分隔多个 + `-标签` 移除（回车与按钮同样规则）', async () => {
+    const env = await boot();
+    await goto(env, 'media');
+    await act(env, { action: 'open-media', group: '-100_1' });
+    await actDialog(env, { action: 'detail-pick', file: 'AQAD1' }, { tagName: 'DIV' });
+    await actDialog(env, { action: 'tag-add-prompt', file: 'AQAD1' }, { tagName: 'BUTTON' });
+
+    const body = env.document.querySelector('#detail-body');
+    const block = body.querySelectorAll('.msg-block').find(b => b.dataset.msg === 'AQAD1');
+    const input = block.querySelector('.tag-input');
+    assert.match(body.innerHTML, /-标签 表示移除/, '输入框提示说明 - 前缀');
+
+    // 空格分隔多个 + 一个移除
+    input.value = '甲 乙 -JK';
+    await actDialog(env, { action: 'tag-add', file: 'AQAD1' }, { tagName: 'BUTTON' });
+    assert.deepStrictEqual(lastRequest(env, '/api/media/tags', 'POST').body,
+        { fileUniqueId: 'AQAD1', add: ['甲', '乙'], remove: ['JK'] });
+
+    // 回车走同一套规则（重渲染后重新取节点）
+    const block2 = env.document.querySelector('#detail-body').querySelectorAll('.msg-block').find(b => b.dataset.msg === 'AQAD1');
+    const input2 = block2.querySelector('.tag-input');
+    input2.value = '丙 -丁';
+    await env.document.querySelector('#detail-dialog').fire('keydown', {
+        key: 'Enter', preventDefault() { }, target: input2
+    });
+    await tick();
+    assert.deepStrictEqual(lastRequest(env, '/api/media/tags', 'POST').body,
+        { fileUniqueId: 'AQAD1', add: ['丙'], remove: ['丁'] });
+
+    // 只有 - 没有名字：提示且不发请求
+    const block3 = env.document.querySelector('#detail-body').querySelectorAll('.msg-block').find(b => b.dataset.msg === 'AQAD1');
+    block3.querySelector('.tag-input').value = '- -';
+    const before = env.requests.length;
+    await actDialog(env, { action: 'tag-add', file: 'AQAD1' }, { tagName: 'BUTTON' });
+    assert.strictEqual(env.requests.length, before, '没有有效标签名时不发请求');
+
+    // 推荐标签（chip 带 data-tag）仍是单个添加
+    await actDialog(env, { action: 'tag-add', file: 'AQAD1', tag: 'BBB' }, { tagName: 'BUTTON' });
+    assert.deepStrictEqual(lastRequest(env, '/api/media/tags', 'POST').body, { fileUniqueId: 'AQAD1', add: ['BBB'], remove: [] });
 });
 
 test('媒体详情：点标签行的按钮不会取消媒体选中态（点击不再被吞）', async () => {

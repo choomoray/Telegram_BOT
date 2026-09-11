@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { sortTags } = require('../db/tags');
-const { splitTagInput, matchTagsInText, buildTagRegionKeyboard } = require('../utils/tagUi');
+const { splitTagInput, parseTagInput, matchTagsInText, buildTagRegionKeyboard } = require('../utils/tagUi');
 
 // ---------------- sortTags（标签展示排序） ----------------
 
@@ -59,6 +59,51 @@ test('空输入返回空数组', () => {
     assert.deepStrictEqual(splitTagInput(''), []);
     assert.deepStrictEqual(splitTagInput(null), []);
     assert.deepStrictEqual(splitTagInput('   '), []);
+});
+
+test('splitTagInput 只返回要添加的：-标签 前缀会被忽略', () => {
+    assert.deepStrictEqual(splitTagInput('xx -yy'), ['xx']);
+    assert.deepStrictEqual(splitTagInput('-yy -zz'), []);
+});
+
+// ---------------- parseTagInput（空格分隔多个 + - 前缀移除） ----------------
+
+test('parseTagInput：空格分隔一次添加多个标签', () => {
+    assert.deepStrictEqual(parseTagInput('xx yy zz'), { add: ['xx', 'yy', 'zz'], remove: [] });
+    assert.deepStrictEqual(parseTagInput('图片 教程、高清，风景'), { add: ['图片', '教程', '高清', '风景'], remove: [] });
+    // 换行/多个空格也算分隔
+    assert.deepStrictEqual(parseTagInput('  a   b \n c '), { add: ['a', 'b', 'c'], remove: [] });
+});
+
+test('parseTagInput：-前缀表示移除', () => {
+    assert.deepStrictEqual(parseTagInput('-xx -yy'), { add: [], remove: ['xx', 'yy'] });
+    assert.deepStrictEqual(parseTagInput('xx -yy'), { add: ['xx'], remove: ['yy'] });
+    assert.deepStrictEqual(parseTagInput('xx yy -zz'), { add: ['xx', 'yy'], remove: ['zz'] });
+});
+
+test('parseTagInput：中文输入法全角减号同样识别为移除', () => {
+    assert.deepStrictEqual(parseTagInput('xx －yy'), { add: ['xx'], remove: ['yy'] });
+    assert.deepStrictEqual(parseTagInput('xx −yy'), { add: ['xx'], remove: ['yy'] });
+});
+
+test('parseTagInput：各自去重（大小写不敏感、保留首现）', () => {
+    assert.deepStrictEqual(parseTagInput('HD hd -JK -jk'), { add: ['HD'], remove: ['JK'] });
+});
+
+test('parseTagInput：同名既写添加又写移除时以移除为准', () => {
+    assert.deepStrictEqual(parseTagInput('xx -xx'), { add: [], remove: ['xx'] });
+    assert.deepStrictEqual(parseTagInput('-xx xx yy'), { add: ['yy'], remove: ['xx'] });
+});
+
+test('parseTagInput：空输入与孤立减号', () => {
+    assert.deepStrictEqual(parseTagInput(''), { add: [], remove: [] });
+    assert.deepStrictEqual(parseTagInput(null), { add: [], remove: [] });
+    assert.deepStrictEqual(parseTagInput('   '), { add: [], remove: [] });
+    assert.deepStrictEqual(parseTagInput('- - '), { add: [], remove: [] }, '只有减号没有名字 → 忽略');
+});
+
+test('parseTagInput：标签名里的连字符不算移除前缀', () => {
+    assert.deepStrictEqual(parseTagInput('jk-2 a-b'), { add: ['jk-2', 'a-b'], remove: [] });
 });
 
 // ---------------- matchTagsInText（文本识别标签） ----------------

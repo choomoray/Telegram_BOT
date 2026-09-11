@@ -22,7 +22,7 @@ const {
     getMessageTags
 } = require('../../db/message');
 const { getTags, sortTags, tagUsed, addTag } = require('../../db/tags');
-const { buildTagRegionKeyboard, splitTagInput, matchTagsInText } = require('../../utils/tagUi');
+const { buildTagRegionKeyboard, parseTagInput, matchTagsInText } = require('../../utils/tagUi');
 const { extractMediaFromMessage, restoreMediaGroupCaptions } = require('../../media');
 const { removeLevelSuffix } = require('../../utils/levelExtractor');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
@@ -269,37 +269,41 @@ async function handleTagCallback(query) {
 }
 
 /**
- * 手动输入标签（空格/、分隔）：不存在则自动创建后打上
+ * 手动输入标签（空格/、分隔，可一次多个）：不存在则自动创建后打上
+ * 前缀 - 表示移除（如 `-xx -yy`）；无前缀按面板语义（添加面板=添加）
  * 标签按 message 独立：传 fileUniqueId 时只作用于该条 message，否则退化为整组
  */
 async function applyManualTags(userId, text, groupId, mode, tagMsgId, fileUniqueId = null) {
-    const names = splitTagInput(text);
-    if (!names.length) {
+    const { add, remove } = parseTagInput(text);
+    const isAddPanel = mode === 'add';
+    const toAdd = isAddPanel ? add : [];
+    const toRemove = isAddPanel ? remove : [...add, ...remove];
+    if (!toAdd.length && !toRemove.length) {
         await bot.sendMessage(userId, '❌ 未识别到标签');
         return;
     }
     const allTags = await getTags();
-    for (const rawName of names) {
+    for (const rawName of toAdd) {
         const name = rawName.toUpperCase(); // 标签名统一大写
         const exists = allTags.some(t => t.name.toLowerCase() === name.toLowerCase());
         if (!exists) {
             await addTag(name);
         }
-        if (mode === 'add') {
-            if (fileUniqueId) {
-                await addTagToMessage(fileUniqueId, name);
-            } else {
-                await addTagToGroup(groupId, name);
-            }
-            await tagUsed(name, 1);
+        if (fileUniqueId) {
+            await addTagToMessage(fileUniqueId, name);
         } else {
-            if (fileUniqueId) {
-                await removeTagFromMessage(fileUniqueId, name);
-            } else {
-                await removeTagFromGroup(groupId, name);
-            }
-            await tagUsed(name, -1);
+            await addTagToGroup(groupId, name);
         }
+        await tagUsed(name, 1);
+    }
+    for (const rawName of toRemove) {
+        const name = rawName.toUpperCase();
+        if (fileUniqueId) {
+            await removeTagFromMessage(fileUniqueId, name);
+        } else {
+            await removeTagFromGroup(groupId, name);
+        }
+        await tagUsed(name, -1);
     }
     // 刷新标签消息（文本已选列表 + 键盘）
     if (tagMsgId) {
@@ -308,8 +312,11 @@ async function applyManualTags(userId, text, groupId, mode, tagMsgId, fileUnique
     // 用新消息列出当前该 message 的全部标签
     const currentTags = fileUniqueId ? await getMessageTags(fileUniqueId) : await getGroupTags(groupId);
     const currentText = currentTags.length ? `\n📌 当前标签：${currentTags.join('、')}` : '\n📌 当前标签：（无）';
-    await bot.sendMessage(userId, `✅ 已${mode === 'add' ? '添加' : '移除'}标签：${names.join('、')}${currentText}`);
-    logger.info(`用户 ${userId} 手动${mode === 'add' ? '添加' : '移除'}标签: ${names.join('、')}`);
+    const parts = [];
+    if (toAdd.length) parts.push(`已添加：${toAdd.join('、')}`);
+    if (toRemove.length) parts.push(`已移除：${toRemove.join('、')}`);
+    await bot.sendMessage(userId, `✅ ${parts.join('；')}${currentText}`);
+    logger.info(`用户 ${userId} 手动更新标签: ${parts.join('；')}`);
 }
 
 // ---------------- 发送与收录 ----------------
@@ -689,7 +696,7 @@ async function handleSendMode(msg, state) {
     updateUserActivity(userId);
     const userMsgId = msg.message_id;
 
-    // 标签阶段（发送成功后）：文本消息作为手动标签输入（空格/、分隔），不发送到群组
+    // 标签阶段（发送成功后）：文本消息作为手动标签输入（空格分隔可一次多个；-标签 表示移除），不发送到群组
     if (state.lastGroupId && msg.text && !msg.photo && !msg.video && !msg.audio && !msg.document) {
         await applyManualTags(userId, msg.text, state.lastGroupId, 'add', state.tagMsgId, state.lastFileUniqueId);
         return true;

@@ -17,21 +17,45 @@ const ADD_MARKER = '+';       // 未打上的标签
 const REGION_SEPARATOR_TEXT = '── 已有标签（点击移除） ──';
 const REGION_SEPARATOR_DATA = 'tag_noop';
 
+/** 移除前缀：ASCII `-`，以及中文输入法常见的全角 `－` / 数学减号 `−` */
+const TAG_REMOVE_PREFIX = /^[-－−]/;
+
 /**
- * 解析手动输入的标签文本（按空格 / 、 / , / ， 分隔，去重保留首现）
+ * 解析标签输入：空格 / `、` / `,` / `，` 分隔，一次可以写多个标签
+ * 前缀 `-` 表示**移除**该标签，无前缀表示**添加**：
+ *   `xx yy`      → { add: ['xx', 'yy'], remove: [] }
+ *   `xx -yy -zz` → { add: ['xx'], remove: ['yy', 'zz'] }
+ * 同名同时出现（`xx -xx`）时以移除为准；各自去重（大小写不敏感，保留首现）
+ * @param {string} text - 用户输入
+ * @returns {{add: string[], remove: string[]}}
+ */
+function parseTagInput(text) {
+    const add = [];
+    const remove = [];
+    if (!text || typeof text !== 'string') return { add, remove };
+    const parts = text.split(/[、,，\s]+/).map(s => s.trim()).filter(Boolean);
+    for (const p of parts) {
+        const isRemove = TAG_REMOVE_PREFIX.test(p);
+        const name = (isRemove ? p.replace(TAG_REMOVE_PREFIX, '') : p).trim();
+        if (!name) continue;
+        const bucket = isRemove ? remove : add;
+        if (!bucket.some(n => n.toLowerCase() === name.toLowerCase())) {
+            bucket.push(name);
+        }
+    }
+    // 同一名字既写了添加又写了移除 → 以移除为准
+    const removed = new Set(remove.map(n => n.toLowerCase()));
+    return { add: add.filter(n => !removed.has(n.toLowerCase())), remove };
+}
+
+/**
+ * 解析手动输入的「要添加」的标签名（`-` 前缀表示移除，会被忽略）
+ * 需要同时处理移除时请用 parseTagInput
  * @param {string} text - 用户输入文本
  * @returns {string[]} 标签名数组
  */
 function splitTagInput(text) {
-    if (!text || typeof text !== 'string') return [];
-    const names = [];
-    const parts = text.split(/[、,，\s]+/).map(s => s.trim()).filter(Boolean);
-    for (const p of parts) {
-        if (!names.some(n => n.toLowerCase() === p.toLowerCase())) {
-            names.push(p);
-        }
-    }
-    return names;
+    return parseTagInput(text).add;
 }
 
 /**
@@ -226,6 +250,7 @@ module.exports = {
     buildTagRegionKeyboard,
     paginate,
     splitTagInput,
+    parseTagInput,
     matchTagsInText,
     TAG_COLUMNS,
     TAG_ROWS_PER_PAGE,

@@ -607,7 +607,7 @@
       : '';
 
     const body = m.items.length
-      ? `<div class="media-grid">${m.items.map(mediaCard).join('')}</div>`
+      ? `<div class="media-grid">${m.items.map(it => mediaCard(it)).join('')}</div>`
       : `<div class="empty"><div class="empty-ico">🗂</div><div>没有符合条件的媒体组${m.q ? `（搜索：${esc(m.q)}）` : ''}${m.tag ? `（标签：${esc(m.tag)}）` : ''}</div></div>`;
 
     $('#view').innerHTML = `
@@ -1350,6 +1350,41 @@
 
   /* ---------------- 详情：描述与标签区块 ---------------- */
 
+  const TAG_REMOVE_PREFIX = /^[-－−]/;
+
+  /**
+   * 解析标签输入（与机器人端 utils/tagUi.js: parseTagInput 同一套规则）
+   * 空格 / 、 / , / ， 分隔，可一次输入多个；前缀 `-` 表示移除
+   *   `xx yy`      → { add: ['xx','yy'], remove: [] }
+   *   `xx -yy -zz` → { add: ['xx'], remove: ['yy','zz'] }
+   * 同名同时出现时以移除为准，各自去重（大小写不敏感，保留首现）
+   * @param {string} text
+   * @returns {{add: string[], remove: string[]}}
+   */
+  function parseTagInput(text) {
+    const add = [];
+    const remove = [];
+    if (!text || typeof text !== 'string') return { add, remove };
+    for (const p of text.split(/[、,，\s]+/).map(s => s.trim()).filter(Boolean)) {
+      const isRemove = TAG_REMOVE_PREFIX.test(p);
+      const name = (isRemove ? p.replace(TAG_REMOVE_PREFIX, '') : p).trim();
+      if (!name) continue;
+      const bucket = isRemove ? remove : add;
+      if (!bucket.some(n => n.toLowerCase() === name.toLowerCase())) bucket.push(name);
+    }
+    const removed = new Set(remove.map(n => n.toLowerCase()));
+    return { add: add.filter(n => !removed.has(n.toLowerCase())), remove };
+  }
+
+  /** 提交标签输入：解析出「添加 / 移除」后走 POST /api/media/tags */
+  async function submitTagInput(block, file, rawText) {
+    const text = String(rawText === undefined || rawText === null ? '' : rawText).trim();
+    const { add, remove } = parseTagInput(text);
+    if (!add.length && !remove.length) { toast('请输入标签名（多个用空格分隔，-标签 表示移除）', true); return; }
+    if (!file) { toast('未找到目标媒体，请重新打开详情', true); return; }
+    await applyMediaTags(file, { add, remove });
+  }
+
   /**
    * 单条 message 的描述 + 标签编辑块
    * @param {Object} m - { file_unique_id, text, tags, chat_id, message_id }
@@ -1383,7 +1418,7 @@
         </div>
         <div class="tag-picker hidden" data-role="tag-picker">
           <div class="editor-row" style="margin-top:8px">
-            <input class="tag-input" data-role="tag-input" placeholder="输入标签名（回车添加，可新建）" style="flex:1;min-width:160px">
+            <input class="tag-input" data-role="tag-input" placeholder="标签名，空格分隔可填多个；-标签 表示移除（如 xx yy -zz）" style="flex:1;min-width:160px">
             <button class="btn btn-sm btn-primary tag-add-submit" data-action="tag-add" data-file="${file}">➕ 添加</button>
             <button class="btn btn-sm tag-cancel-submit" data-action="tag-cancel" data-file="${file}">取消</button>
           </div>
@@ -1636,7 +1671,10 @@
 
   async function applyMediaTags(fileUniqueId, { add = [], remove = [] }) {
     const r = await apiPost('/media/tags', { fileUniqueId, add, remove });
-    toast(`🏷 标签已更新（当前：${(r.tags || []).join('、') || '无'}）`);
+    const parts = [];
+    if ((r.added || []).length) parts.push(`添加 ${r.added.join('、')}`);
+    if ((r.removed || []).length) parts.push(`移除 ${r.removed.join('、')}`);
+    toast(`🏷 ${parts.join(' · ') || '标签已更新'}（当前：${(r.tags || []).join('、') || '无'}）`);
     await openMediaDetail(state.detail.group.group_id);
   }
 
@@ -2803,14 +2841,17 @@
             break;
           }
           case 'tag-add': {
-            // 定点按钮带 data-tag；输入框的「➕ 添加」改为取脚本里已渲染的值
+            // 定点按钮带 data-tag（推荐标签）；输入框的「➕ 添加」解析整段输入
+            // 支持一次多个（空格分隔）与 -标签 移除
             const block = el.closest('.msg-block');
             const input = block && block.querySelector('.tag-input');
-            const tag = el.dataset.tag || (input ? input.value.trim() : '');
             const file = el.dataset.file || (block ? block.dataset.msg : '');
-            if (!tag) { toast('请输入标签名', true); break; }
-            if (!file) { toast('未找到目标媒体，请重新打开详情', true); break; }
-            await applyMediaTags(file, { add: [tag] });
+            if (el.dataset.tag) {
+              if (!file) { toast('未找到目标媒体，请重新打开详情', true); break; }
+              await applyMediaTags(file, { add: [el.dataset.tag] });
+              break;
+            }
+            await submitTagInput(block, file, input ? input.value : '');
             break;
           }
           case 'tag-remove': await applyMediaTags(el.dataset.file, { remove: [el.dataset.tag] }); break;
@@ -2853,9 +2894,7 @@
         if (input.dataset.role === 'tag-input') {
           const block = input.closest ? input.closest('.msg-block') : null;
           const file = (block && block.dataset.msg) || '';
-          const tag = input.value.trim();
-          if (!file) { toast('未找到目标媒体，请重新打开详情', true); return; }
-          if (tag) await applyMediaTags(file, { add: [tag] });
+          await submitTagInput(block, file, input.value);
         }
       } catch (err) {
         toast(err.message, true);
