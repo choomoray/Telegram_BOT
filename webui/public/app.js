@@ -45,7 +45,7 @@
     timer: null,
     collections: [],
     overview: null,
-    media: { scope: 'all', q: '', tag: '', page: 1, pageSize: 24, total: 0, totalPages: 1, items: [] },
+    media: { scope: 'all', q: '', tag: '', page: 1, pageSize: 40, total: 0, totalPages: 1, items: [] },
     users: { scope: 'all', q: '', page: 1, pageSize: 20, total: 0, totalPages: 1, items: [] },
     raw: { collection: ALL_KEY, sort: -1, page: 1, pageSize: 20, total: 0, totalPages: 1, items: [] },
     clean: { previews: null, items: [] },
@@ -57,7 +57,8 @@
     collectionsView: { q: '', type: 'all', items: [], counts: { all: 0, collection: 0, misc: 0 } }, // 「合集 / 杂集」视图数据
     dbstats: { data: null },
     random: {
-      types: [], tags: [], tagMode: 'any', q: '', duration: 'all', scope: 'all', count: 20,
+      types: [], tags: [], tagMode: 'any', q: '', duration: 'all', scope: 'all', count: 40, source: 'message',
+      filtersOpen: false,                    // 筛选条件面板默认折叠（只留「类型」一行）
       items: [], total: 0
     },
     stats: { year: new Date().getFullYear(), metric: 'all', data: null },
@@ -109,13 +110,16 @@
    * 用 background-image 而不是 <img>：方便统一控制裁切、模糊（.is-blur）与加载失败降级。
    * 预览框尺寸固定、cover 裁切；悬停放大交给 .thumb-zoom 大图，小图只做模糊处理。
    * 加载失败 → is-fallback，由 JS 换成类型图标占位。
+   * @param {Object|string} source - 媒体对象或 file_unique_id
+   * @param {Object} [opts] - { flow: true } 瀑布流变体：封面按图片原始比例完整显示、不裁切
    */
-  function thumbCover(source) {
+  function thumbCover(source, opts = {}) {
     const id = typeof source === 'string' ? source : (source && source.file_unique_id);
     if (!id) return '';
     const url = thumbUrl(id);
-    // 封面图（background-size: cover 裁切填满）+ 内部那张只为读尺寸的隐形真图
-    return `<span class="thumb-img" data-src="${esc(url)}" style="background-image:url('${url}')">${thumbProbe(url)}</span>`;
+    // 封面图（默认 background-size: cover 裁切填满；flow 变体用 contain 完整显示）
+    // + 内部那张只为读尺寸的隐形真图（flow 变体里它就是可见的图片本身）
+    return `<span class="thumb-img${opts.flow ? ' thumb-img--flow' : ''}" data-src="${esc(url)}" style="background-image:url('${url}')">${thumbProbe(url)}</span>`;
   }
 
   /**
@@ -797,10 +801,10 @@
     return report;
   }
 
-  /** 随机推荐：按当前筛选条件抽一批（类型 / 标签 / 关键词 / 时长 / 范围 / 数量） */
+  /** 随机推荐：按当前筛选条件抽一批（来源 / 类型 / 标签 / 关键词 / 时长 / 范围 / 数量） */
   async function loadRandom() {
     const r = state.random;
-    const params = new URLSearchParams({ count: String(r.count) });
+    const params = new URLSearchParams({ count: String(r.count), source: r.source || 'message' });
     if (r.types.length) params.set('types', r.types.join(','));
     if (r.tags.length) {
       params.set('tags', r.tags.join(','));
@@ -1015,7 +1019,7 @@
         <span class="grow"></span>
         <label class="switch">每组显示
           <select id="media-pagesize" style="width:auto">
-            ${[12, 24, 48, 100].map(n => `<option value="${n}" ${m.pageSize === n ? 'selected' : ''}>${n}</option>`).join('')}
+            ${[20, 40, 80, 120].map(n => `<option value="${n}" ${m.pageSize === n ? 'selected' : ''}>${n}</option>`).join('')}
           </select>
         </label>
       </div>
@@ -1148,6 +1152,8 @@
     const pinned = tag.pin > 0;
     const dlg = $('#detail-dialog');
     $('#detail-title').innerHTML = `🏷 ${esc(tag.name)}`;
+    // 标签详情是"内容超高整体滚"的网格视图，不是媒体详情的双栏独立滚动
+    $('#detail-body').classList.remove('has-detail-main');
     // 正文一次渲染：顶部信息 + 媒体列表区（列表异步填充同一段 HTML，避免子元素引用失效）
     $('#detail-body').innerHTML = tagDetailHtml(tag, pinned, '<div class="loading">正在加载媒体…</div>');
     $('#detail-foot').innerHTML = `
@@ -1775,10 +1781,20 @@
     ['1-5min', '1-5 分钟'], ['5-30min', '5-30 分钟'], ['>30min', '30 分钟以上'], ['>1h', '1 小时以上']
   ];
 
-  /** 随机推荐卡片：单条媒体（点卡片进媒体组详情，↗ 直接跳 Telegram） */
+  /** 随机推荐的「数据来源」下拉：message 库 = 有描述 / 标签的记录（默认），media 库 = 全部收录媒体 */
+  const RANDOM_SOURCES = [
+    ['message', '来源：message 库（有描述）'], ['media', '来源：media 库（全部媒体）']
+  ];
+
+  /**
+   * 随机推荐卡片：瀑布流（masonry）版——**图片按原始比例完整显示、不裁切**，文字仍在图片下方。
+   * 点卡片进媒体组详情，↗ 直接跳 Telegram。
+   * 与媒体库卡片（`mediaCard`，固定 16:10 裁切封面）的区别只在封面布局：
+   * 这里用 `.media-card--flow` + `.media-thumb--flow`，多列瀑布流由 CSS 的 columns 负责。
+   */
   function randomCardHtml(item) {
     const thumb = item.thumbable
-      ? thumbCover(item)
+      ? thumbCover(item, { flow: true })
       : `<span class="ph">${typeIcon(item.media_type)}</span>`;
     const link = item.chat_id && item.message_id
       ? `https://t.me/c/${toLinkChatId(item.chat_id)}/${item.message_id}`
@@ -1787,16 +1803,13 @@
       ? esc(item.text.length > 90 ? item.text.slice(0, 90) + '…' : item.text)
       : '空描述（可清理）';
     const tags = (item.tags || []).slice(0, 4).map(t => `<span class="tag-pill">${esc(t)}</span>`).join('');
-    return `<article class="media-card" data-action="open-media" data-group="${esc(item.group_id)}" aria-label="打开该媒体组详情（可改描述 / 改标签）">
-      <div class="media-thumb" data-zoom="1">
+    return `<article class="media-card media-card--flow" data-action="open-media" data-group="${esc(item.group_id)}" aria-label="打开该媒体组详情（可改描述 / 改标签）">
+      <div class="media-thumb media-thumb--flow" data-zoom="1">
         ${thumb}
         ${typeBadgeHtml(item.media_type)}
       </div>
       <div class="media-body">
         <div class="media-text ${item.text ? '' : 'is-empty'}">${text}</div>
-        <div class="media-badges">
-          <span class="tag ${item.cleanable ? 'warn' : 'ok'}">${item.cleanable ? '可清理' : '保留'}</span>
-        </div>
         <div class="tags-line">${tags}</div>
         <div class="media-meta">
           <span>${typeIcon(item.media_type)} ${typeLabel(item.media_type)}</span>
@@ -1828,12 +1841,47 @@
       .map(t => chip(r.tags.includes(t.name), 'random-tag', `data-tag="${esc(t.name)}"`, esc(t.name))).join('');
     const durationOptions = RANDOM_DURATIONS
       .map(([v, l]) => `<option value="${v}" ${r.duration === v ? 'selected' : ''}>${l}</option>`).join('');
-    const countOptions = [10, 20, 40, 100]
+    const countOptions = [20, 40, 80, 150]
       .map(n => `<option value="${n}" ${r.count === n ? 'selected' : ''}>抽 ${n} 个</option>`).join('');
+    const sourceOptions = RANDOM_SOURCES
+      .map(([v, l]) => `<option value="${v}" ${r.source === v ? 'selected' : ''}>${l}</option>`).join('');
+
+    // 折叠时给一句「已启用条件」摘要：收起后仍然看得见生效的隐藏条件（来源下拉常驻，不用提示）
+    const activeFilters = [];
+    if (r.duration !== 'all') activeFilters.push(`时长 ${(RANDOM_DURATIONS.find(d => d[0] === r.duration) || [])[1] || r.duration}`);
+    if (r.scope === 'kept') activeFilters.push('范围 保留');
+    else if (r.scope === 'cleanable') activeFilters.push('范围 可清理');
+    if (r.tags.length) activeFilters.push(`标签 ${r.tags.map(esc).join(' / ')}${r.tagMode === 'all' ? '（需全部）' : ''}`);
+    if (r.q) activeFilters.push(`关键词「${esc(r.q)}」`);
+    if (r.count !== 40) activeFilters.push(`数量 ${r.count}`);
+    const filtersHint = r.filtersOpen
+      ? '来源 / 类型 / 标签 / 关键词 / 时长 / 范围 / 数量 可任意组合（比机器人上的两个随机更自由）'
+      : (activeFilters.length ? `已启用：${activeFilters.join(' · ')}` : '已收起（时长 / 范围 / 标签 / 关键词 / 数量）');
 
     const cards = items.length
       ? items.map(randomCardHtml).join('')
       : `<div class="empty"><div class="empty-ico">🎲</div><div>这组条件下一个都没抽到，换个筛选或点「重置条件」再试</div></div>`;
+
+    // 折叠时只渲染「类型」一行；其余条件展开后才渲染
+    const moreRows = `
+          <div class="filter-row"><span class="k">时长</span>
+            <select id="random-duration" style="width:auto">${durationOptions}</select>
+            <select id="random-count" style="width:auto">${countOptions}</select>
+            <span class="dim">时长只对带时长的视频生效</span>
+          </div>
+          <div class="filter-row"><span class="k">范围</span>
+            <div class="chips">${scopeChips}</div>
+          </div>
+          <div class="filter-row"><span class="k">标签</span>
+            <div class="chips">
+              ${tagChips || '<span class="dim">还没有手动置顶的标签（到「标签」页给常用标签点置顶即可在这里筛选）</span>'}
+              ${tagChips ? chip(r.tagMode === 'all', 'random-tagmode', '', r.tagMode === 'all' ? '需同时含全部标签' : '含任一标签') : ''}
+            </div>
+          </div>
+          <div class="filter-row"><span class="k">关键词</span>
+            <input id="random-q" value="${esc(r.q)}" placeholder="匹配描述，回车生效" style="flex:1;min-width:180px">
+            <button class="btn btn-sm" data-action="random-roll">🔍 抽取</button>
+          </div>`;
 
     $('#view').innerHTML = `
       <div class="toolbar">
@@ -1846,29 +1894,15 @@
       <div class="card" style="margin-bottom:14px">
         <div class="card-head">
           <h3>筛选条件</h3>
-          <span class="dim">类型 / 标签 / 关键词 / 时长 / 范围 / 数量 可任意组合（比机器人上的两个随机更自由）</span>
+          <select id="random-source" style="width:auto" title="随机抽取的数据来源库：message 库只含「有描述」的记录，media 库是全部收录媒体">${sourceOptions}</select>
+          <button class="btn btn-ghost btn-xs" data-action="random-filters-toggle" title="展开 / 收起筛选条件（默认收起）">${r.filtersOpen ? '▴ 收起筛选' : '▾ 更多筛选'}</button>
+          <span class="dim">${filtersHint}</span>
         </div>
         <div class="filter-rows">
-          <div class="filter-row"><span class="k">类型</span><div class="chips">${typeChips}</div></div>
-          <div class="filter-row"><span class="k">时长</span>
-            <select id="random-duration" style="width:auto">${durationOptions}</select>
-            <select id="random-count" style="width:auto">${countOptions}</select>
-            <span class="dim">时长只对带时长的视频生效</span>
-          </div>
-          <div class="filter-row"><span class="k">范围</span><div class="chips">${scopeChips}</div></div>
-          <div class="filter-row"><span class="k">标签</span>
-            <div class="chips">
-              ${tagChips || '<span class="dim">还没有手动置顶的标签（到「标签」页给常用标签点置顶即可在这里筛选）</span>'}
-              ${tagChips ? chip(r.tagMode === 'all', 'random-tagmode', '', r.tagMode === 'all' ? '需同时含全部标签' : '含任一标签') : ''}
-            </div>
-          </div>
-          <div class="filter-row"><span class="k">关键词</span>
-            <input id="random-q" value="${esc(r.q)}" placeholder="匹配描述，回车生效" style="flex:1;min-width:180px">
-            <button class="btn btn-sm" data-action="random-roll">🔍 抽取</button>
-          </div>
+          <div class="filter-row"><span class="k">类型</span><div class="chips">${typeChips}</div></div>${r.filtersOpen ? moreRows : ''}
         </div>
       </div>
-      <div class="media-grid">${cards}</div>`;
+      <div class="media-grid media-grid--flow">${cards}</div>`;
     updatePageSub(`随机推荐 · 候选 ${fmtNum(r.total)} 个 · 本次 ${fmtNum(items.length)} 个`);
   }
 
@@ -2093,6 +2127,9 @@
       $('#detail-foot').innerHTML = '';
       if (!dlg.open) dlg.showModal();
     }
+    // 媒体组详情：正文不滚，左右两栏各自独立滚动（见 style.css .dialog-body.has-detail-main）
+    $('#detail-body').classList.add('has-detail-main');
+    $('#detail-body').classList.remove('view-fill');
 
     let data;
     try {
@@ -2967,12 +3004,18 @@
           case 'random-scope':
             state.random.scope = el.dataset.scope || 'all';
             await loadRandom(); renderRandom(); break;
-          case 'random-reset':
+          case 'random-reset': {
+            const filtersOpen = state.random.filtersOpen;   // 重置条件不改变面板的展开 / 收起状态
             state.random = {
-              types: [], tags: [], tagMode: 'any', q: '', duration: 'all', scope: 'all', count: 20,
-              items: [], total: 0
+              types: [], tags: [], tagMode: 'any', q: '', duration: 'all', scope: 'all', count: 40, source: 'message',
+              filtersOpen, items: [], total: 0
             };
             await loadRandom(); renderRandom(); break;
+          }
+          case 'random-filters-toggle':
+            // 纯前端展开 / 收起，条件没变就不重新抽
+            state.random.filtersOpen = !state.random.filtersOpen;
+            renderRandom(); break;
           case 'raw-collection':
             state.raw.collection = el.dataset.collection;
             state.raw.page = 1;
@@ -3119,7 +3162,7 @@
     view.addEventListener('change', async (e) => {
       const el = e.target;
       if (el.id === 'media-pagesize') {
-        state.media.pageSize = parseInt(el.value, 10) || 24;
+        state.media.pageSize = parseInt(el.value, 10) || 40;
         state.media.page = 1;
         await show('media');
       } else if (el.id === 'users-pagesize') {
@@ -3162,6 +3205,10 @@
         renderRandom();
       } else if (el.id === 'random-count') {
         state.random.count = parseInt(el.value, 10) || 20;
+        await loadRandom();
+        renderRandom();
+      } else if (el.id === 'random-source') {
+        state.random.source = el.value === 'media' ? 'media' : 'message';
         await loadRandom();
         renderRandom();
       }
@@ -3772,8 +3819,13 @@
       const cover = img && img.closest ? img.closest('.thumb-img') : null;
       if (!cover) return;
       if (img.naturalWidth && img.naturalHeight) {
-        cover.dataset.ratio = String(img.naturalWidth / img.naturalHeight);
+        const ratio = img.naturalWidth / img.naturalHeight;
+        cover.dataset.ratio = String(ratio);
         cacheRatio(coverSrc(cover), img.naturalWidth, img.naturalHeight);
+        // 瀑布流封面（.media-thumb--flow）按图片真实比例定高：
+        // 图片没加载出来前先用一个中性高度，加载完再把高度锁到真实比例 → 不裁切、不变形
+        const wrap = cover.closest ? cover.closest('.media-thumb--flow') : null;
+        if (wrap && wrap.style) wrap.style.aspectRatio = String(ratio);
       }
     };
     // 加载失败：清掉封面层，退回类型图标占位

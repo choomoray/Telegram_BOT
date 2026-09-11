@@ -165,10 +165,50 @@ async function handleEditMode(msg, state) {
                 targetFileUniqueId, targetMediaType, cleanText
             });
 
-            // 编辑成功 → 主动弹出打标签界面（标签按 message 独立，只写这一条；已有标签保留）
+            // 编辑成功 → 自动进入打标签会话（标签按 message 独立，只写这一条；已有标签保留）
+            // 打标签不切换 / 不退出编辑模式（见 utils/tagSession.js）
             if (!isClearing && cleanText && targetGroupId) {
-                const { sendSuccessWithTags } = require('./sendMode');
-                await sendSuccessWithTags(userId, '✅ 修改完毕（可为此媒体打标签）', targetGroupId, cleanText, null, targetFileUniqueId);
+                const { addTagToMessage, getMessageTags } = require('../../db/message');
+                const { getTags, tagUsed } = require('../../db/tags');
+                const { matchTagsInText } = require('../../utils/tagUi');
+                const { syncGroupTags } = require('../../db/groupList');
+
+                // 编辑描述：保留已有标签，只补充新文本里匹配到且尚未打上的
+                const allTags = await getTags();
+                const matched = matchTagsInText(cleanText, allTags);
+                const prevTags = await getMessageTags(targetFileUniqueId);
+                const autoAdded = matched.filter(t => !prevTags.includes(t));
+                for (const tag of autoAdded) {
+                    await addTagToMessage(targetFileUniqueId, tag);
+                    await tagUsed(tag, 1);
+                }
+                if (autoAdded.length) await syncGroupTags(targetGroupId);
+                if (autoAdded.length) {
+                    logOperation({
+                        action: 'tag_add',
+                        source: 'private',
+                        userId,
+                        target: { type: 'media', id: targetFileUniqueId },
+                        counts: { tags: autoAdded.length, messages: 1 },
+                        detail: { tags: autoAdded, auto: true, matchedFrom: cleanText.slice(0, 60) }
+                    }).catch(() => { });
+                }
+
+                // 进入打标签队列（队列里已有目标时排在其后，点《完成》后依次切换）
+                const { enqueueTagTarget } = require('../../utils/tagSession');
+                const res = await enqueueTagTarget(userId, {
+                    groupId: targetGroupId,
+                    fileUniqueId: targetFileUniqueId,
+                    baseText: '✅ 修改完毕（可为此媒体打标签）'
+                });
+                if (!res.active && res.queued) {
+                    await bot.sendMessage(chatId, '✅ 修改完毕\n🏷️ 已加入打标签队列', {
+                        reply_to_message_id: messageId,
+                        allow_sending_without_reply: true
+                    }).catch(() => { });
+                }
+                // 编辑完成后退出编辑模式（打标签会话独立存在，不受模式清理影响）
+                deleteUserState(userId);
             } else {
                 // 清空文本 / 无组信息
                 await bot.sendMessage(chatId, '✅ 修改完毕', {

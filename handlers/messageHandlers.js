@@ -15,6 +15,12 @@ const config = require('../config');
 const { clearMediaGroupState } = require('../media');
 const { updateLastSeen } = require('../db/users');
 const { getModeName } = require('../utils/modeNames'); // 新增
+const { isTagging, getTagSession, handleTagText, clearTagSession } = require('../utils/tagSession');
+
+/** 是否为媒体消息（图片/视频/音频/文档） */
+function isMediaMessage(msg) {
+    return !!(msg.photo || msg.video || msg.audio || msg.document);
+}
 
 async function handlePrivateMessage(msg) {
     const userId = msg.from.id;
@@ -67,7 +73,10 @@ async function handlePrivateMessage(msg) {
     if (!currentState && rawState) {
         const mode = rawState.mode;
 
-        if (mode === 'media_group' || mode === 'media_hide' || mode === 'media_unhide') {
+        // 打标签会话进行中：模式超时不自动退出（打标签优先，用户可继续发送媒体继续回复/发送）
+        if (isTagging(userId)) {
+            currentState = null;
+        } else if (mode === 'media_group' || mode === 'media_hide' || mode === 'media_unhide') {
             const totalMedia = (rawState.mediaItems || []).length;
             await clearMediaGroupState(userId, true, rawState);
             let modeName = mode === 'media_hide' ? '媒体遮罩模式' : (mode === 'media_unhide' ? '媒体去遮罩模式' : '媒体合并模式');
@@ -92,11 +101,23 @@ async function handlePrivateMessage(msg) {
                 await rawState._onExit(userId, rawState);
             }
             deleteUserState(userId);
+            // 模式超时退出：同时清理打标签会话（避免残留面板/队列）
+            clearTagSession(userId);
 
             const modeName = getModeName(mode);
             await bot.sendMessage(userId, `✅ 已退出${modeName}（超时）`).catch(() => { });
             logger.info(`用户 ${userId} ${mode}模式超时自动退出`);
         }
+    }
+
+    // ---------- 打标签会话优先：纯文本 = 打标签操作 ----------
+    // 有正在打标签的目标时，文本消息一律作为标签输入（不发送、不查询），
+    // 直到用户点击《✅ 完成》才结束；媒体消息照常由当前模式处理（继续发送 / 继续回复）。
+    const tagSession = getTagSession(userId);
+    if (tagSession && tagSession.active && messageText && !isMediaMessage(msg)) {
+        updateUserActivity(userId);
+        await handleTagText(msg, tagSession);
+        return;
     }
 
     if (currentState) {

@@ -94,6 +94,9 @@ async function removeTag(name) {
     if (result.deletedCount === 0) return { ok: false, error: `标签「${name}」不存在` };
     const { removeTagFromAllMessages } = require('./message');
     const synced = await removeTagFromAllMessages(target);
+    // 同步汇总：group_list.tags 全库重算（message 集合已无该标签）
+    const { syncAllGroupTags } = require('./groupList');
+    await syncAllGroupTags().catch(() => { });
     logger.info(`标签已删除: ${target}, 同步清理 message ${synced} 条`);
     return { ok: true, tags: await getTags(), synced };
 }
@@ -117,6 +120,9 @@ async function renameTag(oldName, newName) {
     await col.updateOne({ name: old }, { $set: { name: trimmed } });
     const { renameTagInMessages } = require('./message');
     const synced = await renameTagInMessages(old, trimmed);
+    // 同步汇总：group_list.tags 全库重算（message 集合里的标签已改名）
+    const { syncAllGroupTags } = require('./groupList');
+    await syncAllGroupTags().catch(() => { });
     logger.info(`标签已重命名: ${old} -> ${trimmed}, 同步修改 message ${synced} 条`);
     return { ok: true, tags: await getTags(), synced };
 }

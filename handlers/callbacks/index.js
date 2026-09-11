@@ -16,6 +16,7 @@ const execCmdCallback = require('./execCmd');
 const { handleMarkMenuCallback, handleMarkRecordCallback, handleMarkRecordSwitchCallback } = require('./markCallback');
 const sendMode = require('../modes/sendMode');
 const tagMode = require('../modes/tagMode');
+const tagSession = require('../../utils/tagSession');
 const messageReplyMode = require('../modes/messageReplyMode');
 const transportMode = require('../modes/transportMode');
 const settingMode = require('../modes/settingMode');
@@ -37,10 +38,11 @@ const callbackHandlers = {
     markrec_switch: handleMarkRecordSwitchCallback,
     sendg: sendMode.handleCallback,
     sendpage: sendMode.handleCallback,
-    sendtag: sendMode.handleTagCallback,
-    sendtag_done: sendMode.handleTagCallback,
-    sendtag_reply: sendMode.handleTagCallback,
-    sendtag_page: sendMode.handleTagCallback,
+    // 打标签会话（发送/回复/编辑成功后自动进入，与模式解耦）
+    sendtag: tagSession.handleTagCallback,
+    sendtag_done: tagSession.handleTagCallback,
+    sendtag_reply: tagSession.handleTagCallback,
+    sendtag_page: tagSession.handleTagCallback,
     tagm: tagMode.handleCallback,
     tagmsg: tagMode.handleCallback,
     tagmsg_page: tagMode.handleCallback,

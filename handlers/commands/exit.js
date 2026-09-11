@@ -11,6 +11,9 @@ async function handleExitCommand(userId, msg) {
     const parts = fullCommand.split(/\s+/);
     const targetMode = parts[1];
 
+    // 退出任何模式都同时结束打标签会话（标签面板 / 队列作废）
+    const { clearTagSession } = require('../../utils/tagSession');
+
     if (targetMode === 'chat') {
         if (rawState) {
             if (rawState._onExit) await rawState._onExit(userId, rawState);
@@ -26,6 +29,8 @@ async function handleExitCommand(userId, msg) {
     }
 
     if (!rawState) {
+        // 无模式但可能仍在打标签（编辑描述后会自动退出编辑模式）
+        clearTagSession(userId);
         await bot.sendMessage(userId, '当前没有活跃的模式，无需退出。')
             .catch(err => logger.error('发送消息失败:', err.message));
         return;
@@ -58,6 +63,7 @@ async function handleExitCommand(userId, msg) {
 
         await bot.sendMessage(userId, exitMsg)
             .catch(err => logger.error('发送退出提醒失败:', err.message));
+        clearTagSession(userId);
         logger.info(`用户 ${userId} 手动退出${modeName}`);
         return;
     }
@@ -68,6 +74,7 @@ async function handleExitCommand(userId, msg) {
     }
 
     deleteUserState(userId);
+    clearTagSession(userId);
 
     const modeName = getModeName(mode);
     await bot.sendMessage(userId, `✅ 已退出${modeName}`)

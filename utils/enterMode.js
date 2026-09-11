@@ -6,8 +6,12 @@ const { clearMediaGroupState } = require('../media');
  * 清理用户上一个非当前目标模式的状态
  * 在模式切换前调用，避免多个模式冲突
  * 若有 _onExit（如消息回复模式需要删除群组/频道提示消息），先执行再删除状态
+ * 同时清理打标签会话（进入新指令 / 新模式时旧标签面板与队列作废）
  */
 async function cleanPreviousMode(userId) {
+    const { clearTagSession } = require('./tagSession');
+    clearTagSession(userId);
+
     const state = getRawUserState(userId);
     if (!state) return;
 

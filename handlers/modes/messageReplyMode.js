@@ -8,10 +8,9 @@ const {
     getMaxSubgroup,
     buildMediaLocation
 } = require('../../db/media');
-const { upsertMessage } = require('../../db/message');
 const { upsertGroupList, syncGroupDeleteByText } = require('../../db/groupList');
+const { recordAndTag } = require('../../utils/tagSession');
 const { extractMediaFromMessage, sendMediaAsReply, sendMediaGroupAsReply } = require('../../media');
-const { removeLevelSuffix } = require('../../utils/levelExtractor');
 const { logOperation } = require('../../utils/opLog');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
 
@@ -27,18 +26,97 @@ function targetDisplay(target) {
 
 /**
  * 由 message 记录一次性解析"群组/频道"双位置（频道转发消息时两者都有，否则为 null）
+ *
+ * 位置来源有两处，必须都看：
+ *   1. `message.channel_forward`（频道转发收录时写入的双位置）；
+ *   2. `media.group` / `media.channel` 子文档（媒体自己的双位置）。
+ * 只看 1 会导致大量媒体无法选择回复位置——例如空描述媒体没有 message 记录、
+ * 或 message 记录里 channel_forward 不完整（channel_message_id 为 null），
+ * 此时 media 里其实两个位置都齐全，却会退化成"只能回复到频道"。
+ *
+ * @param {Object} messageDoc - message 记录
+ * @param {Object} [mediaDoc] - 同一媒体的 media 记录（可选，用于补全位置）
  * @returns {{ group: {chatId:number,messageId:number}|null, channel: {chatId:number,messageId:number}|null, isForwarded: boolean }}
  */
-function deriveReplyLocations(messageDoc) {
-    const fwd = messageDoc.channel_forward;
-    const isForwarded = !!(fwd && fwd.is_channel);
-    const group = (isForwarded && fwd.group_chat_id && fwd.group_message_id)
+function deriveReplyLocations(messageDoc, mediaDoc) {
+    const fwd = (messageDoc && messageDoc.channel_forward) || null;
+    const isChannelForward = !!(fwd && fwd.is_channel);
+    const has = (chatId, messageId) => !!(chatId && messageId);
+
+    // ---- 群组位置：channel_forward.group_* 优先，缺失时用 media.group ----
+    let group = (isChannelForward && has(fwd.group_chat_id, fwd.group_message_id))
         ? { chatId: fwd.group_chat_id, messageId: fwd.group_message_id }
         : null;
-    const channel = (isForwarded && fwd.channel_chat_id && fwd.channel_message_id)
+    if (!group && mediaDoc && mediaDoc.group && has(mediaDoc.group.chat_id, mediaDoc.group.message_id)) {
+        group = { chatId: mediaDoc.group.chat_id, messageId: mediaDoc.group.message_id };
+    }
+
+    // ---- 频道位置：channel_forward.channel_* 优先，缺失时用 media.channel ----
+    // 频道源位置还可能是 message 自身的 chat_id/message_id（频道侧收录时就是这样存的），
+    // 因此最后再兜底一次：消息自身所在聊天 === 转发来源频道 时，它就是频道位置。
+    let channel = (isChannelForward && has(fwd.channel_chat_id, fwd.channel_message_id))
         ? { chatId: fwd.channel_chat_id, messageId: fwd.channel_message_id }
         : null;
+    if (!channel && mediaDoc && mediaDoc.channel && has(mediaDoc.channel.chat_id, mediaDoc.channel.message_id)) {
+        channel = { chatId: mediaDoc.channel.chat_id, messageId: mediaDoc.channel.message_id };
+    }
+    if (!channel && isChannelForward && messageDoc && has(messageDoc.chat_id, messageDoc.message_id)
+        && messageDoc.chat_id === fwd.channel_chat_id) {
+        channel = { chatId: messageDoc.chat_id, messageId: messageDoc.message_id };
+    }
+
+    // 双位置都存在且**不是同一个位置**才算"真的有群组/频道两个可选位置"
+    // （media 里 group 与 channel 偶尔会指向同一个聊天，那是数据问题，不能拿它当转发证据）
+    const distinct = !!(group && channel && (group.chatId !== channel.chatId || group.messageId !== channel.messageId));
+    const isForwarded = isChannelForward || distinct;
     return { group, channel, isForwarded };
+}
+
+/**
+ * 取媒体记录（用于补全回复位置）。传入了就直接用，否则按 file_unique_id 查一次。
+ * @param {Object|null} mediaDoc
+ * @param {string|null} fileUniqueId
+ */
+async function loadMediaForLocations(mediaDoc, fileUniqueId) {
+    if (mediaDoc) return mediaDoc;
+    if (!fileUniqueId) return null;
+    try {
+        return await findMediaByFileUniqueId(fileUniqueId);
+    } catch (err) {
+        logger.warn(`查询媒体位置失败: file_unique_id=${fileUniqueId}, ${err.message}`);
+        return null;
+    }
+}
+
+/**
+ * 目标媒体的"可回复位置"解析：优先用 message 记录；没有 message 记录
+ * （空描述媒体——组内绝大多数媒体都没有 message）时，用 media 自身的双位置合成一个
+ * 最小 messageDoc，保证"回复在群组 / 回复在频道"的选择仍然可用。
+ *
+ * 合成 doc 的 chat_id/message_id 取「群组位置优先，否则频道位置」，作为未选位置时的默认值
+ * （与"默认回复在群组"一致）。
+ *
+ * @param {Object|null} messageDoc - message 记录
+ * @param {Object|null} mediaDoc - media 记录
+ * @returns {{messageDoc: Object|null, mediaDoc: Object|null}} 两者都为 null 表示无法定位
+ */
+function buildReplyTargetDoc(messageDoc, mediaDoc) {
+    if (messageDoc) return { messageDoc, mediaDoc };
+    if (!mediaDoc) return { messageDoc: null, mediaDoc: null };
+
+    const locations = deriveReplyLocations(null, mediaDoc);
+    const primary = locations.group || locations.channel;
+    if (!primary) return { messageDoc: null, mediaDoc };
+    return {
+        messageDoc: {
+            group_id: mediaDoc.group_id,
+            file_unique_id: mediaDoc.file_unique_id,
+            media_type: mediaDoc.media_type,
+            chat_id: primary.chatId,
+            message_id: primary.messageId
+        },
+        mediaDoc
+    };
 }
 
 /**
@@ -192,30 +270,41 @@ async function cleanupHintMessagesOnShutdown() {
 
 /**
  * 解析回复位置：
- * - 频道转发消息（message.channel_forward 存在）：
- *   - replyTarget='group'   → 群组中该消息的位置（channel_forward.group_*）
- *   - replyTarget='channel' → 频道源消息位置（channel_forward.channel_*，即原始 chat_id/message_id）
+ * - 频道转发消息（message.channel_forward 或 media 双位置）：
+ *   - replyTarget='group'   → 群组中该消息的位置
+ *   - replyTarget='channel' → 频道源消息位置
+ *   - replyTarget=null      → **默认回复在群组**（群组是默认回复位置；
+ *     两个位置都存在时，调用方会先弹出"回复在群组/频道"按钮让用户确认，
+ *     这里只作为"未询问时"的默认值，避免默认落到频道）
  * - 非转发消息：一律使用消息自身位置（chat_id/message_id）
  * @param {Object} messageDoc - message 记录
  * @param {string|null} replyTarget - 'group' | 'channel' | null
+ * @param {Object} [locations] - 已解析好的 deriveReplyLocations 结果（不传则按 messageDoc 现算）
  */
-function resolveReplyLocation(messageDoc, replyTarget) {
-    const fwd = messageDoc.channel_forward;
-    if (fwd && fwd.is_channel) {
-        if (replyTarget === 'group' && fwd.group_chat_id && fwd.group_message_id) {
-            return { chatId: fwd.group_chat_id, messageId: fwd.group_message_id, isForwarded: true };
+function resolveReplyLocation(messageDoc, replyTarget, locations) {
+    const loc = locations || deriveReplyLocations(messageDoc);
+    if (loc.isForwarded || loc.group || loc.channel) {
+        if (replyTarget === 'group' && loc.group) {
+            return { chatId: loc.group.chatId, messageId: loc.group.messageId, isForwarded: true };
         }
-        if (replyTarget === 'channel' && fwd.channel_chat_id && fwd.channel_message_id) {
-            return { chatId: fwd.channel_chat_id, messageId: fwd.channel_message_id, isForwarded: true };
+        if (replyTarget === 'channel' && loc.channel) {
+            return { chatId: loc.channel.chatId, messageId: loc.channel.messageId, isForwarded: true };
+        }
+        // 未指定回复位置：默认群组（群组位置缺失时才用频道位置）
+        if (loc.group) {
+            return { chatId: loc.group.chatId, messageId: loc.group.messageId, isForwarded: true };
+        }
+        if (loc.channel) {
+            return { chatId: loc.channel.chatId, messageId: loc.channel.messageId, isForwarded: true };
         }
     }
     return { chatId: messageDoc.chat_id, messageId: messageDoc.message_id, isForwarded: false };
 }
 
 /** 发送群组提示消息并进入就绪状态（使用已解析的回复位置） */
-async function finishEnterReadyState(userId, messageDoc, processingMsgId, resolved) {
+async function finishEnterReadyState(userId, messageDoc, processingMsgId, resolved, mediaDoc = null) {
     const targetGroupId = messageDoc.group_id;
-    const locations = deriveReplyLocations(messageDoc);
+    const locations = deriveReplyLocations(messageDoc, mediaDoc);
 
     // 确定当前目标类型（用于显示图标）：优先按双位置匹配，非转发回退按实际聊天类型
     let target;
@@ -267,54 +356,52 @@ async function finishEnterReadyState(userId, messageDoc, processingMsgId, resolv
 
 /**
  * 目标消息定位后的统一处理：
- * - 频道转发消息且未指定回复位置 → 询问"回复在群组/频道"
+ * - 频道转发媒体（能解析出双位置）且未指定回复位置 → 询问"回复在群组/频道"
  * - 其余情况 → 解析位置后直接进入就绪状态
  * @param {Object} messageDoc - message 记录
  * @param {string|null} replyTarget - 指令指定的回复位置（'group'/'channel'/null=询问）
+ * @param {Object} [mediaDoc] - 同一媒体的 media 记录（补全位置，可省）
  */
-async function enterReplyReadyState(userId, messageDoc, processingMsgId, replyTarget) {
-    const fwd = messageDoc.channel_forward;
-    const isForwarded = !!(fwd && fwd.is_channel);
+async function enterReplyReadyState(userId, messageDoc, processingMsgId, replyTarget, mediaDoc = null) {
+    const media = mediaDoc || await loadMediaForLocations(null, messageDoc && messageDoc.file_unique_id);
+    const locations = deriveReplyLocations(messageDoc, media);
 
-    if (isForwarded && !replyTarget) {
-        const hasGroupLoc = !!(fwd.group_chat_id && fwd.group_message_id);
-        const hasChannelLoc = !!(fwd.channel_chat_id && fwd.channel_message_id);
+    // 只有**真正的频道转发媒体**才询问"回复在群组/频道"（默认群组）：
+    //   - isForwarded=true：message.channel_forward 或 media 里存在两个不同位置；
+    //   - 普通群组媒体（media 只有 group）不弹按钮，直接回复在消息自身位置。
+    if (locations.isForwarded && !replyTarget) {
         const rows = [];
-        if (hasGroupLoc) rows.push({ text: '👥 回复在群组', callback_data: 'mreply_loc:group' });
-        if (hasChannelLoc) rows.push({ text: '📢 回复在频道', callback_data: 'mreply_loc:channel' });
+        if (locations.group) rows.push({ text: '👥 回复在群组', callback_data: 'mreply_loc:group' });
+        if (locations.channel) rows.push({ text: '📢 回复在频道', callback_data: 'mreply_loc:channel' });
 
-        if (rows.length === 0) {
-            // 两个位置都未知：回退到消息自身位置
-            const resolved = resolveReplyLocation(messageDoc, null);
-            await finishEnterReadyState(userId, messageDoc, processingMsgId, resolved);
+        if (rows.length > 0) {
+            const keyboard = { inline_keyboard: [rows] };
+            await bot.editMessageText('✅ 已找到该消息（频道转发）\n请选择回复位置：', {
+                chat_id: userId,
+                message_id: processingMsgId,
+                reply_markup: keyboard
+            });
+
+            // 保留 _onExit（退出时删除群组/频道提示消息、清理上下文）
+            const prevRaw = getRawUserState(userId);
+            setUserState(userId, {
+                mode: 'message_reply',
+                step: 'waiting_reply_location',
+                targetGroupId: messageDoc.group_id,
+                pendingMessageDoc: messageDoc,
+                pendingMediaDoc: media || null,   // 位置解析用（频道侧收录 / 空描述媒体没有 message.channel_forward）
+                processingMsgId,
+                packSize: (prevRaw && prevRaw.packSize) || null, // 保留打包模式数量
+                _onExit: (prevRaw && prevRaw._onExit) || (async () => { }),
+                lastActivity: Date.now()
+            });
+            logger.info(`用户 ${userId} 消息回复模式：频道转发消息，等待选择回复位置（group=${!!locations.group}, channel=${!!locations.channel}）`);
             return;
         }
-
-        const keyboard = { inline_keyboard: [rows] };
-        await bot.editMessageText('✅ 已找到该消息（频道转发）\n请选择回复位置：', {
-            chat_id: userId,
-            message_id: processingMsgId,
-            reply_markup: keyboard
-        });
-
-        // 保留 _onExit（退出时删除群组/频道提示消息、清理上下文）
-        const prevRaw = getRawUserState(userId);
-        setUserState(userId, {
-            mode: 'message_reply',
-            step: 'waiting_reply_location',
-            targetGroupId: messageDoc.group_id,
-            pendingMessageDoc: messageDoc,
-            processingMsgId,
-            packSize: (prevRaw && prevRaw.packSize) || null, // 保留打包模式数量
-            _onExit: (prevRaw && prevRaw._onExit) || (async () => { }),
-            lastActivity: Date.now()
-        });
-        logger.info(`用户 ${userId} 消息回复模式：频道转发消息，等待选择回复位置`);
-        return;
     }
 
-    const resolved = resolveReplyLocation(messageDoc, replyTarget);
-    await finishEnterReadyState(userId, messageDoc, processingMsgId, resolved);
+    const resolved = resolveReplyLocation(messageDoc, replyTarget, locations);
+    await finishEnterReadyState(userId, messageDoc, processingMsgId, resolved, media);
 }
 
 /**
@@ -380,8 +467,14 @@ async function handleLocationCallback(query) {
 
     const target = (data.split(':')[1] === 'channel') ? 'channel' : 'group';
     const messageDoc = rawState.pendingMessageDoc;
-    const resolved = resolveReplyLocation(messageDoc, target);
-    const locations = deriveReplyLocations(messageDoc);
+    // 位置解析同样要带上 media（空描述媒体 / 频道侧收录时 message.channel_forward 不全）
+    const media = await loadMediaForLocations(rawState.pendingMediaDoc, messageDoc.file_unique_id);
+    const locations = deriveReplyLocations(messageDoc, media);
+    const resolved = resolveReplyLocation(messageDoc, target, locations);
+    if (!resolved || !resolved.chatId || !resolved.messageId) {
+        await bot.answerCallbackQuery(query.id, { text: `❌ 没有可用的${target === 'channel' ? '频道' : '群组'}位置` });
+        return;
+    }
     const { icon, label } = targetDisplay(target);
     const readyText = `✅ 已选择回复在${icon} ${label}，现在可以向我发送消息了`;
 
@@ -406,6 +499,11 @@ async function handleLocationCallback(query) {
     setUserState(userId, {
         mode: 'message_reply',
         step: 'ready',
+        // 把这次按钮选择落成状态里的"当前回复位置"（replyTarget + targetChatId），
+        // 后续媒体沿用本次选择，需要换位置时点就绪消息上的「🔄 更改为发送至…」一键切换。
+        // 注意：这**只发生在用户亲自点过按钮之后**——之前的状态里，replyTarget 会在
+        // 定位阶段被旧的指令偏好提前填成 'channel'，导致既不弹按钮询问、默认也不是群组。
+        replyTarget: target,
         targetGroupId: messageDoc.group_id,
         targetChatId: resolved.chatId,
         targetMessageId: resolved.messageId,
@@ -569,29 +667,8 @@ async function flushPackOnExit(userId) {
     }
 }
 
-async function recordReplyMessage(sentMsg, targetGroupId) {
-    try {
-        const mediaInfo = extractMediaFromMessage(sentMsg);
-        if (!mediaInfo) return;
-        const { caption, fileUniqueId, type } = mediaInfo;
-        if (!caption) return;
-        const chatId = sentMsg.chat.id;
-        const messageId = sentMsg.message_id;
-        const groupId = targetGroupId;
-        const cleanText = removeLevelSuffix(caption);
-        await upsertMessage({
-            message_id: messageId,
-            chat_id: chatId,
-            text: cleanText,
-            file_unique_id: fileUniqueId,
-            media_type: type,
-            group_id: groupId
-        });
-        logger.info(`已收录消息回复模式产生的消息: chat_id=${chatId}, message_id=${messageId}, group_id=${groupId}`);
-    } catch (err) {
-        logger.error(`收录回复消息失败: ${err.message}`);
-    }
-}
+// 注：回复成功后的 message 收录与标签统一由 utils/tagSession.recordAndTag 处理
+// （recordReplyMessage 旧实现已合并，避免同一 message 写两次）
 
 async function processSingleMediaReply(userId, targetChatId, targetMessageId, targetGroupId, mediaInfo, userMsgId) {
     const ctx = getContext(userId);
@@ -654,13 +731,9 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         ...location
     });
 
-    // 先写 message（有文本时），再按组内文本状态统一重算 is_delete：
+    // 先计数，再收录 message（有描述时），最后按组内文本状态统一重算 is_delete：
     // 无描述 → 时间戳（可被 /clean 清理）；有描述 → 0
     await upsertGroupList(targetGroupId);
-    if (caption) {
-        await recordReplyMessage(sentMsg, targetGroupId);
-    }
-    await syncGroupDeleteByText(targetGroupId);
 
     const countKey = `${targetGroupId}:${fileUniqueId}`;
     if (!ctx.countedMediaSet.has(countKey)) {
@@ -690,10 +763,27 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         }
     }).catch(() => { });
 
-    // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）；
-    // 标签按 message 独立：传入本媒体 file_unique_id，只写这一条 message 的标签
-    const { sendSuccessWithTags } = require('./sendMode');
-    await sendSuccessWithTags(userId, '✅ 已回复', targetGroupId, caption, null, mediaInfo.fileUniqueId);
+    // 收录 message（有描述时）并自动进入打标签会话（无描述媒体则不进入打标签，只提示已回复）。
+    // 打标签**不退出回复模式**：用户可继续发送媒体继续回复；纯文本视为打标签，
+    // 点《✅ 完成》才结束（见 utils/tagSession.js）。
+    const successText = '✅ 已回复';
+    const [shownInPanel] = await recordAndTag(userId, {
+        groupId: targetGroupId,
+        items: [{
+            sentMsg,
+            caption,
+            fileUniqueId,
+            type,
+            successText
+        }]
+    });
+    await syncGroupDeleteByText(targetGroupId);
+    if (!shownInPanel) {
+        await bot.sendMessage(userId, successText, {
+            reply_to_message_id: userMsgId,
+            allow_sending_without_reply: true
+        }).catch(() => { });
+    }
 
     logger.info(`用户 ${userId} 已回复媒体到群组 ${targetChatId}/${targetMessageId}，新 subgroup=${newSubgroup}`);
 }
@@ -793,15 +883,10 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
         if (!ctx.countedMediaSet.has(countKey)) {
             ctx.countedMediaSet.add(countKey);
         }
-
-        if (originalItem.caption) {
-            await recordReplyMessage(sentMsg, targetGroupId);
-        }
     }));
 
-    // group_list 统一计数（一次 +N，替代原 N 次串行 upsert）＋按组内文本状态重算 is_delete
+    // group_list 统一计数（一次 +N）＋按组内文本状态重算 is_delete
     await upsertGroupList(targetGroupId, newItems.length);
-    await syncGroupDeleteByText(targetGroupId);
 
     logOperation({
         action: 'reply_media',
@@ -835,16 +920,30 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
         // 回复成功后移除就绪消息上的切换按钮（避免进入打标签流程后按钮失效）
         await removeReadySwitchButtons(userId);
 
-        // 新增 message 后自动进入打标签流程（无文本媒体则仅提示已回复）。
-        // 取组内第一个带 caption 的媒体（Telegram 媒体组注释可能不在第一条），
-        // 并带上它的 file_unique_id（标签按 message 独立，只写这一条）
-        const captionIndex = newItems.findIndex(item => item.caption && String(item.caption).trim());
-        const firstCaption = captionIndex >= 0 ? newItems[captionIndex].caption : '';
-        const captionFileUniqueId = captionIndex >= 0 ? newItems[captionIndex].fileUniqueId : null;
-        const { sendSuccessWithTags } = require('./sendMode');
-        await sendSuccessWithTags(userId, `✅ 已回复媒体组 (${newItems.length} 个)`, targetGroupId, firstCaption, null, captionFileUniqueId);
+        // 收录 message（有描述时）+ 自动进入打标签会话（不退出回复模式，用户可继续发送媒体）。
+        // 每个带描述的媒体各打各的标签；当前标签没打完时后来的进入队列，点《完成》后依次切换。
+        const successText = `✅ 已回复媒体组 (${newItems.length} 个)`;
+        const items = sentMessages.map((sentMsg, i) => {
+            const original = newItems[i];
+            if (!original) return null;
+            return {
+                sentMsg,
+                caption: original.caption,
+                fileUniqueId: original.fileUniqueId,
+                type: original.type,
+                successText
+            };
+        }).filter(Boolean);
+        const flags = await recordAndTag(userId, { groupId: targetGroupId, items });
+        if (!flags.some(Boolean)) {
+            await bot.sendMessage(userId, successText, {
+                reply_to_message_id: userMsgId,
+                allow_sending_without_reply: true
+            }).catch(() => { });
+        }
     }
 
+    await syncGroupDeleteByText(targetGroupId);
     logger.info(`用户 ${userId} 已回复媒体组到群组 ${targetChatId}/${targetMessageId}，新 subgroup=${newSubgroup}，共 ${newItems.length} 个媒体`);
 }
 
@@ -864,21 +963,29 @@ async function processTargetGroup(userId, groupKey, mediaItems, processingMsgId)
         const mediaCol = getCollection(COLLECTIONS.MEDIA);
 
         let targetMessage = null;
+        let targetMediaDoc = null;   // 同一媒体的 media 记录（补全回复位置用）
         for (const item of mediaItems) {
             logger.info(`检查媒体 file_unique_id=${item.fileUniqueId}`);
             const msgDoc = await messageCol.findOne({ file_unique_id: item.fileUniqueId });
             if (msgDoc) {
                 logger.info(`找到匹配的消息: ${msgDoc.message_id}`);
                 targetMessage = msgDoc;
+                targetMediaDoc = await mediaCol.findOne({ file_unique_id: item.fileUniqueId });
                 break;
-            } else {
-                logger.info(`未在 message 集合中找到，检查 media 集合`);
-                const mediaDoc = await mediaCol.findOne({ file_unique_id: item.fileUniqueId });
-                if (mediaDoc) {
-                    logger.info(`在 media 集合中找到，但无消息记录，不可回复`);
-                } else {
-                    logger.info(`media 集合中也未找到`);
+            }
+            // 没有 message 记录（空描述媒体）：用 media 双位置合成最小 doc 也能回复
+            const mediaDoc = await mediaCol.findOne({ file_unique_id: item.fileUniqueId });
+            if (mediaDoc) {
+                const built = buildReplyTargetDoc(null, mediaDoc);
+                if (built.messageDoc) {
+                    logger.info(`在 media 集合中找到（无描述），按 media 双位置定位: ${mediaDoc.group_id}`);
+                    targetMessage = built.messageDoc;
+                    targetMediaDoc = mediaDoc;
+                    break;
                 }
+                logger.info(`在 media 集合中找到，但没有可用位置，跳过`);
+            } else {
+                logger.info(`media 集合中也未找到`);
             }
         }
 
@@ -893,11 +1000,10 @@ async function processTargetGroup(userId, groupKey, mediaItems, processingMsgId)
         }
 
         // 读取用户指定的回复位置（/message_reply_group、/message_reply_channel），
-        // 未指定时若为频道转发消息则询问回复位置
+        // 未指定时若为频道转发消息则**询问回复位置（默认群组）**
         const rawState = getRawUserState(userId);
         const replyTarget = rawState && rawState.replyTarget ? rawState.replyTarget : null;
-        await enterReplyReadyState(userId, targetMessage, processingMsgId, replyTarget);
-
+        await enterReplyReadyState(userId, targetMessage, processingMsgId, replyTarget, targetMediaDoc);
         logger.info(`用户 ${userId} 消息回复模式已找到目标（媒体组）`);
     } catch (err) {
         logger.error(`处理目标媒体组失败: ${err.message}`);
@@ -1104,27 +1210,20 @@ async function handleMessageReplyMode(msg, state) {
         const mediaCol = getCollection(COLLECTIONS.MEDIA);
 
         try {
-            let targetMessage = await messageCol.findOne({ file_unique_id: fileUniqueId });
+            const targetMessageRaw = await messageCol.findOne({ file_unique_id: fileUniqueId });
+            const mediaDoc = await mediaCol.findOne({ file_unique_id: fileUniqueId });
+            // 没有 message 记录（空描述媒体）也能回复：用 media 双位置合成最小 doc
+            const { messageDoc: targetMessage, mediaDoc: targetMediaDoc } = buildReplyTargetDoc(targetMessageRaw, mediaDoc);
             if (!targetMessage) {
-                const mediaDoc = await mediaCol.findOne({ file_unique_id: fileUniqueId });
-                if (!mediaDoc) {
-                    await bot.editMessageText('❌ 数据库中找不到该媒体', {
-                        chat_id: userId,
-                        message_id: processingMsg.message_id
-                    });
-                    await exitMessageReplyMode(userId, true);
-                    return true;
-                } else {
-                    await bot.editMessageText('❌ 媒体不在消息数据库中，无法回复', {
-                        chat_id: userId,
-                        message_id: processingMsg.message_id
-                    });
-                    await exitMessageReplyMode(userId, true);
-                    return true;
-                }
+                await bot.editMessageText(
+                    mediaDoc ? '❌ 该媒体没有可用的回复位置，无法回复' : '❌ 数据库中找不到该媒体',
+                    { chat_id: userId, message_id: processingMsg.message_id }
+                );
+                await exitMessageReplyMode(userId, true);
+                return true;
             }
 
-            await enterReplyReadyState(userId, targetMessage, processingMsg.message_id, state.replyTarget);
+            await enterReplyReadyState(userId, targetMessage, processingMsg.message_id, state.replyTarget, targetMediaDoc);
 
             logger.info(`用户 ${userId} 消息回复模式已找到目标`);
         } catch (err) {
@@ -1199,6 +1298,8 @@ module.exports.getMessageReplyContext = getMessageReplyContext;
 module.exports.clearUserContext = clearUserContext;
 module.exports.buildReplyModeExitHandler = buildReplyModeExitHandler;
 module.exports.autoEnterReplyFromTag = autoEnterReplyFromTag;
+module.exports.resolveReplyLocation = resolveReplyLocation;
+module.exports.deriveReplyLocations = deriveReplyLocations;
 module.exports.handleLocationCallback = handleLocationCallback;
 module.exports.handleSwitchLocationCallback = handleSwitchLocationCallback;
 module.exports.flushPackOnExit = flushPackOnExit;

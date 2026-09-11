@@ -21,6 +21,7 @@ const {
     getMessageTags
 } = require('../../db/message');
 const { getTags, sortTags, addTag, removeTag, renameTag, setTagPin, tagUsed } = require('../../db/tags');
+const { syncGroupTags } = require('../../db/groupList');
 const { buildTagKeyboard, buildTagRegionKeyboard, parseTagInput } = require('../../utils/tagUi');
 const { extractMediaFromMessage } = require('../../media');
 const { setUserState, deleteUserState, updateUserActivity, getRawUserState } = require('../../states');
@@ -344,6 +345,8 @@ async function handleCallback(query) {
             }
             await bot.answerCallbackQuery(query.id, { text: `标签「${tag}」已${applied ? '移除' : '添加'}` });
             logTagChange(userId, op, [tag], fileUniqueId, groupId, 'button');
+            // 同步 group_list.tags（组内所有 message 标签的并集）
+            await syncGroupTags(groupId);
             logger.info(`用户 ${userId} 修改消息标签: ${op} ${tag} -> group=${groupId}${fileUniqueId ? `, file=${fileUniqueId}` : ''}`);
             // 操作后刷新
             await showGroupTagAction(userId, messageId, groupId, mode);
@@ -485,6 +488,8 @@ async function handleTagMode(msg, state) {
                 }
                 await tagUsed(name, -1);
             }
+            // 同步 group_list.tags（组内所有 message 标签的并集）
+            await syncGroupTags(state.groupId);
             // 刷新当前模式界面
             if (state.tagMsgId) {
                 await showGroupTagAction(userId, state.tagMsgId, state.groupId, state.groupTagMode);

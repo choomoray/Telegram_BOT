@@ -577,33 +577,135 @@ test('文章 / 合集视图：渲染与表单', async () => {
 
 // ---------------- 随机推荐 ----------------
 
-test('随机推荐：类型/标签/时长/范围/数量 筛选面板 + 抽出媒体卡片（带类型角标）', async () => {
+test('随机推荐：筛选条件默认折叠（只显示类型一行），展开后是完整面板 + 抽出媒体卡片（带类型角标）', async () => {
     const env = await boot();
     const view = await goto(env, 'random');
-    const html = view.innerHTML;
+    let html = view.innerHTML;
 
     assert.ok(env.requests.some(r => r.url.startsWith('/api/random?')), '进入即抽一批');
     assert.match(html, /🎲 随机推荐/);
     assert.match(html, /筛选条件/);
-    // 筛选控件：类型 chips / 时长 / 数量 / 范围 / 标签 / 关键词
+    // 默认折叠：有展开按钮，且只有「类型」一行
+    assert.match(html, /data-action="random-filters-toggle"/);
+    assert.match(html, /▾ 更多筛选/);
     assert.match(html, /data-action="random-type" data-type="photo"/);
     assert.match(html, /data-action="random-type" data-type="video"/);
     assert.match(html, /data-action="random-type" data-type="audio"/);
     assert.match(html, /data-action="random-type" data-type="document"/);
     assert.match(html, /data-action="random-type" data-type=""[^>]*>全部类型/);
+    assert.ok(!html.includes('id="random-duration"'), '折叠时不渲染时长 / 数量下拉');
+    assert.ok(!html.includes('id="random-count"'));
+    assert.ok(!html.includes('data-action="random-scope"'), '折叠时不渲染范围 chips');
+    assert.ok(!html.includes('id="random-q"'), '折叠时不渲染关键词输入');
+    assert.ok(!html.includes('🔍 抽取'), '折叠时没有关键词行的「抽取」按钮');
+    assert.match(html, /已收起（时长 \/ 范围 \/ 标签 \/ 关键词 \/ 数量）/, '折叠时给出收起提示');
+    // 来源下拉常驻，且排在「更多筛选」按钮前面
+    assert.match(html, /<select id="random-source"/, '来源下拉折叠时也可见');
+    assert.ok(html.indexOf('id="random-source"') < html.indexOf('data-action="random-filters-toggle"'),
+        '来源下拉在「▾ 更多筛选」按钮前面');
+    assert.match(html, /<option value="message" selected>来源：message 库/, '默认来源 message');
+    assert.match(html, /<option value="media"[^>]*>来源：media 库/);
+
+    // 展开 → 完整筛选面板
+    await act(env, { action: 'random-filters-toggle' });
+    html = env.document.querySelector('#view').innerHTML;
+    assert.match(html, /▴ 收起筛选/);
     assert.match(html, /<select id="random-duration"/);
     assert.match(html, /<select id="random-count"/);
+    // 抽取个数档位：20 / 40（默认）/ 80 / 150
+    const countSelect = (html.match(/<select id="random-count"[\s\S]*?<\/select>/) || [''])[0];
+    assert.deepStrictEqual([...countSelect.matchAll(/<option value="(\d+)"/g)].map(m => m[1]), ['20', '40', '80', '150'],
+        '抽取个数档位为 20 / 40 / 80 / 150');
+    assert.match(countSelect, /<option value="40" selected>/, '默认抽 40 个');
+    // 默认值下不该出现「数量」摘要（说明默认就是 40）
+    assert.ok(!/已启用：[^<]*数量/.test(html), '数量为默认 40 时不算"已启用"条件');
     assert.match(html, /data-action="random-scope" data-scope="cleanable"/);
+    assert.match(html, /<select id="random-source"/, '展开后来源下拉仍在（位置不变）');
     assert.match(html, /data-action="random-tag" data-tag="AAA"/, '标签库可多选');
     assert.match(html, /<input id="random-q"/);
-    assert.match(html, /data-action="random-roll"/);
+    assert.match(html, /data-action="random-roll">🔍 抽取/);
 
-    // 抽出的卡片：可进详情 + 类型角标 + Telegram 跳转
+    // 抽出的卡片：可进详情 + 类型角标 + Telegram 跳转（折叠 / 展开都不影响卡片区）
     assert.match(html, /data-action="open-media" data-group="-100_1"/);
     assert.match(html, /随机抽到的图片/);
     assert.match(html, /class="thumb-type"[^>]*>🖼 图片</, '图片角标');
     assert.match(html, /class="thumb-type"[^>]*>🎬 视频</, '视频角标');
     assert.match(html, /https:\/\/t\.me\/c\/1234567890\/11/, '带 Telegram 跳转');
+});
+
+test('随机推荐：卡片是瀑布流变体（封面完整显示不裁切，文字仍在图片下方）', async () => {
+    const env = await boot();
+    const view = await goto(env, 'random');
+    const html = view.innerHTML;
+
+    // 卡片区走瀑布流容器（多列），不是媒体库那套等高一行的 grid
+    assert.match(html, /class="media-grid media-grid--flow"/, '随机推荐用瀑布流容器');
+    // 卡片 / 封面都是 flow 变体
+    assert.match(html, /class="media-card media-card--flow"/, '卡片带瀑布流变体类');
+    assert.match(html, /class="media-thumb media-thumb--flow"/, '封面带瀑布流变体类');
+    // 封面完整显示变体（contain，不裁切）
+    assert.match(html, /class="thumb-img thumb-img--flow"/, '封面图带 flow 变体（完整显示）');
+    // 随机推荐卡片不显示「保留 / 可清理」徽标（那是媒体库的清理语义，随机推荐里没意义）
+    const randomCards = (html.match(/<article class="media-card media-card--flow"[\s\S]*?<\/article>/g) || []);
+    assert.ok(randomCards.length > 0, '应有随机推荐卡片');
+    for (const card of randomCards) {
+        assert.ok(!/media-badges/.test(card), '随机推荐卡片不再有状态徽标行');
+        assert.ok(!/>保留</.test(card) && !/>可清理</.test(card), '随机推荐卡片不再显示「保留 / 可清理」');
+    }
+    // 文字仍在图片下方：media-body 紧跟在封面之后，且不在封面内部
+    assert.match(html, /<div class="media-thumb media-thumb--flow"[\s\S]*?<\/div>\s*<div class="media-body">/,
+        '描述 / 标签仍在封面下方');
+    // 媒体库（另一视图）保持原来的裁切封面：不带 flow 变体
+    assert.ok(!html.includes('media-card--flow" data-action="tag-media-open"'), '标签详情卡片不受影响');
+});
+
+test('随机推荐：展开筛选后重抽 / 重置条件都保持展开，收起后回到只有类型一行', async () => {
+    const env = await boot();
+    const view = await goto(env, 'random');
+    const panel = () => env.document.querySelector('#view').innerHTML;
+    const expanded = () => panel().includes('id="random-q"');   // 来源下拉常驻，用关键词输入判断面板是否展开
+
+    await act(env, { action: 'random-filters-toggle' });
+    assert.ok(expanded(), '已展开');
+
+    // 重抽（类型筛选）后保持展开
+    await act(env, { action: 'random-type', type: 'video' });
+    assert.ok(expanded(), '重抽后面板仍展开');
+
+    // 重置条件也不回缩
+    await act(env, { action: 'random-reset' });
+    assert.ok(expanded(), '重置条件后面板仍展开');
+    assert.match(panel(), /chip is-active" data-action="random-type" data-type=""/, '条件已重置');
+
+    // 再点一次收起 → 只剩类型一行（来源下拉不受折叠影响，仍在「更多筛选」前面）
+    await act(env, { action: 'random-filters-toggle' });
+    const collapsed = panel();
+    assert.match(collapsed, /▾ 更多筛选/);
+    assert.match(collapsed, /data-action="random-type" data-type="photo"/, '折叠后仍有类型筛选');
+    assert.ok(!collapsed.includes('id="random-q"'));
+    assert.ok(collapsed.includes('id="random-source"'), '折叠后来源下拉仍在');
+    assert.ok(collapsed.indexOf('id="random-source"') < collapsed.indexOf('data-action="random-filters-toggle"'));
+});
+
+test('随机推荐：来源下拉在「更多筛选」前面常驻（折叠时也可见），默认 message，可切到 media 重抽，重置回到 message', async () => {
+    const env = await boot();
+    const view = await goto(env, 'random');
+    assert.ok(env.requests.some(r => r.url.includes('/api/random?') && r.url.includes('source=message')),
+        '默认从 message 库抽');
+
+    // 折叠状态下也能切来源（下拉不在折叠区里）
+    await view.fire('change', { target: { id: 'random-source', value: 'media' } });
+    await tick();
+    assert.ok(env.requests.some(r => r.url.includes('/api/random?') && r.url.includes('source=media')),
+        '切到 media 库立刻重抽');
+    assert.match(env.document.querySelector('#view').innerHTML, /<option value="media" selected>/);
+    assert.ok(!env.document.querySelector('#view').innerHTML.includes('id="random-q"'), '切来源不会展开面板');
+
+    await view.fire('click', { target: { closest: () => ({ dataset: { action: 'random-reset' } }) } });
+    await tick();
+    assert.match(env.document.querySelector('#view').innerHTML, /<option value="message" selected>/,
+        '重置条件后回到来源 message');
+    assert.ok(env.requests.some(r => r.url.includes('/api/random?') && r.url.includes('source=message')));
 });
 
 test('随机推荐：点类型筛选即重抽（请求带 types），重置条件回到默认', async () => {
@@ -768,6 +870,27 @@ test('媒体库缩略图悬停：先出加载转圈，稍后从该角弹出放�
     assert.ok(!thumb.classList.contains('is-blur'), '移出后小预览图恢复清晰');
     assert.ok(!thumb.classList.contains('is-waiting'), '等待态也一并清除');
     assert.ok(!spin.classList.contains('is-on'));
+});
+
+test('媒体库「每组显示」档位：20 / 40（默认）/ 80 / 120，并立即按该数量重新拉取', async () => {
+    const env = await boot();
+    const view = await goto(env, 'media');
+    const html = view.innerHTML;
+
+    const select = (html.match(/<select id="media-pagesize"[\s\S]*?<\/select>/) || [''])[0];
+    assert.ok(select, '媒体库应有「每组显示」下拉');
+    assert.deepStrictEqual([...select.matchAll(/<option value="(\d+)"( selected)?/g)].map(m => [m[1], !!m[2]]),
+        [['20', false], ['40', true], ['80', false], ['120', false]],
+        '档位为 20 / 40 / 80 / 120，默认 40');
+    // 默认请求就带 pageSize=40（用内存默认数据，不带后端返回值）
+    assert.ok(env.requests.some(r => r.url.includes('/api/media?') && r.url.includes('pageSize=40')),
+        '默认按每组 40 组拉取');
+
+    // 切到 120 → 立即按 120 重新拉取
+    await view.fire('change', { target: { id: 'media-pagesize', value: '120' } });
+    await tick();
+    assert.ok(env.requests.some(r => r.url.includes('/api/media?') && r.url.includes('pageSize=120')),
+        '切档位后按新数量重新拉取');
 });
 
 test('媒体库缩略图：固定尺寸 cover 裁切，状态徽标已移到描述下方', async () => {

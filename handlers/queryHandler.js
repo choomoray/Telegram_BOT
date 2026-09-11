@@ -9,30 +9,64 @@ const { formatQueryResults, buildFoldKeyboard, buildNumberKeyboard } = require('
 const { createSession } = require('../utils/queryCache');
 const { logOperation } = require('../utils/opLog');
 
-function buildQuery(parsed) {
+/** 正则转义 */
+function escapeRe(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 标签搜索条件（**先查 group_list，再查 message**）：
+ *
+ * - 宽松标签（`-标签`）：message 与 group_list 都查 → 命中任一标签的媒体组
+ *   （group_list.tags 命中整组）+ 自身 message.tags 命中的单条，两者取并集；
+ * - 严格标签（`--标签`）：只查 group_list.tags 同时含全部标签的媒体组，
+ *   返回这些组内的 message 数据（不再看单条 message 自己的 tags）；
+ * - 命中媒体组后，组内**所有描述**都返回（满足"媒体组包含多个描述时全部显示"），
+ *   带关键字时**关键字命中的描述排最前**（最符合查询的优先）。
+ *
+ * @param {Object} parsed - parseQuery 的结果
+ * @returns {Promise<{query: Object, rankedGroups: Set<string>}>}
+ *   rankedGroups：由 group_list 命中的媒体组（用于结果排序，命中组排最前）
+ */
+async function buildQuery(parsed) {
     const { keyword, tags, tagsAll } = parsed;
     const query = {};
+    const rankedGroups = new Set();
 
     if (keyword) {
-        const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        query.text = { $regex: escaped, $options: 'i' };
+        query.text = { $regex: escapeRe(keyword), $options: 'i' };
     }
 
-    // 宽松标签：命中任一标签即可（大小写不敏感）
+    const toTagRegexps = (arr) => arr.map(t => new RegExp(`^${escapeRe(t)}$`, 'i'));
+
+    // 宽松标签：message.tags 命中任一（大小写不敏感）
     if (tags && tags.length > 0) {
-        query.tags = {
-            $in: tags.map(t => new RegExp(`^${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))
-        };
+        const loose = { tags: { $in: toTagRegexps(tags) } };
+        // 先查 group_list：命中任一标签的媒体组
+        const groupCol = getCollection(COLLECTIONS.GROUP_LIST);
+        const matched = await groupCol.find({ tags: loose.tags }).toArray();
+        for (const g of matched) {
+            if (g && g.group_id) rankedGroups.add(String(g.group_id));
+        }
+        const groupIds = [...rankedGroups];
+        const orBranches = [];
+        if (groupIds.length) orBranches.push({ group_id: { $in: groupIds } });
+        orBranches.push(loose);
+        query.$or = orBranches;
     }
 
-    // 严格标签：必须同时包含 -- 后面的所有标签（大小写不敏感）
+    // 严格标签：只查 group_list 同时含全部标签的媒体组（再取其 message 数据）
     if (tagsAll && tagsAll.length > 0) {
-        query.$and = tagsAll.map(t => ({
-            tags: new RegExp(`^${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
-        }));
+        const groupCol = getCollection(COLLECTIONS.GROUP_LIST);
+        const regExps = toTagRegexps(tagsAll);
+        const matched = await groupCol.find({ tags: { $all: regExps } }).toArray();
+        const groupIds = matched.map(g => g && g.group_id).filter(Boolean).map(String);
+        for (const gid of groupIds) rankedGroups.add(gid);
+        // 无媒体组命中 → 返回空结果
+        query.group_id = { $in: groupIds };
     }
 
-    return query;
+    return { query, rankedGroups };
 }
 
 function getSortRules(settings) {
@@ -41,6 +75,25 @@ function getSortRules(settings) {
         sort.push(['$sample', 1]);
     }
     return sort;
+}
+
+/**
+ * 结果排序：由 group_list 命中的媒体组优先；组内/组间带关键字命中的描述再优先
+ * （保持数据库返回顺序作为稳定次序）
+ */
+function rankResults(results, rankedGroups, keyword) {
+    if ((!rankedGroups || rankedGroups.size === 0) && !keyword) return results;
+    const kw = keyword ? String(keyword).toLowerCase() : null;
+    const score = (doc) => {
+        let s = 0;
+        if (rankedGroups && rankedGroups.size && rankedGroups.has(String(doc.group_id))) s += 2;
+        if (kw && doc.text && String(doc.text).toLowerCase().includes(kw)) s += 1;
+        return s;
+    };
+    return results
+        .map((doc, idx) => ({ doc, idx, s: score(doc) }))
+        .sort((a, b) => (b.s - a.s) || (a.idx - b.idx))
+        .map(item => item.doc);
 }
 
 async function executeQuery(query, sortRules) {
@@ -113,10 +166,13 @@ async function handleQuery(msg) {
             const settings = await getSettings();
             const sortRules = getSortRules(settings);
 
-            const query = buildQuery(parsed);
+            // 先查 group_list（标签汇总）再查 message：宽松=并集，严格=仅命中组内数据
+            const buildQueryResult = await buildQuery(parsed);
+            const query = buildQueryResult.query;
             logger.info(`查询条件:`, query);
 
-            const allResults = await executeQuery(query, sortRules);
+            const rawResults = await executeQuery(query, sortRules);
+            const allResults = rankResults(rawResults, buildQueryResult.rankedGroups, keyword);
             const total = allResults.length;
             logger.info(`查询到 ${total} 条数据`);
 
@@ -154,7 +210,7 @@ async function handleQuery(msg) {
                 allResults,
                 total,
                 keyword,
-                { query, sortRules, parsed, settings, pageSize: 15 }
+                { query, sortRules, parsed, settings, pageSize: 15, rankedGroups: [...buildQueryResult.rankedGroups] }
             );
 
             logOperation({
@@ -208,5 +264,8 @@ async function handleQuery(msg) {
 
 module.exports = {
     handleQuery,
-    isAdmin
+    isAdmin,
+    // 导出供单元测试（标签查询：先 group_list 再 message）
+    buildQuery,
+    rankResults
 };

@@ -4,11 +4,25 @@
  * 文本新增/修改后，把该 message 的标签**补充**为「原有标签 ∪ 新文本自动匹配出的标签」
  * ——编辑描述**不再移除已有标签**（只有清空描述时才用 clearMessageTags 清空）。
  * 供发送/回复自动打标签、编辑 caption（私聊 edit、群内直接编辑、回复 /edit、控制台改描述）共用。
+ *
+ * 每次改写 message 标签后都会同步 group_list.tags（组内所有 message 标签的并集），
+ * 保证"先查 group_list 再查 message"的标签查询始终一致。
  */
 const logger = require('../logger');
-const { getMessageTags, removeTagFromMessage, addTagToMessage } = require('../db/message');
+const { getMessageTags, removeTagFromMessage, addTagToMessage, findMessageByFileUniqueId } = require('../db/message');
 const { getTags, tagUsed } = require('../db/tags');
+const { syncGroupTags } = require('../db/groupList');
 const { matchTagsInText } = require('./tagUi');
+
+/**
+ * 按 file_unique_id 取该 message 所属的媒体组 ID（用于同步 group_list.tags）
+ * @param {string} fileUniqueId
+ * @returns {Promise<string|null>}
+ */
+async function groupIdOfMessage(fileUniqueId) {
+    const doc = await findMessageByFileUniqueId(fileUniqueId);
+    return (doc && doc.group_id) || null;
+}
 
 /**
  * 按新文本补充某条 message 的标签：保留已有标签，只把新文本里匹配到、且尚未打上的标签补上
@@ -27,6 +41,10 @@ async function reMatchMessageTags(fileUniqueId, text) {
             await addTagToMessage(fileUniqueId, tag);
             await tagUsed(tag, 1);
         }
+        if (added.length) {
+            const groupId = await groupIdOfMessage(fileUniqueId);
+            if (groupId) await syncGroupTags(groupId);
+        }
         logger.info(`标签补充: file_unique_id=${fileUniqueId}, 已有[${prev.join('、') || '无'}] + [${added.join('、') || '无'}]`);
     } catch (err) {
         logger.error(`标签补充失败: ${err.message}`);
@@ -40,15 +58,18 @@ async function reMatchMessageTags(fileUniqueId, text) {
 async function clearMessageTags(fileUniqueId) {
     if (!fileUniqueId) return;
     try {
+        // 先取所属组：清空标签后 message 记录可能被删除（清空描述流程），届时就查不到组了
+        const groupId = await groupIdOfMessage(fileUniqueId);
         const prev = await getMessageTags(fileUniqueId);
         for (const tag of prev) {
             await removeTagFromMessage(fileUniqueId, tag);
             await tagUsed(tag, -1);
         }
+        if (groupId) await syncGroupTags(groupId);
         logger.info(`标签清空: file_unique_id=${fileUniqueId}, [${prev.join('、') || '无'}]`);
     } catch (err) {
         logger.error(`标签清空失败: ${err.message}`);
     }
 }
 
-module.exports = { reMatchMessageTags, clearMessageTags };
+module.exports = { reMatchMessageTags, clearMessageTags, groupIdOfMessage };

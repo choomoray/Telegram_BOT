@@ -2,7 +2,7 @@
 
 一个功能丰富的 Telegram Bot，基于 Node.js 开发，用于群组/频道媒体消息的自动收录、检索、回复与管理，并集成群组管理和用户权限控制。
 
-**版本:** 0.5.11 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
+**版本:** 0.5.25 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
 
 ---
 
@@ -511,6 +511,25 @@ function generateGroupIdFromMessage(msg) { ... }
 - `/send` 打标签面板同理：无前缀添加、`-` 前缀移除
 - 控制台媒体详情输入框同样支持（如 `xx yy -zz`）：回车或「➕ 添加」都按这套规则提交**一次** `POST /api/media/tags`（`add` / `remove` 同时下发）；只有 `-` 没有名字时给提示且不发请求
 
+#### tagSession.js — 打标签会话（发送 / 回复写库成功后共用）
+
+`/send`、消息回复、编辑描述等写库成功后的打标签流程实现，**与模式解耦**（不切换、不退出原模式）：
+
+| 导出 | 功能 |
+|------|------|
+| `recordAndTag(userId, { groupId, items })` | 批量收录 message + 自动匹配标签 + 依次送入打标签队列；返回 `boolean[]`（`true` = 该条提示语由面板承载，调用方不再发普通提示） |
+| `recordMessageWithAutoTags(item)` | 单条收录（只有带描述才写 `message`）+ 自动补充文本中已存在的标签 |
+| `enqueueTagTarget(userId, target)` | 入队（队列为空时立即激活并弹出面板）；同一目标不重复入队 |
+| `advanceToNext(userId)` | 点《✅ 完成》后切换队列中的下一个；队列为空则结束本次打标签 |
+| `showActivePanel(userId, text)` | 用成功提示刷新当前面板（无活动目标时退化为普通提示消息） |
+| `handleTagText(msg, session)` | **纯文本 = 打标签**：解析空格/`、` 分隔的多个标签，`-标签` 表示移除，不存在的自动创建 |
+| `handleTagCallback(query)` | `sendtag:*`（上区移除 / 下区添加）、`sendtag_page:*`（翻页）、`sendtag_done`（完成）、`sendtag_reply`（进入回复模式） |
+| `isTagging(userId)` / `getTagSession(userId)` / `clearTagSession(userId)` | 会话查询与清理（限流入口、`/exit`、超时、切换模式时调用） |
+
+> 会话只存在于内存（与其它模式状态一致），不随模式状态清理而消失；有 2 小时空闲上限。
+> `handlers/messageHandlers.js` 在分发模式之前先判断会话：**有活动目标时纯文本一律作为标签输入**
+> （不发送、不查询），媒体消息照常交给当前模式处理。
+
 #### modeNames.js — 模式名称映射
 
 维护模式标识符到中文名称的映射表：
@@ -673,7 +692,38 @@ module.exports = {
 | `setGroupDelete(groupId, timestamp)` | 直接设置删除标记（仅 `syncGroupDeleteByText` 与回滚使用） |
 | `findGroupList(groupId)` | 查询组信息 |
 | `deleteGroupList(groupId)` | 删除组记录 |
+| `syncGroupTags(groupId)` | **按组内所有 `message.tags` 重算 `group_list.tags`**（汇总，无标签则删字段） |
+| `applyTagChangeToGroupTags(groupId, tag, delta)` | 单个标签增量同步到 `group_list.tags`（$addToSet / $pull） |
+| `syncAllGroupTags()` / `migrateGroupListTags()` | 全库重算 / 启动时补齐 `group_list.tags`（标签改名、删除后同步） |
+| `removeMediaGroupIfEmpty(groupId)` | **删除媒体后的组状态统一入口**：以 `media` 实际记录数为准——组内已无媒体 → 删 `group_list`（并清残留 `message`）；仍有媒体 → 把 `is_group` 重算为真实数量 |
+| `cleanupOrphanGroupList()` | 启动时清理历史遗留的"没有任何媒体的 `group_list` 项"（及其孤儿 `message`），幂等 |
 
+> **`group_list.is_group` 只是计数快照，不是判断依据：** 删除路径不再用 `is_group === 1` 判断
+> "最后一个媒体"，也不再用 `$inc: -1` 递减，而是调用 `removeMediaGroupIfEmpty()` 按 `media`
+> 集合的**真实记录数**决定"删组还是重算计数"。原因：一旦计数器与真实媒体数漂移
+> （重复计数、历史数据、回滚失败等），旧写法删完最后一个媒体后 `is_group` 仍 > 0，
+> `group_list` 就会永远留下来（表现为"已经没有任何媒体的 group_list 项没有被跟随最后一个媒体一同删除"）；
+> 反向漂移（计数偏小）还会导致**误删整个组**（组内其实还有媒体）。同理，计数偏小会被重算回真实数量。
+>
+> **删除媒体的三条路径**（`/delete`、`/delete_group`、`/clean` 与 Web UI 清理，以及群组收录失败回滚）
+> 都会连带处理 `group_list`；其中 `/delete` 走 `removeMediaGroupIfEmpty`。注意：Web UI「数据库」视图里的
+> **原始文档删除**（`/api/db/execute`，op=delete）是底层直改工具，**不做级联**——用它会留下空组，
+> 下次重启时由 `cleanupOrphanGroupList()` 自动清掉。
+
+> **`group_list.tags` —— 媒体组标签汇总（标签查询的第一入口）：**
+>
+> - 内容 = 该 `group_id` 下**所有 `message.tags` 的并集**（`message.tags` 始终是唯一权威来源，
+>   `group_list.tags` 只是便于"先查 group_list"的冗余汇总）；没打过标签的组不带该字段。
+> - 任何改变组内标签的写路径都会同步它：打标签会话（按钮 / 手输 / 文本自动匹配）、
+>   `/tag` 修改消息标签、编辑描述后的自动补标签、标签改名与删除（全库重算）、启动迁移。
+> - **标签查询（`handlers/queryHandler.js`）先查 `group_list.tags` 再查 `message`：**
+>   - 宽松查询 `-标签`：`message` 与 `group_list` 都查 → 命中任一标签的媒体组（整组）
+>     与自身 `message.tags` 命中的单条取**并集**；
+>   - 严格查询 `--标签`：**只查 `group_list`** 同时含全部标签的媒体组，取其组内的 message 数据
+>     （不再看单条 message 自己的标签）；
+>   - 命中媒体组后，组内**所有描述**都会返回（媒体组含多条描述时全部显示），
+>     带关键字时**关键字命中的描述排最前**（最符合查询的优先）。
+>
 > **`group_list.is_delete` 语义（全项目统一）：**
 >
 > | 值 | 含义 |
@@ -689,7 +739,8 @@ module.exports = {
 > - 发送：`sendMode`（单条 + 媒体组）、回复：`messageReplyMode`（单条 + 媒体组）
 > - 编辑：`editMode.updateMessageDb`（补/改文本 → 0；清空描述 → 时间戳）、`editConfirmDbOnly`（仅更新数据库）、
 >   `groupReplyEdit`（群内回复 `/edit`）
-> - 删除：`deleteMode`（删除有文本的媒体后重算）、`groupMessageHandlers.handleEditedMessage`（群内直接清空描述）
+> - 删除：`deleteMode`（删完按 `media` 实际记录数决定删组或重算，见 `removeMediaGroupIfEmpty`）、
+>   `groupMessageHandlers.handleEditedMessage`（群内直接清空描述）
 >
 > 因此「空描述媒体组照常被收录 → 可清理；后续补/改描述 → 自动变为无需清理；再清空 → 又可清理」，
 > 且与媒体组内各条消息的到达顺序无关。
@@ -869,12 +920,12 @@ for (const file of commandFiles) {
 | `/log` | log.js | 操作统计 | 从 log 集合聚合统计并展示 |
 | `/manage` | manage.js | 管理面板 | 进入 manage 模式，显示管理主菜单 |
 | `/mark` | mark.js | 标记模式 | 单选题式标记：进入后**要么发送要标记的媒体**（照旧 `group_list.mark +1` 并写入 `mark` 历史集合），**要么点「📝 仅记录」**（只写一条 `mode='record'` 记录：不标记任何媒体/媒体组、不带 `group_id`），二者完成后都自动退出标记模式 |
-| `/send` | send.js | 发送模式 | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录；成功后可打标签（按钮/手动输入，文本自动识别勾选；手动输入空格分隔可写多个，`-标签` 表示移除）。打标签面板为**两区版面**：上区=已有标签（点击移除），下区=标签库（置顶在前，点击添加）；打标签时可一键"回复该消息"自动进入回复模式 |
+| `/send` | send.js | 发送模式 | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录；成功后**自动进入打标签**（按钮/手动输入，文本自动识别勾选；手动输入空格分隔可写多个，`-标签` 表示移除）。打标签面板为**两区版面**：上区=已有标签（点击移除），下区=标签库（置顶在前，点击添加）；打标签**不退出本模式**，用户可继续发送媒体，点《✅ 完成》或一键"回复该消息"才结束（详见 mode 系统下的「打标签会话」） |
 | `/tag` | tag.js | 标签模式 | 修改消息标签（预览媒体组后添加/删除，按钮翻页+手动输入：空格分隔可写多个，`-标签` 表示移除；**添加标签**为两区版面：上区=已有标签（点击移除）、下区=标签库（置顶在前，点击添加）；标签按 message 独立——只作用于定位的那条媒体，定位界面会把组内所有带文本 message 的标签分别列出）；编辑标签（添加/改名/删除/固定置顶位置，同步 message） |
 | `/media_group [N]` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group；N=每组个数（1~10，退出时按 N 个一组打包发送） |
 | `/media_hide [N]` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide；N=每组个数（1~10） |
 | `/media_unhide [N]` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide；N=每组个数（1~10） |
-| `/message_reply [N]` | messageReply.js | 消息回复 | 进入 messageReply 模式，定位到频道转发消息时可选择回复在群组/频道；N>=2 时媒体按 N 个为一组打包为媒体组回复（满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出） |
+| `/message_reply [N]` | messageReply.js | 消息回复 | 进入 messageReply 模式，定位到频道转发媒体时**必须选择回复在群组还是频道**（就绪消息上带「🔄 更改为发送至…」一键切换按钮），**未指定时默认回复在群组**；回复位置取自 `message.channel_forward` **与 `media.group`/`media.channel` 两处**，空描述媒体（没有 message 记录）同样可定位回复；N>=2 时媒体按 N 个为一组打包为媒体组回复（满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出）。单条/整组回复成功后**自动进入打标签（不退出回复模式）**，可继续发媒体继续回复 |
 | `/message_reply_group` | messageReplyGroup.js | 消息回复（群组） | 直接回复在群组中（频道转发消息用群组位置，非转发消息用消息自身位置） |
 | `/message_reply_channel` | messageReplyChannel.js | 消息回复（频道） | 直接回复在频道中（无频道位置时回退消息自身位置） |
 | `/password` | password.js | 媒体密码 | 进入 password 模式，设置/更新媒体访问密码 |
@@ -900,6 +951,21 @@ function handleModeMessage(userId, msgText, msg, userName) {
   }
 }
 ```
+
+**打标签会话（utils/tagSession.js）—— 与模式解耦：**
+
+`/send`、消息回复、编辑描述等写库成功后会**自动进入打标签会话**，但会话**不切换、不退出**用户原有模式
+（`send` 仍是 `send`、`message_reply` 仍是 `message_reply`），因此不影响原模式继续工作：
+
+| 行为 | 说明 |
+|------|------|
+| 自动进入 | 带描述的发送/回复成功后收录 `message`（标签作用对象 = 该条新的 `file_unique_id`），自动识别文本中已存在的标签并弹出打标签面板；无描述媒体不写 `message`，也不进入打标签 |
+| 纯文本 = 打标签 | 会话进行中用户发来的**纯文本**视为标签操作（空格 / `、` / `,` 分隔可一次多个，`-标签` 表示移除；不存在的标签自动创建），**不发送、不查询**；直到点《✅ 完成》才结束 |
+| 媒体照常 | 会话进行中发送媒体仍由当前模式正常处理（继续发送 / 继续回复），成功后同样进入打标签队列 |
+| 队列 | 当前标签还没打完又来一个需要打标签的媒体 → 先入队（提示"已加入打标签队列（第 N 个）"），**点《✅ 完成》后才把面板切换到下一个**；队列为空时结束会话（模式保留，可继续发送/回复） |
+| 面板按钮 | `sendtag:*` 上/下区标签切换（上区点击移除、下区点击添加）、`sendtag_page:*` 翻页、《✅ 完成》`sendtag_done`、《🔁 回复该消息》`sendtag_reply`（结束打标签并自动进入消息回复模式） |
+| 同步 `group_list.tags` | 每次标签变更后按组内 `message.tags` 并集重算 `group_list.tags`（见 `db/groupList.js`） |
+| 清理时机 | `/exit`、模式超时退出、进入其它指令/模式（`cleanPreviousMode`）时一并清空会话；会话本身有 2 小时空闲上限 |
 
 **manage/ — 管理面板**
 
@@ -979,9 +1045,9 @@ node index.js webui       # 或 npm run start:webui
 | 视图 | 内容 |
 |------|------|
 | 📊 概览 | 媒体 / 有描述 / 可清理组 / 用户 / 标签 / 聊天 / 日志 统计卡片、**数据库占用卡片（storageSize + 文档数 + 索引占用，取不到时标注"当前套餐不可读取大小"）**、媒体类型分布、最近操作、最新媒体组（可点开详情）、快捷入口 |
-| 🖼 媒体库 | 以 `group_list` 为单位的媒体组卡片：**图片与视频封面缩略图**（服务端代理 Telegram `getFile`，**悬停即弹出完整比例大图预览、缩略图本身也切到不裁切**）、**预览图右下角带文件类型角标**（🖼 图片 / 🎬 视频 / 🎵 音频 / 📄 文件）、描述摘要（空描述标为「可清理」）、标签、类型/组数/位置；筛选「全部 / 有描述 / 可清理」+ 顶部搜索（按 `message.text`）+ **标签筛选**（从「标签」视图点进来，可用胶囊清除）+ 分页；点开为详情对话框 |
-| 🎲 随机推荐 | 比机器人上的两个随机更自由：**类型**（图片/视频/音频/文件，多选）、**标签**（可多选，含任一 / 需同时含全部）、**关键词**（匹配描述）、**视频时长**（1 分钟内 / 3 分钟内 / 1-5 / 5-30 / 30 分钟以上 / 1 小时以上）、**范围**（全部 / 保留 / 可清理）、**数量**（3/6/12/24）任意组合，点「🎲 换一批」即重抽；抽出的卡片带缩略图、类型角标、描述、标签、标记次数与「↗ 在 Telegram 打开」，点卡片直接进该媒体组详情改描述/标签 |
-| 📋 媒体详情 | 媒体缩略图条、**一键「↗ 跳转 Telegram 查看」**、**在线改描述**（保存会同步 Telegram caption，超 48 小时只改库并提示）、**点选媒体后改标签**（点缩略图或描述块选中该媒体：已有标签高亮、点 ✕ 直接移除；没有标签则高亮「➕ 添加标签」；未选中时标签区置灰不可点。原「整组操作」已移除，标签按 message 独立）、一键「标记为可清理 / 保留」（改写 `group_list.is_delete`） |
+| 🖼 媒体库 | 以 `group_list` 为单位的媒体组卡片：**图片与视频封面缩略图**（封面 = **该组第一条带文本 `message` 对应的媒体**，没有带文本媒体时回退 `media` 里最早一条；卡片封面与卡片描述因此始终是同一条媒体）、**服务端代理 Telegram `getFile`**（**悬停即弹出完整比例大图预览、缩略图本身也切到不裁切**）、**预览图右下角带文件类型角标**（🖼 图片 / 🎬 视频 / 🎵 音频 / 📄 文件）、描述摘要（空描述标为「可清理」）、标签、类型/组数/位置；筛选「全部 / 有描述 / 可清理」+ 顶部搜索（按 `message.text`）+ **标签筛选**（从「标签」视图点进来，可用胶囊清除）+ 分页；点开为详情对话框 |
+| 🎲 随机推荐 | 比机器人上的两个随机更自由：**数据来源**下拉常驻在「▾ 更多筛选」按钮前面（折叠也可见：message 库 = 有描述/标签的记录，默认；media 库 = 全部收录媒体）；**筛选条件面板默认折叠**（只留「类型」一行，点「▾ 更多筛选 / ▴ 收起筛选」展开收起，收起时用一句「已启用：…」摘要提示生效中的隐藏条件）；**类型**（图片/视频/音频/文件，多选）、**标签**（可多选，含任一 / 需同时含全部）、**关键词**（匹配描述）、**视频时长**（1 分钟内 / 3 分钟内 / 1-5 / 5-30 / 30 分钟以上 / 1 小时以上）、**范围**（全部 / 保留 / 可清理）、**数量**（20 / 40（默认）/ 80 / 150）任意组合，点「🎲 换一批」即重抽；结果区是**瀑布流（多列错落）**布局，**列数随窗口宽度阶梯变化**（手机 2 列 → 平板 3 列 → 小笔记本 4 列 → 桌面 5 列 → 大屏 6 列封顶），**封面按图片原始比例完整显示、不裁切不变形**，描述 / 标签 / 类型角标等文字信息仍在图片下方（卡片**不显示「保留 / 可清理」**——那是媒体库的清理语义，随机推荐里没有意义）；点卡片直接进该媒体组详情改描述/标签，「↗」在 Telegram 打开 |
+| 📋 媒体详情 | 左右两栏（左 = 媒体缩略图条，右 = 描述与标签 + 定位信息）**各自独立滚动**（每栏一根滚动条、高度只由自己内容决定，容器 `align-items: start` 互不拉平；窄屏单栏恢复整体滚动）、**一键「↗ 跳转 Telegram 查看」**、**在线改描述**（保存会同步 Telegram caption，超 48 小时只改库并提示）、**点选媒体后改标签**（点缩略图或描述块选中该媒体：已有标签高亮、点 ✕ 直接移除；没有标签则高亮「➕ 添加标签」；未选中时标签区置灰不可点。原「整组操作」已移除，标签按 message 独立）、一键「标记为可清理 / 保留」（改写 `group_list.is_delete`） |
 | 🧹 清理中心 | 按「一周前 / 一个月前 / 全部」给出**精确**的待清理组数与媒体数（`POST /api/clean` 预览），确认后执行与机器人 `/clean` 相同的删除逻辑；下方为可清理组预览 |
 | 🏷 标签 | 顶栏三个按钮：**➕ 添加标签**（表单新建，自动大写、重名拒绝）、**🗑️ 删除标签**（进入删除模式后点卡片二次确认删除，会同步清理所有 message）、**⭐ 置顶排序**（进入排序模式后**直接拖动卡片排序**，保存即按顺序写入置顶位置 1..N）；卡片显示置顶位置、使用次数、计数，**点击卡片进入标签详情**——详情顶栏显示置顶状态（`📍 已置顶（位置 N）` / `⭐ 未置顶`），**点一下即切换**置顶/取消置顶，正文**直接列出该标签下的媒体组（与「媒体库」同款方块卡片，点卡片直接打开媒体详情）**，底部可跳转到媒体库筛选全部；顶部搜索可过滤标签名 |
 | 👥 用户 | 用户表（名称 / ID / 状态 / 白名单 / 所在群组数 / 最近活跃），筛选「全部 / 白名单 / 已封禁」+ 搜索（名称或纯数字 ID）+ 分页；**支持新增 / 编辑（名称、状态、白名单、所在群组）/ 删除** |
@@ -1020,9 +1086,9 @@ node index.js webui       # 或 npm run start:webui
 | `POST /api/ai/plan` | AI 将自然语言翻译为完整操作计划（支持选中文档，不执行） |
 | `GET /api/logs/stream` | SSE 实时日志流（token 经 query 传递） |
 | `GET /api/overview` | 概览统计（各集合计数、媒体类型分布、最近操作、最新媒体组） |
-| `GET /api/media` | 媒体组列表（`scope=all\|cleanable\|kept`、`q` 按描述搜索、分页），带首个媒体预览与描述/标签 |
+| `GET /api/media` | 媒体组列表（`scope=all\|cleanable\|kept`、`q` 按描述搜索、分页），带封面预览与描述/标签；**封面 = 该组第一条带文本 `message` 对应的媒体**（无带文本媒体时回退 `media` 最早一条） |
 | `GET /api/media/detail` | 单个媒体组详情（`groupId`）：媒体条目 + 描述与标签 + `group_list` 状态 |
-| `GET /api/random` | **随机推荐**：`types`（photo/video/audio/document，逗号分隔）、`tags` + `tagMode=any\|all`、`q`（匹配描述）、`duration`（all/<1min/<3min/1-5min/5-30min/>30min/>1h）、`scope=all\|kept\|cleanable`、`count=1..24` 任意组合，随机抽一批媒体（带缩略图信息、描述、标签、位置以及 Telegram 跳转所需字段） |
+| `GET /api/random` | **随机推荐**：`source=message\|media`（数据来源，默认 `message` = 只抽有描述记录的媒体并按其 `file_unique_id` 补 media 信息；`media` = 全部收录媒体）、`types`（photo/video/audio/document，逗号分隔）、`tags` + `tagMode=any\|all`、`q`（匹配描述）、`duration`（all/<1min/<3min/1-5min/5-30min/>30min/>1h）、`scope=all\|kept\|cleanable`、`count=1..150`（默认 40）任意组合，随机抽一批媒体（带缩略图信息、描述、标签、位置以及 Telegram 跳转所需字段） |
 | `POST /api/clean` | 清理空数据（`{ scope: week\|month\|all, confirm }`；不带 `confirm` 只返回待清理数量） |
 | `GET /api/tags` | 标签库（含 `message` 中的实际使用次数） |
 | `GET /api/users` | 用户列表（`scope=all\|white\|banned`、`q` 名称或 ID、分页） |
@@ -1231,7 +1297,7 @@ handleGroupEditedMessage()
 |------|----------|--------|
 | `message` | 消息元数据（文本、类型、标签、频道转发信息） | 与带文本媒体对应 |
 | `media` | 媒体文件记录（file_id、密码、group/channel 双位置） | 每条媒体一条记录 |
-| `group_list` | 媒体组汇总信息 | 每组一条 |
+| `group_list` | 媒体组汇总信息（`is_group` 计数、`is_delete` 标记、`mark` 次数、`tags` 组内标签并集） | 每组一条 |
 | `channel_group` | 管理的群组/频道 | 每个群组/频道一条 |
 | `users` | 用户信息及权限 | 每个用户一条 |
 | `log` | 操作审计日志 | 每次操作一条 |
@@ -1276,7 +1342,145 @@ handleGroupEditedMessage()
 
 ## 版本历史
 
-### v0.5.14（当前）
+### v0.5.25（当前）
+- **随机推荐卡片去掉「保留 / 可清理」徽标**（`webui/public/app.js`）：随机推荐只是"随手一抽看内容"，
+  清理语义属于媒体库/清理中心，卡片上不再渲染 `.media-badges` 那一行；描述 / 标签 / 类型角标等其余信息不变。
+- 测试：`tests/webuiViews.test.js` 的瀑布流卡片用例增加断言（随机推荐卡片不含 `media-badges`、不出现「保留 / 可清理」）；
+  全量 **305 项通过**。
+
+### v0.5.24
+- **媒体详情改回"左右两栏各自独立滚动"**（`webui/public/style.css` + `webui/public/app.js`，取代 v0.5.16 的"两栏整体一起滚"）：
+  - 左栏（媒体）与右栏（描述与标签 + 定位信息）**各有一根滚动条**，互不影响；
+  - 两栏高度**只由自己的内容决定**：`.detail-main` 由 `align-items: stretch` 改为 **`align-items: start`**，
+    不再互相拉平；每栏 `max-height: min(56vh, 560px)`，内容少就短、超高才在栏内滚动；
+  - 媒体组详情里**对话框正文不再滚动**（新增 `.dialog-body.has-detail-main`，`overflow: hidden`），
+    避免出现"正文 + 左栏 + 右栏"三根滚动条；标签详情等网格视图仍按原样整体滚动（`.dialog-body` 默认 `overflow-y: auto`）；
+  - 窄屏（≤980px）单栏时取消两栏各自的滚动条，恢复整体滚动。
+- 测试：`tests/uiStatic.test.js` 的媒体详情滚动守卫改为断言"两栏各自 `overflow-y: auto` + 各自 `max-height` + 容器 `align-items: start` +
+  正文在媒体详情里不滚（标签详情仍滚）+ 窄屏恢复整体滚动"；全量 **305 项通过**。
+
+### v0.5.23
+- **Web UI 两处数量档位调整**（`webui/public/app.js` + `webui/server.js`）：
+  - **随机推荐「数量」**：档位由 `10 / 20 / 40 / 100` 改为 **`20 / 40（默认）/ 80 / 150`**；
+    默认抽取个数 20 → **40**（初始状态、「↺ 重置条件」、后端 `/api/random` 的 count 兜底值同步改为 40，
+    上限由 100 提到 **150**，否则选 150 会被后端截断）。
+  - **媒体库「每组显示」**：档位由 `12 / 24 / 48 / 100` 改为 **`20 / 40（默认）/ 80 / 120`**，默认 24 → **40**。
+- 测试：`tests/webuiViews.test.js` 新增「媒体库每组显示档位 20/40/80/120 + 默认 40 + 切档位立即按新数量重拉」用例，
+  并在随机推荐用例里断言数量档位为 `20/40/80/150`、默认选中 40（默认值不计入「已启用：…」摘要）；全量 **305 项通过**。
+
+### v0.5.22
+- **随机推荐瀑布流改为按屏幕宽度自动选列数**（`webui/public/style.css`）：原来固定 `columns: 3 232px`（列宽固定 → 宽屏也只有 3~5 列）。
+  现在改为**列数阶梯**，窗口越宽列越多：
+  | 窗口宽度 | 列数 |
+  |---|---|
+  | < 560px（手机） | 2 列 |
+  | ≥ 720px | 3 列 |
+  | ≥ 1024px | 4 列 |
+  | ≥ 1400px | 5 列 |
+  | ≥ 1800px（大屏） | 6 列（封顶，更宽不再加列以免封面过小） |
+
+  窄屏（≤420px）自动收窄列间距与卡片间距；列数封顶 6 列，避免超宽屏把封面压得过小。
+- 测试：`tests/uiStatic.test.js` 的瀑布流 CSS 守卫改为断言**列数阶梯**（断点从窄到宽、列数不递减、手机档 ≤2 列、大屏档 5~6 列）；
+  全量 **304 项通过**。
+
+### v0.5.21
+- **修复：回复时"还是不能选择回复至群组"**（`handlers/modes/messageReplyMode.js`）——查真实库发现位置解析只看 `message.channel_forward`，
+  而实际数据里大量媒体**根本没有 message 记录**（空描述媒体，`channel_forward` 无从写入）或 message 里 `channel_forward` 不完整，
+  双位置其实完整地存在 **`media.group` / `media.channel`** 上（诊断：最近 12 个媒体组里带位置的基本都是这种），
+  于是解析结果为空 → 不弹选择按钮 → 回退"消息自身位置"=频道，"选择回复至群组"彻底不可用。三处修复：
+  1. **位置解析改为"message + media"两处都看**（`deriveReplyLocations(messageDoc, mediaDoc)`）：
+     `channel_forward` 优先、缺失/不全时用 `media.group` / `media.channel` 补全，
+     并用 `message.chat_id === channel_chat_id` 兜底识别"频道侧收录时消息自身即频道位置"；
+     只有两个位置**互不相同**才算真正的双位置（避免把 `media.group`/`media.channel` 指向同一聊天的脏数据误判为转发）。
+  2. **空描述媒体（没有 message 记录）现在也能定位回复**：新增 `buildReplyTargetDoc()`，
+     用 `media` 双位置合成最小 messageDoc（群组位置优先作默认值），`/message_reply` 单条与媒体组两条定位路径都接入，
+     不再直接报"媒体不在消息数据库中，无法回复"。
+  3. 定位到**真正的频道转发媒体**时一律弹出「👥 回复在群组 / 📢 回复在频道」按钮（默认群组），
+     就绪消息上带「🔄 更改为发送至…」一键切换；普通群组媒体不弹按钮、直接回复在消息自身位置。
+  - `handleLocationCallback` 也带上 media 一起解析，并在目标位置不可用时给出明确提示而不是静默失败。
+- 测试：`tests/replyLocation.test.js` 扩到 9 例，新增「message 无 channel_forward、双位置只在 media 上仍弹按钮」
+  「空描述媒体（无 message 记录）也能定位并弹按钮、选群组后回复落在群组位置」「media 双位置指向同一聊天时不误判为频道转发」；
+  全量 **304 项通过**。
+
+### v0.5.20
+- **「🎲 随机推荐」改为瀑布流（masonry）布局：封面按图片原始比例完整显示、不再裁切**（`webui/public/app.js` + `webui/public/style.css`）：
+  - 结果区由等高网格（`grid` + 固定 `16/10` 裁切封面）改为**多列瀑布流**：`.media-grid--flow` 用 CSS `columns: 3 232px`
+    按列堆叠，卡片不再被拉成统一高度，形成错落效果；窄屏（≤640px）单列。
+  - 封面用新的 `.media-thumb--flow` / `.thumb-img--flow` 变体：`background-size: contain` + 里面那张"真图"参与文档流
+    （`.thumb-src` 在瀑布流里改为可见），**图片完整显示、不裁切、不变形**；高度由图片真实比例决定——
+    `window.__thumbLoad` 在缩略图加载完成后把 `aspect-ratio` 写到封面容器上（加载前先用 4/3 占位，避免布局跳动）。
+  - **文字信息（描述 / 标签 / 保留-可清理 / 类型 / 时长 /「↗ 在 Telegram 打开」）仍在图片下方**（`.media-body` 纵向排列）；
+    类型角标为避开图片下沿的操作入口，在瀑布流里挪到封面右上角。
+  - 媒体库、标签详情、媒体详情条**保持原来的裁切封面**（`thumbCover()` 默认行为不变，只有随机推荐传 `{ flow: true }`）。
+- 测试：`tests/webuiViews.test.js` 新增「随机推荐卡片是瀑布流变体（封面完整显示不裁切、文字仍在图片下方）」用例；
+  `tests/uiStatic.test.js` 新增 CSS 守卫（多列瀑布流、卡片 inline-block/不跨列、封面 contain 而非 cover、真图参与文档流、
+  文字区仍纵向）；全量 **301 项通过**。
+
+### v0.5.19
+- **修复：消息回复时不再询问/无法切换"回复在群组还是频道"，且默认落到了频道**（`handlers/modes/messageReplyMode.js`）：
+  - **默认回复位置改为群组**：`resolveReplyLocation(doc, null)` 以前会回落到"消息自身位置"——频道转发消息自身的 `chat_id` 就是**频道**，
+    于是未指定位置时默认回帖到频道；现在未指定位置时**优先取群组位置**（只有群组位置缺失时才用频道位置，非转发消息仍用消息自身位置）。
+  - **定位到频道转发消息（双位置）时一律先弹「👥 回复在群组 / 📢 回复在频道」按钮询问**，不再静默选一个位置；
+    只有单边位置（缺群组或频道位置）时才直接进入就绪、不弹空按钮。
+  - **位置偏好不再"粘住"导致不再询问**：就绪态收到媒体后重新进入就绪流程时会读取 `state.replyTarget`，
+    而该值此前会被旧的指令偏好/上一次选择提前填成 `'channel'`，使得后续媒体既不询问、默认也不是群组；
+    现在 `replyTarget` 只在**用户亲自点过位置按钮或切换按钮**后才写入（此时后续媒体沿用选择，符合直觉），
+    口令 `/message_reply_group`、`/message_reply_channel` 仍是"一次指定"的入口。
+  - 就绪消息上的 **「🔄 更改为发送至…」一键切换按钮**（群组 ⇄ 频道）在双位置时始终可用，点击即切换提示消息与回复目标。
+- 测试：新增 `tests/replyLocation.test.js`（6 例：双位置必须弹询问按钮、默认位置是群组、切换按钮可一键换边、
+  位置选择只在点过按钮后生效、只有单边位置时不弹空按钮、非转发消息不弹位置按钮）；全量 **299 项通过**。
+
+### v0.5.18
+- **修复：媒体库封面取错媒体**（`webui/server.js: pickPreviewMedia`）——原来封面是 `media` 里位置最早的一条，
+  但**空描述的媒体经常排在前面**（相册第一条不带注释很常见），于是出现"卡片封面与卡片描述不是同一条媒体"的错位。
+  现在改为：**封面 = 该组第一条带文本 `message` 对应的媒体**（即 `message` 里位置最早那条的 `file_unique_id` 对应的 `media`），
+  组内**没有任何带文本媒体**时回退为 `media` 里最早一条（保证仍有封面）。`GET /api/media/detail` 也返回同一套规则算出的
+  `preview`，列表与详情首图保持一致。
+- 测试：`tests/webui.test.js` 新增 2 例（封面跳过无描述的更早媒体取第一条带文本 message 的媒体，且详情 `preview` 与列表一致；
+  组内无带文本媒体时回退 `media` 最早一条）；全量 **293 项通过**。
+
+### v0.5.17
+- **修复：删除最后一个媒体后，已经没有任何媒体的 `group_list` 项没有被一同删除**（`handlers/modes/deleteMode.js` + `db/groupList.js`）：
+  - 旧实现用 `group_list.is_group === 1` 判断"是不是最后一个媒体"，否则 `$inc: { is_group: -1 }`，再检查是否归零。
+    只要这个计数与真实媒体数漂移（重复计数、历史数据、回滚失败等），删完最后一个媒体后 `is_group` 仍 > 0，
+    `group_list` 就永远留下来，变成"没有任何媒体的空组"；
+  - 新增 `db/groupList.js: removeMediaGroupIfEmpty(groupId)` 作为删除后的统一入口：**以 `media` 集合的真实记录数为准**——
+    组内已无 media → 删除 `group_list` 并清掉该组残留的 `message`（原本这些描述会变成按 `group_list` 查询永远查不到的孤儿记录）；
+    仍有 media → 把 `is_group` **重算为真实数量**（顺带修正漂移，也避免计数偏小时误删整个组）；
+  - `/delete` 删除后仍会重算 `is_delete` 与 `group_list.tags`（删掉的恰好是组内唯一带标签 / 唯一带描述的那条时能正确回落）。
+- **新增启动清理 `db/groupList.js: cleanupOrphanGroupList()`**（`index.js` 启动时执行）：把历史上遗留的
+  "没有任何媒体的 `group_list` 项"及其孤儿 `message` 一次性清掉，幂等；Web UI「数据库」视图的原始文档删除是底层直改工具、
+  不做级联，留下的空组会在这里被自动清理。
+- 测试：新增 `tests/deleteGroupList.test.js`（8 例：删最后一个媒体要删组、计数漂移偏大同样删组、计数漂移偏小不能误删整组并重算、
+  组内还有媒体时重算 `is_group` / `is_delete` / `tags`、`/delete_group` 全删、`removeMediaGroupIfEmpty` 两种分支、
+  `cleanupOrphanGroupList` 清理与幂等）；全量 **291 项通过**。
+
+### v0.5.16
+- **打标签会话与模式解耦（`utils/tagSession.js`，新文件）**：`/send`、消息回复、编辑描述写库成功后**自动进入打标签，但不再切换 / 退出原模式**——
+  - `send` 仍是 `send`、`message_reply` 仍是 `message_reply`，因此打标签期间**用户可继续发送媒体，bot 正常继续发送 / 继续回复**（新增媒体同样进入打标签队列）；
+  - 打标签期间用户输入的**纯文本（不含媒体的文字）= 打标签行为**（空格 / `、` 分隔可一次多个，`-标签` 表示移除，不存在的标签自动创建），不发送、不查询；**直到点击《✅ 完成》才结束打标签**；`/` 开头的指令仍照常执行（`/exit` 会一并清空会话）；
+  - **队列**：当前标签还没打完又来一个需要打标签的媒体 → 先入队（提示"已加入打标签队列（第 N 个）"），**用户点《完成》后才把面板切换到下一个**（当前行为默认；队列为空则结束本次打标签，模式保留）；
+  - 标签作用对象 = **回复成功后新收录的那条 message**（`file_unique_id`），标签按 message 独立；
+  - 面板按钮：上/下区标签切换、《✅ 完成》、《🔁 回复该消息》（结束打标签并自动进入消息回复模式）；`sendtag_*` 回调改由 `utils/tagSession.js` 处理。
+- **`group_list` 新增 `tags` 字段（媒体组标签汇总）**：内容 = 该媒体组内**所有 `message.tags` 的并集**（`message.tags` 仍是唯一权威来源，该字段只是便于"先查 group_list"的冗余汇总，无标签则不带该字段）。任何改变组内标签的写路径都会同步它：打标签会话、`/tag` 修改消息标签、编辑描述后的自动补标签、标签改名 / 删除（全库重算）、启动迁移（`db/groupList.js: syncGroupTags` / `applyTagChangeToGroupTags` / `syncAllGroupTags` / `migrateGroupListTags`，`index.js` 启动时执行一次）。
+- **标签查询改为「先查 `group_list` 再查 `message`」**（`handlers/queryHandler.js: buildQuery` / `rankResults`）：
+  - 宽松标签 `-标签`：`message` 与 `group_list` **都查**，命中任一标签的媒体组（整组）与自身 `message.tags` 命中的单条**取并集**（兼容没有 `group_list.tags` 的老数据）；
+  - 严格标签 `--标签`：**只查 `group_list`** 同时含全部标签的媒体组，取其组内的 message 数据（不再看单条 message 自己的标签）；
+  - 命中媒体组后，组内**所有描述**都返回（媒体组包含多个描述时全部显示），带关键字时**关键字命中的描述排最前**（最符合查询的优先）。
+- 修复：`queryHandler.buildQuery` 里标签正则辅助函数与解构出的 `tags` 变量重名，导致宽松标签查询退化为 `$in: [{}]`（该路径此前无测试覆盖，本次一并修正）。
+- 测试：新增 `tests/tagSession.test.js`（11 例：发送 / 回复有描述→收录 + 进入打标签且模式不退出、无描述不进入、打标签期间继续回复媒体、纯文本打标签并同步 `group_list.tags`、《完成》切换队列 / 结束会话、宽松与严格标签查询、`group_list.tags` 并集汇总）；`tests/helpers/memoryDb.js` 补上 `$in` 内正则、`$all`、`$nin` 的匹配语义（原先未实现，"标签按 message 独立"的共享桩一直没被覆盖）；全量 **283 项通过**。
+
+### v0.5.15
+- **媒体详情对话框：左右两栏改为「一个整体」一起滚动**（`webui/public/style.css`）：原来左栏「媒体」列表自己 `overflow-y: auto`、「描述与标签」的 `.detail-msg-list` 也自己 `overflow-y: auto`，两栏各滚各的；现在这两处内部滚动全部去掉（`.detail-left` 不再滚动、`.detail-aside > .detail-msg-list` 由 `flex: 1 1 auto` + `overflow-y: auto` 改为 `flex: 0 0 auto` 按内容撑高），**唯一滚动容器是 `.dialog-body`**，左右两栏等高（`align-items: stretch`）跟着对话框正文一起上下滚；窄屏单栏同样整体滚动（媒体查询里多余的 `overflow: visible` 覆盖规则一并删除）。
+- **「🎲 随机推荐」筛选条件面板可折叠（默认折叠，只显示「类型」一行）**（`webui/public/app.js`）：卡片右上角新增「▾ 更多筛选 / ▴ 收起筛选」按钮（`data-action="random-filters-toggle"`），折叠时只渲染「类型」一行，展开后才渲染 时长 / 数量 / 范围 / 标签 / 关键词；**纯前端切换，不重新抽**，展开状态在「换一批」「点类型重抽」「重置条件」后都保持不变（重置条件只重置条件、不改变展开状态）；折叠时标题右侧显示「已启用：时长 … / 范围 … / 标签 … / 关键词 … / 数量 …」摘要，没有非默认条件时显示「已收起（时长 / 范围 / 标签 / 关键词 / 数量）」。
+- **「🎲 随机推荐」新增「数据来源」下拉**（`webui/public/app.js` + `GET /api/random?source=…`）：下拉常驻在卡片标题行、**排在「▾ 更多筛选」按钮前面**（折叠状态也可见，切换不需要先展开面板），可在 **`message` 库（有描述 / 标签的记录，默认）** 与 **`media` 库（全部收录媒体）** 之间切换，切换即按当前条件重抽，「↺ 重置条件」回到默认的 `message`：
+  - `source=message`：抽取池是 `message` 集合（只有带描述/标签的媒体才有记录），再按 `file_unique_id` 关联 `media` 补类型、缩略图、时长与 Telegram 位置；关联不到 media 的孤儿记录用 message 自身的 `group_id / chat_id / message_id / media_type` 兜底，不会报错。
+  - `source=media`：与改动前完全一致（抽取池是 `media` 集合，`message` 只用来补描述 / 标签）。
+  - 两种来源共用**标签 / 关键词 / 范围**筛选；**视频时长**在 `message` 来源下先按 `media.video_time` 取出合格 `file_unique_id` 再回筛，语义与 `media` 来源一致。
+  - 响应 `filters` 回显 `source`，原有返回字段（`total` / `count` / `items`）结构不变。
+- 测试：`tests/webui.test.js` 新增「默认来源 message（含孤儿记录兜底、类型/标签/关键词/范围筛选）」「message 来源时长过滤」两个用例，原有用例改为显式 `source=media`；`tests/webuiViews.test.js` 新增「默认折叠只显示类型 + 来源下拉在「更多筛选」前面」「展开状态在重抽 / 重置后保持、再点收起回到只显示类型」「来源下拉折叠时即可切换 / 重置回 message」用例；`tests/uiStatic.test.js` 新增「媒体详情左右两栏整体滚动（只有 `.dialog-body` 一个滚动容器）」的 CSS 守卫；全量 **272 项通过**。
+
+### v0.5.14
 - **控制台「数据库」视图去掉下方重复的集合列表**：原来在集合明细表下面还会用「📁 集合名 + 条数」的文件夹列表再列一遍所有集合（`col-summary`），与上面的明细表重复。现在只保留一句引导提示「点上方『集合明细』里的任意一行，即可浏览该集合的原始文档」，并**不再为「全部数据库」发起跨集合查询**（少一次无用的数据库往返）；浏览某个集合仍然照旧（点明细行 / 下拉选择 / 排序 / 分页 / 就地改删 / 插入）。
 - 测试：`tests/webuiViews.test.js` 增加断言（不再出现 `col-summary`、显示引导提示）；全量 **266 项通过**。
 

@@ -79,6 +79,44 @@ test('style.css：方格图必须声明 7 行，否则 grid-auto-flow: column �
   assert.match(block, /grid-auto-columns:\s*minmax\(9px,\s*1fr\)/, '列宽自适应撑满卡片（窄屏兜底 9px）');
 });
 
+test('style.css：随机推荐瀑布流（列数随屏幕宽度阶梯变化 + 图片完整显示不裁切 + 文字在图片下方）', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+
+  // 瀑布流容器：多列（columns = masonry），不再是一行行等高的 grid
+  const flowGrid = (css.match(/\.media-grid--flow\s*\{[^}]*\}/) || [''])[0];
+  assert.ok(flowGrid, '缺少 .media-grid--flow 规则');
+  assert.match(flowGrid, /columns:\s*\d+/, '瀑布流用多列布局（按内容高度堆叠）');
+
+  // 列数阶梯：按窗口宽度自动选列数，手机 2 列、桌面 5~6 列，且从窄到宽排列
+  const steps = [...css.matchAll(/@media \(min-width:\s*(\d+)px\)\s*\{\s*\.media-grid--flow\s*\{\s*columns:\s*(\d+)/g)]
+    .map(m => ({ width: Number(m[1]), cols: Number(m[2]) }));
+  assert.ok(steps.length >= 4, `列数阶梯至少要有 4 档，实际 ${steps.length} 档`);
+  for (let i = 1; i < steps.length; i++) {
+    assert.ok(steps[i].width > steps[i - 1].width, '断点必须从窄到宽排列（否则后面的规则会覆盖前面的）');
+    assert.ok(steps[i].cols >= steps[i - 1].cols, '越宽的屏幕列数不能减少');
+  }
+  assert.ok(steps[0].cols <= 2, '手机档最多 2 列');
+  assert.ok(steps[steps.length - 1].cols >= 5, '大屏档至少 5 列');
+  assert.ok(steps[steps.length - 1].cols <= 6, '列数封顶 6 列（更宽的屏幕不再加列，避免封面过小）');
+
+  // 封面：完整显示（contain）而不是 16:10 裁切，高度由图片真实比例决定
+  assert.ok(!/aspect-ratio:\s*16\s*\/\s*10/.test((css.match(/\.media-thumb--flow\s*\{[^}]*\}/) || [''])[0]),
+    '瀑布流封面不能再锁 16:10');
+  const flowCover = (css.match(/\.media-thumb--flow \.thumb-img--flow\s*\{[^}]*\}/) || [''])[0];
+  assert.ok(flowCover, '缺少 .media-thumb--flow .thumb-img--flow 规则');
+  assert.match(flowCover, /background-size:\s*contain/, '瀑布流封面完整显示、不裁切');
+  assert.ok(!/background-size:\s*cover/.test(flowCover), '瀑布流封面不能用 cover 裁切');
+  // 里面那张"隐形真图"要显示出来，作为可见图片本身
+  const flowProbe = (css.match(/\.media-thumb--flow \.thumb-img--flow \.thumb-src\s*\{[^}]*\}/) || [''])[0];
+  assert.ok(flowProbe, '缺少瀑布流里真图的显示规则');
+  assert.match(flowProbe, /position:\s*relative/, '真图要参与文档流（用它的高度撑开封面）');
+  assert.match(flowProbe, /opacity:\s*1/, '真图在瀑布流里要真正可见');
+
+  // 文字仍在图片下方：body 是纵向块（沿用 .media-body）
+  const body = (css.match(/\.media-body\s*\{[^}]*\}/) || [''])[0];
+  assert.match(body, /flex-direction:\s*column/, '卡片文字区仍在图片下方（纵向）');
+});
+
 test('style.css：选中的标签区必须重新打开 pointer-events（否则加减标签点不动）', () => {
   const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
   assert.match(css, /\.tag-edit\.is-locked\s*\{[^}]*pointer-events:\s*none/, '未选中时禁用鼠标事件');
@@ -100,6 +138,42 @@ test('style.css：缩略图悬停放大必须「整图可见」（不裁切）',
   assert.ok(zoom, '缺少 .thumb-zoom 浮层规则');
   assert.match(zoom, /position:\s*fixed/, '浮层用固定定位，避免被容器裁切');
   assert.match(css, /\.thumb-zoom img\s*\{[^}]*object-fit:\s*contain/, '浮层内按完整比例展示图片');
+});
+
+test('style.css：媒体详情左右两栏各自独立滚动（每栏一根滚动条、高度只由自己内容决定）', () => {
+    const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+    // 注意锚定行首：否则会误匹配 .dialog-body.has-detail-main > .detail-main 这类组合选择器
+    const ruleOf = (sel) => (css.match(new RegExp(`^${sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{[^}]*\\}`, 'm')) || [''])[0];
+    // 两栏各自滚动
+    const left = ruleOf('.detail-left');
+    assert.ok(left, '缺少 .detail-left 规则');
+    assert.match(left, /overflow-y:\s*auto/, '左栏（媒体）要有自己的滚动条');
+    assert.match(left, /max-height:/, '左栏高度要有上限（超出才滚动）');
+    const aside = ruleOf('.detail-aside');
+    assert.ok(aside, '缺少 .detail-aside 规则');
+    assert.match(aside, /overflow-y:\s*auto/, '右栏（描述与标签）要有自己的滚动条');
+    assert.match(aside, /max-height:/, '右栏高度要有上限（超出才滚动）');
+    // 两栏互不拉平：高度只与自身内容有关（不能 align-items: stretch / 不能用 flex 拉满）
+    const main = ruleOf('.detail-main');
+    assert.ok(main, '缺少 .detail-main 规则');
+    assert.match(main, /align-items:\s*start/, '两栏各自按内容高度，互不拉平');
+    assert.ok(!/align-items:\s*stretch/.test(main), '两栏不能再等高拉伸');
+    assert.ok(!/min-height:\s*min\(/.test(main), '两栏容器不再强制撑高');
+    // 描述块列表本身不再单独出滚动条（滚动由右栏外框负责）
+    const msgList = ruleOf('.detail-aside > .detail-msg-list');
+    assert.ok(msgList, '缺少 .detail-aside > .detail-msg-list 规则');
+    assert.match(msgList, /flex:\s*0 0 auto/, '描述块按内容撑高');
+    assert.ok(!/overflow(-y)?:\s*(auto|scroll)/.test(msgList), '「描述与标签」列表不再单独滚');
+    // 对话框正文在媒体详情里不滚（避免三根滚动条），其余视图（标签详情网格）仍然整体滚
+    const body = ruleOf('.dialog-body');
+    assert.match(body, /overflow-y:\s*auto/, '默认（标签详情等）正文整体滚');
+    const detailBody = ruleOf('.dialog-body.has-detail-main');
+    assert.ok(detailBody, '缺少 .dialog-body.has-detail-main 规则');
+    assert.match(detailBody, /overflow:\s*hidden/, '媒体详情里正文不滚（滚动交给左右两栏）');
+    // 窄屏单栏恢复整体滚动（两栏不再各自出滚动条）
+    const narrow = (css.match(/@media \(max-width:\s*980px\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+    assert.ok(narrow, '缺少窄屏单栏媒体查询');
+    assert.match(narrow, /\.detail-left,\s*\.detail-aside\s*\{[^}]*overflow-y:\s*visible/, '窄屏两栏不再各自滚动');
 });
 
 test('style.css：统计报表「操作日志明细」可查看区域已加长', () => {

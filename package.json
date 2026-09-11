@@ -1,6 +1,6 @@
 {
   "name": "telegrambot-v0.4",
-  "version": "0.5.15",
+  "version": "0.5.25",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

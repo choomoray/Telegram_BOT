@@ -682,10 +682,11 @@ function makeDomainData() {
             { _id: 'm41', group_id: '-100_4', subgroup: 1, media_type: 'document', file_id: 'AgAC41', file_unique_id: 'AQAD41', message_id: 41, group: { chat_id: -100, message_id: 41 }, channel: null }
         ],
         message: [
-            { _id: 's1', group_id: '-100_1', file_unique_id: 'AQAD1', text: 'JK 写真描述', tags: ['JK'], chat_id: -100, message_id: 11, updated_at: NOW - 5000 },
-            { _id: 's2', group_id: '-100_1', file_unique_id: 'AQAD3', text: '旧描述', tags: [], chat_id: -100, message_id: 9, updated_at: NOW - 90000 },
-            { _id: 's3', group_id: '-100_2', file_unique_id: 'AQAD21', text: 'JK 合集', tags: ['JK', 'CAT'], chat_id: -100, message_id: 21, updated_at: NOW - 1000 },
-            { _id: 's4', group_id: '-100_3', file_unique_id: 'AQAD31', text: '无标签描述', tags: [], chat_id: -100, message_id: 31, updated_at: NOW - 2000 }
+            { _id: 's1', group_id: '-100_1', file_unique_id: 'AQAD1', text: 'JK 写真描述', tags: ['JK'], media_type: 'photo', chat_id: -100, message_id: 11, updated_at: NOW - 5000 },
+            { _id: 's2', group_id: '-100_1', file_unique_id: 'AQAD3', text: '旧描述', tags: [], media_type: 'photo', chat_id: -100, message_id: 9, updated_at: NOW - 90000 },
+            { _id: 's3', group_id: '-100_2', file_unique_id: 'AQAD21', text: 'JK 合集', tags: ['JK', 'CAT'], media_type: 'photo', chat_id: -100, message_id: 21, updated_at: NOW - 1000 },
+            // s4 是「media 里已经没有」的孤儿 message（随机推荐 message 来源要能兜底展示）
+            { _id: 's4', group_id: '-100_3', file_unique_id: 'AQAD31', text: '无标签描述', tags: [], media_type: 'photo', chat_id: -100, message_id: 31, updated_at: NOW - 2000 }
         ],
         users: [
             { _id: 'u1', id: 123, name: '张三', state: 1, white: 1, group: [-100, -200], last_seen: NOW - 100, join_time: NOW - 1000 },
@@ -808,6 +809,53 @@ test('GET /api/media scope=kept 返回完整字段', async () => {
         assert.deepStrictEqual(item.group, { chat_id: -100, message_id: 11 });
         assert.strictEqual(item.channel, null);
         assert.strictEqual(item.updatedAt, NOW - 5000);
+    });
+});
+
+test('GET /api/media 封面取「第一条带文本 message 对应的媒体」，而不是 media 里最早那条', async () => {
+    const data = makeDomainData();
+    // 构造：组内最早的一条媒体没有描述，第二条才有（相册第一条不带注释很常见）
+    data.group_list = [{ _id: '0050', group_id: '-100_9', is_group: 2, is_delete: 0, mark: 0 }];
+    data.media = [
+        { _id: 'x1', group_id: '-100_9', subgroup: 1, media_type: 'photo', file_id: 'AgACX1', file_unique_id: 'AQADX1', group: { chat_id: -100, message_id: 31 } },
+        { _id: 'x2', group_id: '-100_9', subgroup: 1, media_type: 'video', file_id: 'AgACX2', file_unique_id: 'AQADX2', video_time: 12, thumb_file_id: 'thumb-X2', group: { chat_id: -100, message_id: 32 } }
+    ];
+    data.message = [
+        { _id: 'sx2', group_id: '-100_9', file_unique_id: 'AQADX2', text: '第二条才有描述', tags: ['JK'], chat_id: -100, message_id: 32, updated_at: NOW - 100 }
+    ];
+
+    const deps = makeMemoryDeps(data);
+    await withDomain(deps, async (b, auth) => {
+        const r = await domainReq(b, auth, '/api/media?scope=all');
+        assert.strictEqual(r.status, 200);
+        const item = r.body.items.find(i => i.group_id === '-100_9');
+        assert.ok(item, '应返回该媒体组');
+        assert.deepStrictEqual(item.preview, { file_unique_id: 'AQADX2', media_type: 'video', thumbable: true },
+            '封面 = 第一条带文本 message 对应的媒体（AQADX2），不是 media 里最早的 AQADX1');
+        assert.deepStrictEqual(item.group, { chat_id: -100, message_id: 32 }, '卡片位置也跟随封面媒体');
+
+        // 详情接口与列表封面保持一致
+        const d = await domainReq(b, auth, '/api/media/detail?groupId=-100_9');
+        assert.strictEqual(d.status, 200);
+        assert.deepStrictEqual(d.body.preview, { file_unique_id: 'AQADX2', media_type: 'video', thumbable: true });
+    });
+});
+
+test('GET /api/media 封面：组内没有任何带文本媒体时回退 media 最早那条', async () => {
+    const data = makeDomainData();
+    data.group_list = [{ _id: '0051', group_id: '-100_8', is_group: 2, is_delete: NOW - 1000, mark: 0 }];
+    data.media = [
+        { _id: 'y1', group_id: '-100_8', subgroup: 1, media_type: 'photo', file_id: 'AgACY1', file_unique_id: 'AQADY1', group: { chat_id: -100, message_id: 41 } },
+        { _id: 'y2', group_id: '-100_8', subgroup: 1, media_type: 'photo', file_id: 'AgACY2', file_unique_id: 'AQADY2', group: { chat_id: -100, message_id: 42 } }
+    ];
+    data.message = [];
+
+    const deps = makeMemoryDeps(data);
+    await withDomain(deps, async (b, auth) => {
+        const r = await domainReq(b, auth, '/api/media?scope=all');
+        const item = r.body.items.find(i => i.group_id === '-100_8');
+        assert.deepStrictEqual(item.preview, { file_unique_id: 'AQADY1', media_type: 'photo', thumbable: true },
+            '没有带文本媒体 → 回退 media 最早那条，仍然有封面');
     });
 });
 
@@ -954,15 +1002,16 @@ test('GET /api/media/detail：新结构 media（无顶层 message_id）也能按
 
 // ---------------- 随机推荐 ----------------
 
-test('GET /api/random：类型 / 标签 / 关键词 / 范围 / 时长 / 数量 组合筛选后随机抽', async () => {
+test('GET /api/random?source=media：类型 / 标签 / 关键词 / 范围 / 时长 / 数量 组合筛选后随机抽', async () => {
     const deps = makeMemoryDeps(makeDomainData());
     await withDomain(deps, async (b, auth) => {
         // 类型：只抽图片（fixture 里 3 张图片）
-        const photos = await domainReq(b, auth, '/api/random?types=photo&count=2');
+        const photos = await domainReq(b, auth, '/api/random?source=media&types=photo&count=2');
         assert.strictEqual(photos.status, 200);
         assert.strictEqual(photos.body.count, 2, '按 count 抽取');
         assert.ok(photos.body.items.every(i => i.media_type === 'photo'), '只抽图片');
         assert.ok(photos.body.total >= 2, '返回候选总数');
+        assert.strictEqual(photos.body.filters.source, 'media', 'filters 回显来源');
         const first = photos.body.items[0];
         assert.deepStrictEqual(Object.keys(first).sort(), [
             'channel', 'chat_id', 'cleanable', 'file_unique_id', 'group', 'group_id', 'mark',
@@ -970,33 +1019,105 @@ test('GET /api/random：类型 / 标签 / 关键词 / 范围 / 时长 / 数量 �
         ].sort());
 
         // 标签：JK（fixture 里 AQAD1 / AQAD21 带 JK）
-        const tagged = await domainReq(b, auth, '/api/random?tags=JK&count=5');
+        const tagged = await domainReq(b, auth, '/api/random?source=media&tags=JK&count=5');
         assert.ok(tagged.body.items.length >= 1);
         assert.ok(tagged.body.items.every(i => i.tags.includes('JK')), '按标签过滤');
 
         // 关键词：匹配描述
-        const kw = await domainReq(b, auth, '/api/random?q=' + encodeURIComponent('写真') + '&count=5');
+        const kw = await domainReq(b, auth, '/api/random?source=media&q=' + encodeURIComponent('写真') + '&count=5');
         assert.strictEqual(kw.body.items.length, 1);
         assert.strictEqual(kw.body.items[0].file_unique_id, 'AQAD1');
 
         // 范围：可清理组（-100_2 is_delete 为时间戳）
-        const cleanable = await domainReq(b, auth, '/api/random?scope=cleanable&count=5');
+        const cleanable = await domainReq(b, auth, '/api/random?source=media&scope=cleanable&count=5');
         assert.ok(cleanable.body.items.length >= 2);
         assert.ok(cleanable.body.items.every(i => i.cleanable === true), '只抽可清理的媒体');
 
         // 时长：只对带 video_time 的视频生效（fixture 里只有 AQAD2 有 30 秒）
-        const shortVideos = await domainReq(b, auth, '/api/random?types=video&duration=' + encodeURIComponent('<1min') + '&count=5');
+        const shortVideos = await domainReq(b, auth, '/api/random?source=media&types=video&duration=' + encodeURIComponent('<1min') + '&count=5');
         assert.strictEqual(shortVideos.body.items.length, 1);
         assert.strictEqual(shortVideos.body.items[0].file_unique_id, 'AQAD2');
         assert.ok(shortVideos.body.items.every(i => i.media_type === 'video'));
-        const longVideos = await domainReq(b, auth, '/api/random?types=video&duration=' + encodeURIComponent('>30min') + '&count=5');
+        const longVideos = await domainReq(b, auth, '/api/random?source=media&types=video&duration=' + encodeURIComponent('>30min') + '&count=5');
         assert.strictEqual(longVideos.body.items.length, 0, '没有匹配时就返回空');
 
         // 无候选时不报错
-        const none = await domainReq(b, auth, '/api/random?tags=NOPE&count=5');
+        const none = await domainReq(b, auth, '/api/random?source=media&tags=NOPE&count=5');
         assert.strictEqual(none.status, 200);
         assert.deepStrictEqual(none.body.items, []);
         assert.strictEqual(none.body.total, 0);
+    });
+});
+
+test('GET /api/random：默认来源是 message 库（只抽有描述记录的媒体，按 file_unique_id 补 media 信息）', async () => {
+    const deps = makeMemoryDeps(makeDomainData());
+    await withDomain(deps, async (b, auth) => {
+        // 不传 source → message 库：fixture 里 4 条 message 记录
+        const all = await domainReq(b, auth, '/api/random?count=10');
+        assert.strictEqual(all.status, 200);
+        assert.strictEqual(all.body.filters.source, 'message', '默认来源是 message');
+        assert.strictEqual(all.body.total, 4, '候选 = message 记录数（有描述的媒体）');
+        assert.strictEqual(all.body.count, 4);
+        assert.ok(all.body.items.every(i => i.text), 'message 来源抽出的每一条都带描述');
+        assert.ok(all.body.items.every(i => i.group_id && i.file_unique_id), '带组与文件标识');
+
+        // 有 media 记录的：类型 / 缩略图 / 位置从 media 补（AQAD1 是图片）
+        const s1 = all.body.items.find(i => i.file_unique_id === 'AQAD1');
+        assert.strictEqual(s1.media_type, 'photo');
+        assert.strictEqual(s1.thumbable, true);
+        assert.strictEqual(s1.chat_id, -100);
+        assert.strictEqual(s1.message_id, 11);
+        assert.deepStrictEqual(s1.tags, ['JK']);
+        assert.strictEqual(s1.cleanable, false);
+
+        // media 里已经没有的孤儿 message（AQAD31）：用 message 自身字段兜底，不报错
+        const orphan = all.body.items.find(i => i.file_unique_id === 'AQAD31');
+        assert.strictEqual(orphan.media_type, 'photo');
+        assert.strictEqual(orphan.thumbable, false);
+        assert.strictEqual(orphan.group_id, '-100_3');
+        assert.strictEqual(orphan.message_id, 31);
+        assert.strictEqual(orphan.cleanable, true, '-100_3 是可清理组');
+
+        // 类型筛选走 message.media_type：没有视频记录 → 空
+        const videos = await domainReq(b, auth, '/api/random?types=video&count=5');
+        assert.strictEqual(videos.body.total, 0, 'message 库里没有视频记录');
+
+        // 标签 / 关键词 / 范围 与 media 来源一致
+        const tagged = await domainReq(b, auth, '/api/random?tags=JK&count=5');
+        assert.strictEqual(tagged.body.total, 2);
+        assert.ok(tagged.body.items.every(i => i.tags.includes('JK')));
+        const kw = await domainReq(b, auth, '/api/random?q=' + encodeURIComponent('写真') + '&count=5');
+        assert.strictEqual(kw.body.items.length, 1);
+        assert.strictEqual(kw.body.items[0].file_unique_id, 'AQAD1');
+        const kept = await domainReq(b, auth, '/api/random?scope=kept&count=5');
+        assert.ok(kept.body.items.length >= 1);
+        assert.ok(kept.body.items.every(i => i.cleanable === false), '只抽保留组');
+
+        // 无候选不报错
+        const none = await domainReq(b, auth, '/api/random?tags=NOPE&count=5');
+        assert.deepStrictEqual(none.body.items, []);
+        assert.strictEqual(none.body.total, 0);
+    });
+});
+
+test('GET /api/random?source=message：时长过滤借 media.video_time 生效', async () => {
+    const data = makeDomainData();
+    // 给「有时长 30 秒的视频」AQAD2 补一条 message 记录（真实数据里带描述的视频就有）
+    data.message.push({
+        _id: 's5', group_id: '-100_1', file_unique_id: 'AQAD2', text: '30 秒短视频', tags: [],
+        media_type: 'video', chat_id: -100, message_id: 12, updated_at: NOW - 7000
+    });
+    const deps = makeMemoryDeps(data);
+    await withDomain(deps, async (b, auth) => {
+        const videos = await domainReq(b, auth, '/api/random?source=message&types=video&count=5');
+        assert.strictEqual(videos.body.total, 1);
+        assert.strictEqual(videos.body.items[0].file_unique_id, 'AQAD2');
+        assert.strictEqual(videos.body.items[0].video_time, 30, '时长来自 media 记录');
+
+        const short = await domainReq(b, auth, '/api/random?source=message&duration=' + encodeURIComponent('<1min') + '&count=5');
+        assert.strictEqual(short.body.total, 1, '30 秒命中 1 分钟以内');
+        const long = await domainReq(b, auth, '/api/random?source=message&duration=' + encodeURIComponent('>30min') + '&count=5');
+        assert.strictEqual(long.body.total, 0, '没有长视频');
     });
 });
 

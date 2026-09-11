@@ -84,6 +84,208 @@ async function syncGroupDeleteByText(groupId) {
     }
 }
 
+// ---------------- group_list.tags（媒体组标签汇总） ----------------
+
+/**
+ * 重算 group_list.tags = 该媒体组内**所有 message 标签的并集**
+ * （message.tags 是标签的唯一权威来源，group_list.tags 只是便于"先查 group_list"的汇总）
+ *
+ * 无标签时移除该字段（保持"没打过标签的组不带 tags 字段"的语义）。
+ * 任何会改变组内 message 标签的写路径（按钮 / 手输 / 文本自动匹配 / 编辑 / 重命名 / 删除）
+ * 都应调用本函数，避免汇总与 message 不一致。
+ *
+ * @param {string} groupId - 媒体组 ID
+ * @returns {Promise<string[]>} 重算后的标签数组（升序）
+ */
+async function syncGroupTags(groupId) {
+    if (!groupId) return [];
+    try {
+        const messageCol = getCollection(COLLECTIONS.MESSAGE);
+        const docs = await messageCol
+            .find({ group_id: groupId, tags: { $exists: true, $ne: [] } })
+            .toArray();
+        const set = new Set();
+        for (const d of docs) {
+            if (Array.isArray(d.tags)) {
+                for (const t of d.tags) {
+                    const name = String(t || '').trim();
+                    if (name) set.add(name);
+                }
+            }
+        }
+        const tags = [...set].sort((a, b) => a.localeCompare(b, 'zh'));
+        await applyGroupTags(groupId, tags);
+        return tags;
+    } catch (err) {
+        logger.error(`重算 group_list.tags 失败: group_id=${groupId}, ${err.message}`);
+        return [];
+    }
+}
+
+/** 写入（或移除）group_list.tags 字段 */
+async function applyGroupTags(groupId, tags) {
+    const col = getCollection(COLLECTIONS.GROUP_LIST);
+    const update = (tags && tags.length)
+        ? { $set: { tags } }
+        : { $unset: { tags: '' } };
+    await col.updateOne({ group_id: groupId }, update);
+}
+
+/**
+ * 增量同步单个标签到 group_list.tags（与 message 集合的 $addToSet / $pull 配对使用）
+ * @param {string} groupId
+ * @param {string} tag - 标签名
+ * @param {1|-1} delta - 1=添加，-1=移除
+ */
+async function applyTagChangeToGroupTags(groupId, tag, delta) {
+    if (!groupId || !tag) return;
+    try {
+        const col = getCollection(COLLECTIONS.GROUP_LIST);
+        const update = delta >= 0 ? { $addToSet: { tags: tag } } : { $pull: { tags: tag } };
+        await col.updateOne({ group_id: groupId }, update);
+    } catch (err) {
+        logger.error(`增量同步 group_list.tags 失败: group_id=${groupId}, tag=${tag}, ${err.message}`);
+    }
+}
+
+/**
+ * 全库重算 group_list.tags（标签改名 / 删除后同步，或启动时补齐历史数据）
+ * 覆盖两种集合的现有全部 message，并把"已无标签"的组清除 tags 字段。
+ * @returns {Promise<{groups: number, tagged: number}>}
+ */
+async function syncAllGroupTags() {
+    try {
+        const messageCol = getCollection(COLLECTIONS.MESSAGE);
+        const groupCol = getCollection(COLLECTIONS.GROUP_LIST);
+        const docs = await messageCol.find({}).toArray();
+
+        const map = new Map();
+        for (const d of docs) {
+            const gid = d && d.group_id;
+            if (!gid) continue;
+            if (!map.has(gid)) map.set(gid, new Set());
+            const bucket = map.get(gid);
+            if (Array.isArray(d.tags)) {
+                for (const t of d.tags) {
+                    const name = String(t || '').trim();
+                    if (name) bucket.add(name);
+                }
+            }
+        }
+
+        let tagged = 0;
+        for (const [gid, set] of map.entries()) {
+            const tags = [...set].sort((a, b) => a.localeCompare(b, 'zh'));
+            if (tags.length) tagged++;
+            await applyGroupTags(gid, tags);
+        }
+
+        // 不在映射里的组（已无任何带标签 message）清除 tags 字段
+        const groupDocs = await groupCol.find({}, { projection: { group_id: 1 } }).toArray();
+        for (const g of groupDocs) {
+            const gid = g && g.group_id;
+            if (gid && !map.has(gid)) {
+                await groupCol.updateOne({ group_id: gid }, { $unset: { tags: '' } });
+            }
+        }
+
+        logger.success(`group_list.tags 全库同步完成: ${map.size} 个媒体组，其中 ${tagged} 个有标签`);
+        return { groups: map.size, tagged };
+    } catch (err) {
+        logger.error(`group_list.tags 全库同步失败: ${err.message}`);
+        return { groups: 0, tagged: 0 };
+    }
+}
+
+/**
+ * 启动时补齐历史数据：把 message.tags 汇总进 group_list.tags
+ * 幂等：已同步的库再跑一次结果相同。
+ */
+async function migrateGroupListTags() {
+    const { groups, tagged } = await syncAllGroupTags();
+    logger.info(`group_list.tags 迁移检查完成: 共 ${groups} 个媒体组，${tagged} 个带标签`);
+    return { groups, tagged };
+}
+
+// ---------------- 空媒体组清理（删除媒体后以 media 实际记录为准） ----------------
+
+/**
+ * 删除某条媒体**之后**的组状态统一维护（删除路径的唯一入口）：
+ *
+ * 以 `media` 集合的**实际记录数**为准，而不是 `group_list.is_group` 这个可能漂移的计数器：
+ *   - 组内已无任何 media → 删除 group_list 记录，并清掉该组残留的 message（
+ *     否则会出现"没有任何媒体的 group_list 项"以及"查不到的孤儿 message"）；
+ *   - 组内还有 media → 把 `is_group` 重算为真实数量（顺带修正历史漂移）。
+ *
+ * 旧实现用 `is_group === 1` 判断"最后一个媒体"、否则 `$inc: -1`：一旦计数器与真实
+ * 媒体数不一致（重复计数、历史数据、回滚失败等），删完最后一个媒体后 `is_group`
+ * 仍 > 0，group_list 就永远留下来了。
+ *
+ * @param {string} groupId - 媒体组 ID
+ * @returns {Promise<{removed: boolean, remaining: number}>} removed=组记录已被删除
+ */
+async function removeMediaGroupIfEmpty(groupId) {
+    if (!groupId) return { removed: false, remaining: 0 };
+    try {
+        const mediaCol = getCollection(COLLECTIONS.MEDIA);
+        const messageCol = getCollection(COLLECTIONS.MESSAGE);
+        const remaining = await mediaCol.countDocuments({ group_id: groupId });
+
+        if (remaining > 0) {
+            await getCollection(COLLECTIONS.GROUP_LIST).updateOne(
+                { group_id: groupId },
+                { $set: { is_group: remaining } }
+            );
+            return { removed: false, remaining };
+        }
+
+        await deleteGroupList(groupId);
+        // 组内已无媒体 → 描述记录不应残留（否则按 group_list 查询时永远查不到这些孤儿记录）
+        const cleaned = await messageCol.deleteMany({ group_id: groupId }).catch(() => ({ deletedCount: 0 }));
+        logger.info(`group_list 已删除（组内已无媒体）: group_id=${groupId}, 同时清理 message ${cleaned.deletedCount || 0} 条`);
+        return { removed: true, remaining: 0 };
+    } catch (err) {
+        logger.error(`空媒体组清理失败: group_id=${groupId}, ${err.message}`);
+        return { removed: false, remaining: 0 };
+    }
+}
+
+/**
+ * 启动时清理历史遗留的"没有任何媒体的 group_list 项"（以及其孤儿 message 记录）
+ * 幂等：清理完再跑一次匹配 0 条。
+ * @returns {Promise<{removed: number, messages: number}>}
+ */
+async function cleanupOrphanGroupList() {
+    try {
+        const groupCol = getCollection(COLLECTIONS.GROUP_LIST);
+        const mediaCol = getCollection(COLLECTIONS.MEDIA);
+        const messageCol = getCollection(COLLECTIONS.MESSAGE);
+
+        const groups = await groupCol.find({}, { projection: { group_id: 1 } }).toArray();
+        let removed = 0;
+        let messages = 0;
+        for (const g of groups) {
+            const groupId = g && g.group_id;
+            if (!groupId) continue;
+            const mediaCount = await mediaCol.countDocuments({ group_id: groupId });
+            if (mediaCount > 0) continue;
+
+            await groupCol.deleteOne({ group_id: groupId });
+            const res = await messageCol.deleteMany({ group_id: groupId }).catch(() => ({ deletedCount: 0 }));
+            messages += res.deletedCount || 0;
+            removed++;
+            logger.info(`清理无媒体的 group_list: group_id=${groupId}（同时清理 message ${res.deletedCount || 0} 条）`);
+        }
+        if (removed > 0) {
+            logger.success(`清理无媒体的 group_list 记录: ${removed} 条，孤儿 message ${messages} 条`);
+        }
+        return { removed, messages };
+    } catch (err) {
+        logger.error(`清理无媒体的 group_list 失败: ${err.message}`);
+        return { removed: 0, messages: 0 };
+    }
+}
+
 /**
  * 查询 group_list
  */
@@ -180,5 +382,13 @@ module.exports = {
     deleteGroupList,
     incrementMark,
     cleanupNullMarkTime,
-    getMarkedGroups
+    getMarkedGroups,
+    // group_list.tags（媒体组标签汇总）
+    syncGroupTags,
+    applyTagChangeToGroupTags,
+    syncAllGroupTags,
+    migrateGroupListTags,
+    // 空媒体组清理（删除媒体后以 media 实际记录为准）
+    removeMediaGroupIfEmpty,
+    cleanupOrphanGroupList
 };

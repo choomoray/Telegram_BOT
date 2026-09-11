@@ -200,10 +200,26 @@ function sortTags(tags) {
     return [...pinned, ...normal];
 }
 
-/** 媒体组代表媒体：subgroup、位置消息 ID 最小的一条（用于列表缩略图） */
-function pickPreviewMedia(mediaDocs) {
-    // 位置在 group / channel 子文档里（旧数据才是顶层 message_id），统一按解析出的位置比较
-    return sortMediaDocsByPosition(mediaDocs)[0] || null;
+/**
+ * 媒体组代表媒体（列表封面 / 详情首图）：subgroup、位置消息 ID 最小的一条
+ *
+ * 优先取**有文本记录（message）的媒体里最早的一条**——即"该组第一条 message 对应的媒体封面"，
+ * 而不是单纯 media 里最早的一条：空描述的媒体往往排在前面（相册第一条不带注释很常见），
+ * 用它当封面会出现"卡片封面与卡片文字不是同一条媒体"的错位。
+ * 组内没有任何带文本的媒体时，回退为 media 里最早的一条（否则会没有封面）。
+ *
+ * @param {Array} mediaDocs - 该组 media 文档
+ * @param {Iterable<string>} [messageFileIds] - 该组有文本记录的 file_unique_id 集合
+ */
+function pickPreviewMedia(mediaDocs, messageFileIds) {
+  // 位置在 group / channel 子文档里（旧数据才是顶层 message_id），统一按解析出的位置比较
+  const sorted = sortMediaDocsByPosition(mediaDocs);
+  if (messageFileIds) {
+    const set = messageFileIds instanceof Set ? messageFileIds : new Set(messageFileIds);
+    const withText = sorted.find(doc => set.has(doc.file_unique_id));
+    if (withText) return withText;
+  }
+  return sorted[0] || null;
 }
 
 /** 媒体组最新描述消息：updated_at（缺失时退回 message_id）最大的一条 */
@@ -591,8 +607,10 @@ async function handleMediaList(D, url) {
 
     const items = groupDocs.map(group => {
         const list = mediaByGroup.get(group.group_id) || [];
-        const msg = pickLatestMessage(messageByGroup.get(group.group_id) || []);
-        const preview = pickPreviewMedia(list);
+        const msgs = messageByGroup.get(group.group_id) || [];
+        const msg = pickLatestMessage(msgs);
+        // 封面 = 该组第一条带文本 message 对应的媒体（没有带文本的媒体时回退 media 第一条）
+        const preview = pickPreviewMedia(list, new Set(msgs.map(m => m.file_unique_id)));
         const updatedAt = msg && (msg.updated_at || 0) > 0 ? msg.updated_at : null;
         return {
             group_id: group.group_id,
@@ -644,6 +662,9 @@ async function handleMediaDetail(D, url) {
         .limit(200)
         .toArray();
 
+    // 详情首图与列表封面保持一致：取第一条带文本 message 对应的媒体（无带文本媒体时回退 media 第一条）
+    const detailPreview = pickPreviewMedia(mediaDocs, new Set(messageDocs.map(m => m.file_unique_id)));
+
     return {
         status: 200,
         data: {
@@ -655,6 +676,12 @@ async function handleMediaDetail(D, url) {
                 mark: groupDoc ? (groupDoc.mark || 0) : 0,
                 last_mark_time: groupDoc && groupDoc.last_mark_time !== undefined ? groupDoc.last_mark_time : null
             },
+            // 封面（与列表页同一套选择规则，供"详情/列表封面一致"使用）
+            preview: detailPreview ? {
+                file_unique_id: detailPreview.file_unique_id ?? null,
+                media_type: detailPreview.media_type ?? null,
+                thumbable: !!(detailPreview.media_type === 'photo' || detailPreview.thumb_file_id)
+            } : null,
             media: mediaDocs.map(doc => ({
                 _id: String(doc._id),
                 subgroup: doc.subgroup ?? null,
@@ -706,28 +733,131 @@ function pickRandomOffsets(total, want) {
     return [...picked];
 }
 
+/** 随机推荐的「数据来源」：message = message 库（有描述 / 标签的记录，默认）、media = media 库（全部收录媒体） */
+const RANDOM_SOURCES = ['message', 'media'];
+const RANDOM_DEFAULT_SOURCE = 'message';
+
+/**
+ * 组装随机推荐的一条卡片数据：
+ *   mediaDoc 提供类型 / 缩略图 / 时长 / 位置，msg 提供描述 / 标签，group 提供可清理与标记次数。
+ *   message 来源时 mediaDoc 可能缺（该媒体已从库里清掉），此时用 message 自身的字段兜底。
+ */
+function randomItem(mediaDoc, msg, group) {
+    const pos = (mediaDoc && resolveMediaPosition(mediaDoc)) ||
+        (msg && msg.chat_id !== undefined && msg.chat_id !== null && msg.message_id
+            ? { chatId: msg.chat_id, messageId: Number(msg.message_id) }
+            : null);
+    return {
+        group_id: mediaDoc ? (mediaDoc.group_id ?? null) : ((msg && msg.group_id) || null),
+        file_unique_id: mediaDoc ? (mediaDoc.file_unique_id ?? null) : ((msg && msg.file_unique_id) || null),
+        media_type: mediaDoc ? (mediaDoc.media_type ?? null) : ((msg && msg.media_type) || null),
+        subgroup: mediaDoc ? (mediaDoc.subgroup ?? null) : null,
+        video_time: mediaDoc ? (mediaDoc.video_time ?? null) : null,
+        thumbable: !!(mediaDoc && (mediaDoc.media_type === 'photo' || mediaDoc.thumb_file_id)),
+        text: msg ? (msg.text || '') : '',
+        tags: msg && Array.isArray(msg.tags) ? msg.tags : [],
+        chat_id: pos ? pos.chatId : null,
+        message_id: pos ? pos.messageId : null,
+        group: mediaDoc ? (mediaDoc.group ?? null) : null,
+        channel: mediaDoc ? (mediaDoc.channel ?? null) : null,
+        cleanable: !!(group && (group.is_delete || 0) > 0),
+        mark: group ? (group.mark || 0) : 0
+    };
+}
+
 /**
  * 随机推荐：GET /api/random
- *   比机器人上的两个随机更自由：类型 / 标签（任一·全部）/ 关键词 / 视频时长 / 范围 / 数量 都能组合
+ *   比机器人上的两个随机更自由：来源 / 类型 / 标签（任一·全部）/ 关键词 / 视频时长 / 范围 / 数量 都能组合
+ *   - source=message|media（默认 message：只在「有描述记录」的媒体里抽，再按 file_unique_id 补 media 信息）
  *   - types=photo,video,audio,document（不传 = 全部类型）
  *   - tags=A,B & tagMode=any|all
  *   - q=关键词（匹配描述）
  *   - duration=all|<1min|<3min|1-5min|5-30min|>30min|>1h（只对视频有 video_time 的生效）
  *   - scope=all|kept|cleanable（按 group_list.is_delete 判定是否有描述）
- *   - count=1..100（默认 20）
+ *   - count=1..150（默认 40）
  */
 async function handleRandom(D, url) {
     const p = (k) => (url.searchParams.get(k) || '').trim();
+    const source = RANDOM_SOURCES.includes(p('source').toLowerCase()) ? p('source').toLowerCase() : RANDOM_DEFAULT_SOURCE;
     const types = p('types').split(',').map(s => s.trim().toLowerCase()).filter(t => MEDIA_TYPE_ORDER.includes(t));
     const tags = p('tags').split(',').map(s => normalizeTagName(s)).filter(Boolean);
     const tagMode = p('tagMode') === 'all' ? 'all' : 'any';
     const keyword = p('q');
     const duration = Object.prototype.hasOwnProperty.call(RANDOM_DURATION_FILTERS, p('duration')) ? p('duration') : 'all';
     const scope = ['kept', 'cleanable'].includes(p('scope')) ? p('scope') : 'all';
-    const count = Math.min(100, Math.max(1, parseInt(p('count'), 10) || 20));
-    const filters = { types, tags, tagMode, q: keyword, duration, scope, count };
+    const count = Math.min(150, Math.max(1, parseInt(p('count'), 10) || 40));
+    const filters = { source, types, tags, tagMode, q: keyword, duration, scope, count };
     const empty = { status: 200, data: { total: 0, count: 0, items: [], filters } };
 
+    // 范围（有没有描述）按 group_list.is_delete 判定（media / message 两种来源共用）
+    let scopeGroupIds = null;
+    if (scope !== 'all') {
+        const gl = await D.getCollection(COLLECTIONS.GROUP_LIST)
+            .find(scope === 'cleanable' ? { is_delete: { $gt: 0 } } : { is_delete: 0 })
+            .limit(5000)
+            .toArray();
+        scopeGroupIds = [...new Set(gl.map(g => g.group_id).filter(Boolean))];
+        if (!scopeGroupIds.length) return empty;
+    }
+
+    /** 抽中后按 group_id 取 group_list（可清理 / 标记次数） */
+    const loadGroups = async (ids) => {
+        const list = [...new Set(ids.filter(Boolean))];
+        const docs = list.length
+            ? await D.getCollection(COLLECTIONS.GROUP_LIST).find({ group_id: { $in: list } }).toArray()
+            : [];
+        return new Map(docs.map(g => [g.group_id, g]));
+    };
+
+    // ---------- 来源 message（默认）：message 库只有「有描述」的媒体（标签也按 message 独立存储） ----------
+    if (source === 'message') {
+        const mFilter = {};
+        if (types.length) mFilter.media_type = { $in: types };
+        // 标签是数组字段：用 $or / $and 逐标签匹配（Mongo 与测试内存集合语义一致）
+        if (tags.length) mFilter[tagMode === 'all' ? '$and' : '$or'] = tags.map(t => ({ tags: t }));
+        if (keyword) mFilter.text = { $regex: escapeRegex(keyword), $options: 'i' };
+        if (scopeGroupIds) mFilter.group_id = { $in: scopeGroupIds };
+
+        let msgs = await D.getCollection(COLLECTIONS.MESSAGE).find(mFilter).limit(5000).toArray();
+        // 时长只存在 media 上：先取出时长符合的 file_unique_id，再回筛 message
+        if (RANDOM_DURATION_FILTERS[duration]) {
+            const inRange = await D.getCollection(COLLECTIONS.MEDIA)
+                .find({ video_time: RANDOM_DURATION_FILTERS[duration] })
+                .limit(5000)
+                .toArray();
+            const keep = new Set(inRange.map(d => d.file_unique_id).filter(Boolean));
+            msgs = msgs.filter(m => keep.has(m.file_unique_id));
+        }
+        if (!msgs.length) return empty;
+
+        const fileIds = [...new Set(msgs.map(m => m.file_unique_id).filter(Boolean))];
+        const mediaDocs = fileIds.length
+            ? await D.getCollection(COLLECTIONS.MEDIA).find({ file_unique_id: { $in: fileIds } }).toArray()
+            : [];
+        const mediaByFile = new Map(mediaDocs.map(d => [d.file_unique_id, d]));
+        const picked = pickRandomOffsets(msgs.length, count).map(i => msgs[i]);
+        const groupIdOf = (m) => {
+            const md = mediaByFile.get(m.file_unique_id);
+            return (md && md.group_id) || m.group_id || null;
+        };
+        const groupById = await loadGroups(picked.map(groupIdOf));
+
+        return {
+            status: 200,
+            data: {
+                total: msgs.length,
+                count: picked.length,
+                filters,
+                items: picked.map(m => randomItem(
+                    mediaByFile.get(m.file_unique_id) || null,
+                    m,
+                    groupById.get(groupIdOf(m)) || null
+                ))
+            }
+        };
+    }
+
+    // ---------- 来源 media：全部收录媒体 ----------
     const filter = {};
     if (types.length) filter.media_type = { $in: types };
     if (RANDOM_DURATION_FILTERS[duration]) filter.video_time = RANDOM_DURATION_FILTERS[duration];
@@ -735,7 +865,6 @@ async function handleRandom(D, url) {
     // 标签 / 关键词：先在 message 里筛出候选媒体（标签按 message 独立存储）
     if (tags.length || keyword) {
         const mFilter = {};
-        // 标签是数组字段：用 $or / $and 逐标签匹配（Mongo 与测试内存集合语义一致）
         if (tags.length) mFilter[tagMode === 'all' ? '$and' : '$or'] = tags.map(t => ({ tags: t }));
         if (keyword) mFilter.text = { $regex: escapeRegex(keyword), $options: 'i' };
         const msgs = await D.getCollection(COLLECTIONS.MESSAGE).find(mFilter).limit(5000).toArray();
@@ -744,16 +873,7 @@ async function handleRandom(D, url) {
         filter.file_unique_id = { $in: ids };
     }
 
-    // 范围（有没有描述）按 group_list.is_delete 判定
-    if (scope !== 'all') {
-        const gl = await D.getCollection(COLLECTIONS.GROUP_LIST)
-            .find(scope === 'cleanable' ? { is_delete: { $gt: 0 } } : { is_delete: 0 })
-            .limit(5000)
-            .toArray();
-        const ids = [...new Set(gl.map(g => g.group_id).filter(Boolean))];
-        if (!ids.length) return empty;
-        filter.group_id = { $in: ids };
-    }
+    if (scopeGroupIds) filter.group_id = { $in: scopeGroupIds };
 
     const mediaCol = D.getCollection(COLLECTIONS.MEDIA);
     const total = await mediaCol.countDocuments(filter);
@@ -765,13 +885,11 @@ async function handleRandom(D, url) {
     if (!docs.length) return { status: 200, data: { total, count: 0, items: [], filters } };
 
     const fileIds = [...new Set(docs.map(d => d.file_unique_id).filter(Boolean))];
-    const groupIds = [...new Set(docs.map(d => d.group_id).filter(Boolean))];
-    const [msgs, groups] = await Promise.all([
+    const [msgs, groupById] = await Promise.all([
         fileIds.length ? D.getCollection(COLLECTIONS.MESSAGE).find({ file_unique_id: { $in: fileIds } }).toArray() : [],
-        groupIds.length ? D.getCollection(COLLECTIONS.GROUP_LIST).find({ group_id: { $in: groupIds } }).toArray() : []
+        loadGroups(docs.map(d => d.group_id))
     ]);
     const msgByFile = new Map(msgs.map(m => [m.file_unique_id, m]));
-    const groupById = new Map(groups.map(g => [g.group_id, g]));
 
     return {
         status: 200,
@@ -779,27 +897,11 @@ async function handleRandom(D, url) {
             total,
             count: docs.length,
             filters,
-            items: docs.map(doc => {
-                const msg = msgByFile.get(doc.file_unique_id) || null;
-                const g = groupById.get(doc.group_id) || null;
-                const pos = resolveMediaPosition(doc);
-                return {
-                    group_id: doc.group_id,
-                    file_unique_id: doc.file_unique_id,
-                    media_type: doc.media_type ?? null,
-                    subgroup: doc.subgroup ?? null,
-                    video_time: doc.video_time ?? null,
-                    thumbable: !!(doc.media_type === 'photo' || doc.thumb_file_id),
-                    text: msg ? (msg.text || '') : '',
-                    tags: msg && Array.isArray(msg.tags) ? msg.tags : [],
-                    chat_id: pos ? pos.chatId : null,
-                    message_id: pos ? pos.messageId : null,
-                    group: doc.group ?? null,
-                    channel: doc.channel ?? null,
-                    cleanable: !!(g && (g.is_delete || 0) > 0),
-                    mark: g ? (g.mark || 0) : 0
-                };
-            })
+            items: docs.map(doc => randomItem(
+                doc,
+                msgByFile.get(doc.file_unique_id) || null,
+                groupById.get(doc.group_id) || null
+            ))
         }
     };
 }

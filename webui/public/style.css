@@ -357,6 +357,58 @@ select { appearance: none; padding-right: 26px;
 }
 .media-thumb .ph { font-size: 30px; opacity: .55; }
 
+/* ---------- 随机推荐：瀑布流（图片完整显示、不裁切，文字仍在图片下方） ----------
+   用 CSS 多列（columns）实现瀑布流：卡片按内容高度自然堆叠，
+   不需要 JS 计算位置，也不会把整张卡"拉满一行"。
+   封面高度由图片真实比例决定（JS 在缩略图 onload 后写 aspect-ratio），
+   因此图片是完整展示而不是 16:10 裁切；卡片内容高度不一 → 自然形成瀑布流错落。
+   列数按屏幕宽度自动变化（手机 2 列 → 桌面 5~6 列）：见下方的列数阶梯。 */
+.media-grid--flow {
+  display: block;
+  columns: 2;                 /* 兜底：窄屏 2 列 */
+  column-gap: 14px;
+}
+/* 列容器里的卡片：inline-block + 100% 宽（grid/flex 子项跨列时可能被拆开，不能直接用） */
+.media-card--flow {
+  display: inline-block;
+  width: 100%;
+  margin: 0 0 14px;
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  page-break-inside: avoid;
+  vertical-align: top;
+}
+.media-thumb--flow {
+  aspect-ratio: 4 / 3;      /* 图片加载出来前的占位比例，onload 后由 JS 换成真实比例 */
+  min-height: 96px;
+}
+/* 瀑布流封面：容器高度=图片真实比例（JS 在 onload 后写 aspect-ratio），
+   背景层只负责提供图片地址（真正显示的是里面那张真图），因此 contain 完整显示、不裁切 */
+.media-thumb--flow .thumb-img--flow {
+  position: relative; inset: auto; z-index: 2;
+  width: 100%; height: auto;
+  background-size: contain;
+  background-position: center;
+}
+.media-thumb--flow .ph { font-size: 26px; }
+/* 瀑布流里类型角标挪到右上角：右下角与图片下沿齐平，容易被误当成按钮 */
+.media-thumb--flow .thumb-type { right: 6px; top: 6px; bottom: auto; }
+/* 瀑布流里那张"隐形真图"要真正显示出来（它就是可见图片本身）：
+   容器按图片原始比例定高，图片 contain 完整显示、不裁切、不变形 */
+.media-thumb--flow .thumb-img--flow .thumb-src {
+  position: relative; width: 100%; height: auto;
+  opacity: 1; pointer-events: none;
+}
+/* ---------- 瀑布流列数阶梯（按窗口宽度自动选列数） ----------
+   手机 2 列 → 平板 3 列 → 小笔记本 4 列 → 桌面 5 列 → 大屏 6 列（封顶）。
+   注意用 min-width 从小到大排列，后面的规则覆盖前面的，最终列数就是"命中的最大一档"。 */
+@media (min-width: 560px)  { .media-grid--flow { columns: 2; } }  /* 大手机仍是 2 列 */
+@media (min-width: 720px)  { .media-grid--flow { columns: 3; } }
+@media (min-width: 1024px) { .media-grid--flow { columns: 4; } }
+@media (min-width: 1400px) { .media-grid--flow { columns: 5; } }
+@media (min-width: 1800px) { .media-grid--flow { columns: 6; } }  /* 更宽的屏幕不再加列，避免封面太小 */
+@media (max-width: 420px)  { .media-grid--flow { column-gap: 10px; } .media-card--flow { margin-bottom: 10px; } }
+
 /* ---------- 媒体封面 ----------
    预览框固定尺寸，封面是一层 background-image（.thumb-img），cover 裁切填满。
    不做「悬停缩放到全貌」那套了：鼠标停够时间后弹出大图（.thumb-zoom），
@@ -533,7 +585,12 @@ td.right, th.right { text-align: right; }
 @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.99); } to { opacity: 1; transform: none; } }
 .dialog-head { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
 .dialog-head h2 { font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dialog-body { padding: 16px 18px; overflow-y: auto; min-height: 0; }
+/* 对话框正文默认仍是"内容超高就整体滚动"（标签详情等网格视图靠它滚） */
+.dialog-body { padding: 16px 18px; min-height: 0; overflow-y: auto; }
+/* 媒体组详情：正文不滚，滚动交给左右两栏各自负责（见 .detail-left / .detail-aside 的独立滚动条） */
+.dialog-body.has-detail-main { overflow: hidden; display: flex; flex-direction: column; }
+.dialog-body.has-detail-main > .detail-main { flex: 1 1 auto; min-height: 0; }
+.dialog-body.has-detail-main > .toolbar { flex: 0 0 auto; }
 .dialog-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--surface-2); }
 
 .detail-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
@@ -542,37 +599,43 @@ td.right, th.right { text-align: right; }
 .detail-item .ph { aspect-ratio: 1; display: grid; place-items: center; font-size: 26px; opacity: .6; }
 /* 详情条封面同样是 .thumb-img 背景层（悬停整图可见，见上面「媒体封面」段） */
 .detail-thumb { aspect-ratio: 1; }
-/* 媒体详情：左右两栏，各自独立上下滚动 ——
-   左栏只放媒体条（组里媒体很多时在左栏里翻），右栏放定位信息 + 描述与标签（编辑都在右栏）。 */
+/* ---------- 媒体详情：左右两栏各自独立滚动 ----------
+   左栏 = 媒体条，右栏 = 描述与标签 + 定位信息，两栏**各有一根滚动条**：
+   每栏高度只由自己的内容决定（内容少就短、不跟着对面拉长），超高时才出滚动条、内部滚动。
+   因此对话框本身不再整体滚动（.dialog-body 不滚），滚动发生在两栏内部。 */
 .detail-main {
   display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 34%);
-  gap: 16px; align-items: stretch; min-height: min(54vh, 540px);
+  gap: 16px;
+  align-items: start;          /* 两栏各自按内容高度，互不拉平 */
 }
-.detail-left, .detail-aside { min-height: 0; }
+/* 两栏共用的"自己的滚动容器"参数：
+   flex: 0 1 auto = 高度跟内容走但可被压缩；max-height 兜住上限（超出才出滚动条） */
 .detail-left {
-  display: flex; flex-direction: column; gap: 8px; min-width: 0;
-  padding: 12px 14px; overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0;
+  max-height: min(56vh, 560px); overflow-y: auto;
+  padding: 12px 14px;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
 }
 .detail-left > h4 { flex: 0 0 auto; margin-bottom: 2px; }
 .detail-left .detail-strip { flex: 0 0 auto; }
 .detail-aside {
   display: flex; flex-direction: column; min-height: 0;
+  max-height: min(56vh, 560px); overflow-y: auto;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 12px 14px 4px;
 }
 .detail-aside > h4 { flex: 0 0 auto; }
-/* 定位信息现在排在「描述与标签」下面（与描述块列表互换位置） */
+/* 定位信息排在「描述与标签」下面，按内容自然往下排（跟着右栏一起滚） */
 .detail-aside > .detail-positions { flex: 0 0 auto; margin: 10px 0 12px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
-/* 只有描述块列表滚动，标题与定位信息保持可见 */
-.detail-aside > .detail-msg-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 10px; }
+/* 描述块列表按内容撑高（滚动由 .detail-aside 负责，列表本身不再单独出滚动条） */
+.detail-aside > .detail-msg-list { flex: 0 0 auto; padding-bottom: 10px; }
 /* 详情条下方的常驻说明：不用原生 title 提示（会飘在图片上挡住画面） */
 .thumb-tip { padding: 0 8px 7px; font-size: 10.5px; line-height: 1.45; color: var(--text-3); }
 .detail-item.is-active .thumb-tip { color: var(--accent); }
 @media (max-width: 980px) {
+  /* 窄屏单栏：两栏上下排列，改回"整体滚动"（各自滚动条在窄屏只会让人更难受） */
   .detail-main { grid-template-columns: minmax(0, 1fr); min-height: 0; }
-  .detail-left, .detail-aside { overflow: visible; }
-  .detail-aside > .detail-msg-list { overflow: visible; }
+  .detail-left, .detail-aside { max-height: none; overflow-y: visible; }
 }
 
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 12.5px; }

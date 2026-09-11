@@ -42,17 +42,44 @@ function unsetPath(obj, key) {
     delete cur[parts[parts.length - 1]];
 }
 
+/** 单个标量是否满足条件项（支持正则：`$in: [/^jk$/i]`、tags: /^jk$/i） */
+function scalarMatches(value, cond) {
+    if (cond instanceof RegExp) return cond.test(String(value ?? ''));
+    return value === cond;
+}
+
+/** 数组是否包含满足条件项的成员（对应 Mongo 的数组字段语义） */
+function arrayHas(value, cond) {
+    return value.some(v => scalarMatches(v, cond));
+}
+
 function matchValue(value, cond) {
     // Mongo 语义：{ tags: 'JK' } 命中 tags 数组包含 JK 的文档
-    if (Array.isArray(value) && (cond === null || typeof cond !== 'object')) {
-        return value.some(v => v === cond);
+    if (Array.isArray(value) && (cond === null || typeof cond !== 'object' || cond instanceof RegExp)) {
+        return arrayHas(value, cond);
     }
-    if (cond && typeof cond === 'object' && !Array.isArray(cond)) {
+    if (cond && typeof cond === 'object' && !Array.isArray(cond) && !(cond instanceof RegExp)) {
         for (const [op, arg] of Object.entries(cond)) {
             switch (op) {
                 case '$eq': if (value !== arg) return false; break;
                 case '$ne': if (value === arg) return false; break;
-                case '$in': if (!Array.isArray(arg) || !arg.includes(value)) return false; break;
+                case '$in':
+                    // 条件数组里的每一项都要按"标量匹配"语义处理（含正则）；字段是数组时按成员匹配
+                    if (!Array.isArray(arg)) return false;
+                    if (Array.isArray(value)) { if (!arg.some(c => arrayHas(value, c))) return false; }
+                    else if (!arg.some(c => scalarMatches(value, c))) return false;
+                    break;
+                case '$nin':
+                    if (!Array.isArray(arg)) return false;
+                    if (Array.isArray(value)) { if (arg.some(c => arrayHas(value, c))) return false; }
+                    else if (arg.some(c => scalarMatches(value, c))) return false;
+                    break;
+                case '$all':
+                    // 数组字段必须同时满足全部条件项（用于 group_list.tags 的严格标签查询）
+                    if (!Array.isArray(arg)) return false;
+                    if (!Array.isArray(value)) return false;
+                    if (!arg.every(c => arrayHas(value, c))) return false;
+                    break;
                 case '$gt': if (!(value > arg)) return false; break;
                 case '$gte': if (!(value >= arg)) return false; break;
                 case '$lt': if (!(value < arg)) return false; break;
