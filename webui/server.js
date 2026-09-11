@@ -714,7 +714,7 @@ function pickRandomOffsets(total, want) {
  *   - q=关键词（匹配描述）
  *   - duration=all|<1min|<3min|1-5min|5-30min|>30min|>1h（只对视频有 video_time 的生效）
  *   - scope=all|kept|cleanable（按 group_list.is_delete 判定是否有描述）
- *   - count=1..24（默认 6）
+ *   - count=1..100（默认 20）
  */
 async function handleRandom(D, url) {
     const p = (k) => (url.searchParams.get(k) || '').trim();
@@ -724,7 +724,7 @@ async function handleRandom(D, url) {
     const keyword = p('q');
     const duration = Object.prototype.hasOwnProperty.call(RANDOM_DURATION_FILTERS, p('duration')) ? p('duration') : 'all';
     const scope = ['kept', 'cleanable'].includes(p('scope')) ? p('scope') : 'all';
-    const count = Math.min(24, Math.max(1, parseInt(p('count'), 10) || 6));
+    const count = Math.min(100, Math.max(1, parseInt(p('count'), 10) || 20));
     const filters = { types, tags, tagMode, q: keyword, duration, scope, count };
     const empty = { status: 200, data: { total: 0, count: 0, items: [], filters } };
 

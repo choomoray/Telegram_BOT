@@ -28,6 +28,7 @@ function toCamel(name) {
 function makeElement(sel = '') {
     const listeners = {};
     const classes = new Set();
+    const attrs = {};
     let html = '';
     let children = [];
     const el = {
@@ -77,6 +78,21 @@ function makeElement(sel = '') {
             if (child.parentElement !== undefined) child.parentElement = el;
             return child;
         },
+        // 属性存取（比只认 dataset 更接近真实 DOM，浮层比较 img src 时会用到）
+        getAttribute(name) {
+            if (name === 'class') return el.className;
+            if (name === 'id') return el.id;
+            if (name === 'src' && el.src) return el.src;
+            return attrs[name] === undefined ? null : attrs[name];
+        },
+        setAttribute(name, value) {
+            const v = String(value);
+            if (name === 'class') { el.className = v; return; }
+            if (name === 'id') { el.id = v; return; }
+            if (name === 'src') { el.src = v; return; }
+            if (name.startsWith('data-')) el.dataset[toCamel(name.slice(5))] = v;
+            attrs[name] = v;
+        },
         prepend(child) {
             if (!child) return child;
             const p = child.parentElement;
@@ -114,7 +130,6 @@ function makeElement(sel = '') {
             if (i >= 0) p.children.splice(i, 1);
         },
         focus() { },
-        setAttribute() { },
         removeAttribute() { },
         getBoundingClientRect: () => ({ left: 0, width: 100, top: 0, height: 20 }),
         showModal() { el.open = true; },
@@ -133,6 +148,17 @@ function makeElement(sel = '') {
             return null;
         }
     };
+    // className 必须和 classList 同源：应用里常写 `el.className = 'a b'` 再 `classList.add('c')`，
+    // 若两者各存一份，classList.contains() 就查不到 className 里的类（悬停转圈就属于这种写法）
+    Object.defineProperty(el, 'className', {
+        get: () => [...classes].join(' '),
+        set: (v) => {
+            classes.clear();
+            String(v ?? '').split(/\s+/).filter(Boolean).forEach(c => classes.add(c));
+        },
+        configurable: true,
+        enumerable: true
+    });
     return el;
 }
 
@@ -154,6 +180,14 @@ function parseTree(html, owner) {
         const cls = (attrs.match(/class="([^"]*)"/) || [, ''])[1];
         child.className = cls;
         cls.split(/\s+/).filter(Boolean).forEach(c => child.classList.add(c));
+        // 内联 style（封面用 background-image 承载缩略图，测试要能断言）
+        const styleAttr = (attrs.match(/style="([^"]*)"/) || [, ''])[1];
+        for (const decl of styleAttr.split(';')) {
+            const i = decl.indexOf(':');
+            if (i < 0) continue;
+            const prop = decl.slice(0, i).trim().replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+            if (prop) child.style[prop] = decl.slice(i + 1).trim();
+        }
         for (const dm of attrs.matchAll(/data-([a-zA-Z0-9-]+)="([^"]*)"/g)) {
             child.dataset[toCamel(dm[1])] = dm[2];
         }
@@ -171,17 +205,41 @@ function parseTree(html, owner) {
     return out;
 }
 
-/** 在元素子树里按选择器查找（支持 .cls / tag.cls / #id 的简化形式） */
+/** 在元素子树里按选择器查找（支持 .cls / tag / tag.cls / #id，以及 `祖先 后代` 两级形式） */
 function queryAll(root, selector) {
-    const raw = String(selector);
+    const raw = String(selector).trim();
+    // 两级后代选择器（如 '.detail-thumb .thumb-img'）：先找祖先，再在祖先子树里找后代
+    const parts = raw.split(/\s+/).filter(Boolean);
+    if (parts.length === 2) {
+        const out = [];
+        for (const ancestor of queryAll(root, parts[0])) {
+            for (const hit of queryAll(ancestor, parts[1])) {
+                if (!out.includes(hit)) out.push(hit);
+            }
+        }
+        return out;
+    }
+    // 解析 `tag.cls` / `.cls` / `tag` / `#id`：
+    // 必须先剥掉前导的 `.` / `#`，否则 `.thumb-load` 会被当成 tag 前缀剥成 `oad`
     const byId = raw.startsWith('#');
-    const cls = byId ? raw.slice(1) : raw.replace(/^[a-zA-Z]+/, '').replace(/^\./, '');
+    let tag = '';
+    let cls = '';
+    if (byId || raw.startsWith('.')) {
+        cls = raw.slice(1);
+    } else {
+        const dot = raw.indexOf('.');
+        tag = (dot >= 0 ? raw.slice(0, dot) : raw).toUpperCase();
+        cls = dot >= 0 ? raw.slice(dot + 1) : '';
+    }
     const results = [];
     const walk = (nodes) => {
         for (const n of nodes) {
-            const hit = byId
-                ? n.id === cls
-                : ((n.classList && n.classList.contains(cls)) || n.className === cls);
+            let hit;
+            if (byId) hit = n.id === cls;
+            else {
+                hit = (!tag || n.tagName === tag)
+                    && (!cls || (n.classList && n.classList.contains(cls)) || n.className === cls);
+            }
             if (hit) results.push(n);
             if (n.children && n.children.length) walk(n.children);
         }
@@ -243,7 +301,9 @@ function makeSandbox(fixtures) {
         document,
         window: {
             matchMedia: () => ({ matches: false, addEventListener() { } }),
-            open: (url, target, features) => opens.push({ url, target, features })
+            open: (url, target, features) => opens.push({ url, target, features }),
+            // 悬停放大默认等 2 秒（见 app.js ZOOM_DELAY）；测试里缩到 0，tick() 即可断言浮层
+            __thumbZoomDelay: 0
         },
         localStorage,
         fetch: fetchStub,
@@ -426,8 +486,14 @@ async function boot(fx) {
 
 async function goto(env, view) {
     const nav = env.document.querySelector('#nav');
+    // show() 会返回「本次渲染完成」的 Promise：首屏初始化可能还在加载，
+    // 这时导航会被排队，多等一会儿直到视图真的渲染出来（否则断言会打在「正在加载…」上）
     await nav.fire('click', { target: { closest: (sel) => (sel === '.nav-item' ? { dataset: { view } } : null) } });
     await tick();
+    for (let i = 0; i < 12; i++) {
+        if (!/class="loading"/.test(env.document.querySelector('#view').innerHTML)) break;
+        await tick();
+    }
     return env.document.querySelector('#view');
 }
 
@@ -661,26 +727,71 @@ test('媒体库：点媒体卡片能进入详情（data-action 必须是 open-me
 
 // ---------------- 媒体详情：点选媒体后高亮可改标签 ----------------
 
-test('媒体库缩略图悬停：弹出「整图可见」的放大预览，移出后收起', async () => {
+test('媒体库缩略图悬停：先出加载转圈，稍后从该角弹出放大预览并模糊小图，移出后恢复', async () => {
     const env = await boot();
     const view = await goto(env, 'media');
 
     const thumb = view.querySelector('.media-thumb');
     assert.ok(thumb, '媒体卡片应有缩略图容器');
-    const img = thumb.querySelector('img');
-    assert.ok(img && img.src, '缩略图应带 src');
+    // 封面是 .thumb-img 背景层
+    const cover = thumb.querySelector('.thumb-img');
+    assert.ok(cover && cover.dataset.src, '封面应带缩略图地址');
+    const bgUrl = String(cover.style.backgroundImage).replace(/^url\(["']?/, '').replace(/["']?\)$/, '');
+    assert.ok(bgUrl.includes('fileUniqueId=AQAD1'), `封面背景图应是这张缩略图，实际 ${bgUrl}`);
+    assert.ok(thumb.querySelector('.thumb-src'), '封面里应有一张隐形真图用于读图片真实宽高');
 
-    await view.fire('mouseover', { target: img });
+    await view.fire('mouseover', { target: cover });
+    // 鼠标刚放上去：还没到大图，先在封面靠近浮层的角上转圈（.thumb-load）
+    assert.ok(thumb.classList.contains('is-waiting'), '等待期间封面标记为等待态');
+    assert.ok(!thumb.classList.contains('is-blur'), '大图还没出现，小图不应先糊');
+    const spin = thumb.querySelector('.thumb-load');
+    assert.ok(spin && spin.classList.contains('is-on'), '等待期间显示加载转圈');
+    const cornerHits = ['is-top-left', 'is-top-right', 'is-bottom-left', 'is-bottom-right']
+        .filter(c => spin.classList.contains(c));
+    assert.strictEqual(cornerHits.length, 1, `转圈应恰好落在封面的一角，实际 ${cornerHits.join('+') || '无'}`);
+
+    await tick(); // 到点（测试里延迟为 0）→ 大图从转圈那一角放大展开
     const host = env.document.body || env.document.documentElement;
     const layer = host.querySelector('.thumb-zoom');
     assert.ok(layer, '悬停应创建放大预览浮层');
     assert.ok(layer.classList.contains('is-on'), '浮层应显示');
-    assert.strictEqual(layer.querySelector('img').src, img.src, '浮层展示同一张图（完整比例，不裁切）');
+    assert.strictEqual(layer.querySelector('img').getAttribute('src'), cover.dataset.src, '浮层展示同一张图（完整比例，不裁切）');
     assert.match(String(layer.style.left), /px$/, '浮层应定位到缩略图旁');
     assert.match(String(layer.style.width), /px$/, '浮层应有明确尺寸');
+    assert.match(String(layer.style.transformOrigin), /^(0%|100%) (0%|100%)$/, '浮层从转圈所在的那一角放大展开');
+    assert.ok(!spin.classList.contains('is-on'), '大图出现后转圈收起');
+    // 大图出现的同时，鼠标所在的这张小预览图模糊掉（CSS 负责过渡）
+    assert.ok(thumb.classList.contains('is-blur'), '大图出现后小预览图模糊');
 
-    await view.fire('mouseout', { target: img, relatedTarget: null });
+    await view.fire('mouseout', { target: cover, relatedTarget: null });
     assert.ok(!layer.classList.contains('is-on'), '移出缩略图后浮层收起');
+    assert.ok(!thumb.classList.contains('is-blur'), '移出后小预览图恢复清晰');
+    assert.ok(!thumb.classList.contains('is-waiting'), '等待态也一并清除');
+    assert.ok(!spin.classList.contains('is-on'));
+});
+
+test('媒体库缩略图：固定尺寸 cover 裁切，状态徽标已移到描述下方', async () => {
+    const env = await boot();
+    const view = await goto(env, 'media');
+    const html = view.innerHTML;
+
+    // 封面就是一层背景图（固定尺寸 cover 裁切），不再有「缩放到全貌」的模糊底装饰层
+    assert.match(html, /<span class="thumb-img" data-src="\/api\/thumb\?fileUniqueId=AQAD1[^"]*" style="background-image:url\('\/api\/thumb\?fileUniqueId=AQAD1[^)]*'\)"><img class="thumb-src"/, '封面是固定尺寸的背景图层');
+    assert.ok(!html.includes('thumb-fill'), '已移除「整图可见」用的模糊底装饰层');
+    // 「保留 / 可清理 / 图片 / 视频」不再压在封面上，改到描述下方（模板里有换行缩进）
+    assert.match(html, /class="media-badges">\s*<span class="tag ok">保留<\/span>/, '状态徽标在文字区');
+    assert.match(html, /class="media-badges">[\s\S]*?<span class="tag">🖼 图片<\/span>\s*<span class="tag">🎬 视频<\/span>/, '类型徽标也跟着挪到文字区');
+    // 封面里只留下角落的文件类型角标（.thumb-type），不再有覆盖封面的徽标行
+    const thumbHtml = (html.match(/<div class="media-thumb"[\s\S]*?<\/div>\s*<div class="media-body"/) || [''])[0];
+    assert.ok(thumbHtml, '应能截出封面容器');
+    assert.ok(!thumbHtml.includes('media-badges'), '封面里不再有徽标行');
+    assert.ok(!thumbHtml.includes('保留'), '封面里不再有「保留」徽标');
+    assert.ok(!thumbHtml.includes('class="badges"'), '封面里不再有旧的 .badges 覆盖层');
+    assert.ok(thumbHtml.includes('class="thumb-type"'), '封面右下角仍保留类型角标');
+    // 卡片不再用原生 title 提示（会飘在图片上挡住画面）
+    assert.ok(!/<article class="media-card"[^>]*\stitle="/.test(html), '媒体库卡片不再有原生 title 提示');
+    // 底部信息横向一行（不换行）：媒体数 / 组数 / 位置 / group_id 依次排开
+    assert.match(html, /class="media-meta">[\s\S]*?<span>2 个媒体<\/span>\s*<span>·<\/span>\s*<span>1 组<\/span>[\s\S]*?<\/div>/, '媒体数 / 组数横排');
 });
 
 test('媒体详情条悬停：放大预览挂进对话框（顶层，否则会被遮住）', async () => {
@@ -690,18 +801,26 @@ test('媒体详情条悬停：放大预览挂进对话框（顶层，否则会�
 
     const dlg = env.document.querySelector('#detail-dialog');
     const item = env.document.querySelector('#detail-body').querySelector('.detail-item');
-    const img = item.querySelector('img');
-    assert.ok(img && img.src, '详情媒体条应带缩略图');
+    const cover = item.querySelector('.thumb-img');
+    assert.ok(cover && cover.dataset.src, '详情媒体条应带缩略图');
 
-    await dlg.fire('mouseover', { target: img });
+    await dlg.fire('mouseover', { target: cover });
+    // 详情条同样先转圈，0.13 秒（测试里 0）后才从该角展开大图
+    const spin = item.querySelector('.thumb-load');
+    assert.ok(spin && spin.classList.contains('is-on'), '详情条等待期间显示加载转圈');
+    assert.ok(!item.classList.contains('is-blur'), '大图还没出现，详情条不应先糊');
+    await tick();
+
     const layer = dlg.querySelector('.thumb-zoom');
     assert.ok(layer, '详情条悬停也要有放大浮层');
     assert.strictEqual(layer.parentElement, dlg, '浮层必须挂进已打开的对话框（原生 dialog 在顶层）');
     assert.ok(layer.classList.contains('is-on'));
-    assert.strictEqual(layer.querySelector('img').src, img.src);
+    assert.strictEqual(layer.querySelector('img').getAttribute('src'), cover.dataset.src);
+    assert.ok(item.classList.contains('is-blur'), '大图出现后详情条预览图模糊');
 
-    await dlg.fire('mouseout', { target: img, relatedTarget: null });
+    await dlg.fire('mouseout', { target: cover, relatedTarget: null });
     assert.ok(!layer.classList.contains('is-on'), '移出后收起');
+    assert.ok(!item.classList.contains('is-blur'), '移出后详情条预览图恢复清晰');
 });
 
 test('媒体详情：移除整组操作，未选中时标签区灰掉不可点', async () => {
@@ -718,7 +837,7 @@ test('媒体详情：移除整组操作，未选中时标签区灰掉不可点',
     assert.match(body.innerHTML, /data-action="detail-pick" data-file="AQAD1"/, '媒体缩略图可点选');
 });
 
-test('媒体详情：点选有标签的媒体 → 高亮标签；点选无标签的媒体 → 高亮添加标签', async () => {
+test('媒体详情：选中媒体只是选中；改标签必须点「🏷 编辑标签」（与编辑描述一致）', async () => {
     const env = await boot();
     await goto(env, 'media');
     await act(env, { action: 'open-media', group: '-100_1' });
@@ -729,18 +848,29 @@ test('媒体详情：点选有标签的媒体 → 高亮标签；点选无标签
     const block1 = body.querySelectorAll('.msg-block').find(b => b.dataset.msg === 'AQAD1');
     const block2 = body.querySelectorAll('.msg-block').find(b => b.dataset.msg === 'AQAD2');
     assert.ok(block1.classList.contains('is-active'), '选中的消息块高亮');
-    assert.ok(block1.querySelector('.tag-edit').classList.contains('is-active'), '标签区解锁高亮');
-    assert.strictEqual(block1.querySelector('.tag-add-btn').disabled, false, '添加标签按钮可点');
-    assert.ok(!block1.querySelector('.tag-add-btn').classList.contains('is-highlight'), '已有标签时不高亮添加按钮');
+    assert.ok(block1.querySelector('.tag-edit').classList.contains('is-locked'), '选中后标签区仍锁定，不能直接改');
+    assert.strictEqual(block1.querySelector('.tag-add-btn').disabled, true, '选中后「添加标签」仍不可点');
     assert.ok(!block2.classList.contains('is-active'), '其他消息块保持常规');
 
-    // 选中 AQAD2（无标签）→ 高亮「添加标签」
+    // 点「🏷 编辑标签」→ 解锁标签编辑并展开输入区
+    await actDialog(env, { action: 'tag-edit', file: 'AQAD1' }, { tagName: 'BUTTON' });
+    const tagEdit = block1.querySelector('.tag-edit');
+    assert.ok(!tagEdit.classList.contains('is-locked'), '点「编辑标签」后解锁');
+    assert.ok(tagEdit.classList.contains('is-editing'), '标记为编辑态（✎ / ✕ 才出现）');
+    assert.strictEqual(block1.querySelector('.tag-add-btn').disabled, false, '添加标签按钮可点');
+    assert.ok(!block1.querySelector('.tag-add-btn').classList.contains('is-highlight'), '已有标签时不高亮添加按钮');
+    assert.ok(!block1.querySelector('.tag-picker').classList.contains('hidden'), '顺带展开标签输入区');
+
+    // 选中 AQAD2（无标签）→ 仍是锁定的，点编辑标签后高亮「添加标签」
     await actDialog(env, { action: 'detail-pick', file: 'AQAD2' }, { tagName: 'DIV' });
     const addBtn2 = block2.querySelector('.tag-add-btn');
     assert.ok(block2.classList.contains('is-active'));
+    assert.ok(block2.querySelector('.tag-edit').classList.contains('is-locked'), '刚选中时仍锁定');
+    assert.ok(!block1.classList.contains('is-active'), '上一个选中态被清除');
+
+    await actDialog(env, { action: 'tag-edit', file: 'AQAD2' }, { tagName: 'BUTTON' });
     assert.ok(addBtn2.classList.contains('is-highlight'), '没有标签时高亮「添加标签」');
     assert.strictEqual(addBtn2.disabled, false);
-    assert.ok(!block1.classList.contains('is-active'), '上一个选中态被清除');
 
     // 再点一次同一个媒体 = 取消选中（回到灰色常规态）
     await actDialog(env, { action: 'detail-pick', file: 'AQAD2' }, { tagName: 'DIV' });
@@ -948,7 +1078,7 @@ function isInsideMsgList(block) {
     return false;
 }
 
-test('媒体详情：点选没有描述的媒体 → 在「描述与标签」区置顶出现唯一的新增块', async () => {
+test('媒体详情：点选没有描述的媒体 → 在「描述与标签」区置顶出现唯一的新增块（但需点按钮才进入编辑）', async () => {
     const env = await boot();
     await goto(env, 'media');
     await act(env, { action: 'open-media', group: '-100_3' });
@@ -971,11 +1101,20 @@ test('媒体详情：点选没有描述的媒体 → 在「描述与标签」区
     assert.strictEqual(body.querySelectorAll('.section').length, sectionsBefore, 'section 数量不变（没有多出一段）');
     assert.strictEqual((body.innerHTML.match(/<h4>描述与标签<\/h4>/g) || []).length, 1, '「描述与标签」标题只有一个');
     assert.ok(body.querySelector('.detail-msg-list').children.some(c => c.tagName === 'H4') === false, '容器里只有块，不重复标题');
-    assert.ok(!block.querySelector('.msg-editor').classList.contains('hidden'), '直接进入描述编辑态');
-    assert.strictEqual(block.querySelector('.tag-add-btn').disabled, false, '添加标签按钮可点');
-    assert.ok(block.querySelector('.tag-add-btn').classList.contains('is-highlight'), '没有标签时高亮添加按钮');
+    // 与已有描述的媒体一致：点选只是选中，不自动进入描述 / 标签编辑
+    assert.ok(block.querySelector('.msg-editor').classList.contains('hidden'), '不自动展开描述编辑区');
+    assert.ok(block.querySelector('.tag-edit').classList.contains('is-locked'), '标签区仍锁定');
+    assert.strictEqual(block.querySelector('.tag-add-btn').disabled, true, '添加标签按钮仍不可点');
+    assert.ok(block.querySelector('.tag-picker').classList.contains('hidden'), '标签输入区默认收起');
     assert.strictEqual(block.querySelector('.tag-add-submit').dataset.file, 'AQAD31');
     assert.strictEqual(body.querySelector('.detail-msg-list').querySelectorAll('.empty').length, 1, '空态提示仍在同一容器里');
+    // 点「✏️ 编辑描述」才展开描述编辑
+    await actDialog(env, { action: 'desc-edit', file: 'AQAD31' }, { tagName: 'BUTTON' });
+    assert.ok(!block.querySelector('.msg-editor').classList.contains('hidden'), '点编辑描述后展开');
+    // 点「🏷 编辑标签」才解锁标签并高亮「添加标签」
+    await actDialog(env, { action: 'tag-edit', file: 'AQAD31' }, { tagName: 'BUTTON' });
+    assert.strictEqual(block.querySelector('.tag-add-btn').disabled, false, '编辑标签后添加按钮可点');
+    assert.ok(block.querySelector('.tag-add-btn').classList.contains('is-highlight'), '没有标签时高亮添加按钮');
 
     // 改点另一条没有描述的媒体 → 新增块跟着切换，数量仍为 1
     await actDialog(env, { action: 'detail-pick', file: 'AQAD32' }, { tagName: 'DIV' });
@@ -1050,11 +1189,17 @@ test('媒体详情：点「➕ 添加标签」展开标签选择区，可点标�
     await goto(env, 'media');
     await act(env, { action: 'open-media', group: '-100_1' });
     await actDialog(env, { action: 'detail-pick', file: 'AQAD1' }, { tagName: 'DIV' });
+    // 现在改标签要先点「🏷 编辑标签」解锁
+    await actDialog(env, { action: 'tag-edit', file: 'AQAD1' }, { tagName: 'BUTTON' });
 
     const body = env.document.querySelector('#detail-body');
     const block = body.querySelectorAll('.msg-block').find(b => b.dataset.msg === 'AQAD1');
     const picker = block.querySelector('.tag-picker');
-    assert.ok(picker.classList.contains('hidden'), '默认收起标签选择区');
+    assert.ok(!picker.classList.contains('hidden'), '「编辑标签」会顺带展开标签选择区');
+
+    // 先收起，再单独验证「➕ 添加标签」的展开 / 收起
+    await actDialog(env, { action: 'tag-cancel', file: 'AQAD1' }, { tagName: 'BUTTON' });
+    assert.ok(picker.classList.contains('hidden'), '取消后收起标签选择区');
 
     // 「➕ 添加标签」后面就跟着一个「取消」（默认隐藏，展开时显示）
     assert.match(body.innerHTML, /data-action="tag-add-prompt" data-file="AQAD1"[^>]*>➕ 添加标签<\/button>\s*<button class="btn btn-ghost btn-xs tag-cancel-btn hidden" data-action="tag-cancel" data-file="AQAD1">取消<\/button>/);
@@ -1071,14 +1216,22 @@ test('媒体详情：点「➕ 添加标签」展开标签选择区，可点标�
     assert.ok(!cancelBtn.classList.contains('hidden'), '展开后标签行的取消按钮出现');
     assert.ok(!cancelSubmit.classList.contains('hidden'), '展开后输入框行的取消按钮可见');
 
-    // 点「取消」→ 收起并清空输入，不写库
+    // 点「取消」→ 收起并清空输入、同时退出标签编辑态，不写库
     block.querySelector('.tag-input').value = '写了一半';
     const before = env.requests.length;
     await actDialog(env, { action: 'tag-cancel', file: 'AQAD1' }, { tagName: 'BUTTON' });
     assert.ok(picker.classList.contains('hidden'), '取消后收起标签选择区');
     assert.ok(cancelBtn.classList.contains('hidden'), '取消后标签行的取消按钮隐藏');
     assert.strictEqual(block.querySelector('.tag-input').value, '', '取消会清空输入框');
+    // 关键：取消要退出编辑态，否则标签胶囊的 ✎ / ✕ 还留在可点状态（看着像“没取消掉”）
+    assert.ok(!block.querySelector('.tag-edit').classList.contains('is-editing'), '取消后退出标签编辑态');
+    assert.strictEqual(block.querySelector('.tag-add-btn').disabled, true, '取消后「添加标签」重新不可点');
     assert.strictEqual(env.requests.length, before, '取消不发起任何请求');
+
+    // 重新点「🏷 编辑标签」→ 又能编辑（说明取消只是退出编辑，不是禁用）
+    await actDialog(env, { action: 'tag-edit', file: 'AQAD1' }, { tagName: 'BUTTON' });
+    assert.ok(block.querySelector('.tag-edit').classList.contains('is-editing'), '可再次进入编辑态');
+    assert.strictEqual(block.querySelector('.tag-add-btn').disabled, false);
 
     // 展开后用输入框的「➕ 添加」提交（输入框有值、按钮没有 data-tag）
     await actDialog(env, { action: 'tag-add-prompt', file: 'AQAD1' }, { tagName: 'BUTTON' });
@@ -1090,17 +1243,18 @@ test('媒体详情：点「➕ 添加标签」展开标签选择区，可点标�
     await actDialog(env, { action: 'tag-add', file: 'AQAD1', tag: 'BBB' }, { tagName: 'BUTTON' });
     assert.deepStrictEqual(lastRequest(env, '/api/media/tags', 'POST').body, { fileUniqueId: 'AQAD1', add: ['BBB'], remove: [] });
 
-    // 再点一次「➕ 添加标签」本身也能收起（保留原行为）
-    // 注意：上面两次添加都会重渲染详情，必须重新取节点
+    // 提交后详情会重渲染，且该块会保持「标签编辑态」（方便连续加标签）
     const block2 = env.document.querySelector('#detail-body').querySelectorAll('.msg-block').find(b => b.dataset.msg === 'AQAD1');
     const picker2 = block2.querySelector('.tag-picker');
-    await actDialog(env, { action: 'tag-add-prompt', file: 'AQAD1' }, { tagName: 'BUTTON' });
-    assert.ok(!picker2.classList.contains('hidden'), '重新展开');
+    assert.ok(!picker2.classList.contains('hidden'), '提交后仍保持展开，可连续改标签');
+    assert.ok(block2.querySelector('.tag-edit').classList.contains('is-editing'), '提交后仍处于标签编辑态');
+
+    // 再点一次「➕ 添加标签」本身也能收起（保留原行为）
     await actDialog(env, { action: 'tag-add-prompt', file: 'AQAD1' }, { tagName: 'BUTTON' });
     assert.ok(picker2.classList.contains('hidden'), '再点一次收起');
 });
 
-test('媒体详情：选中后标签区解锁（is-locked 必须移除，否则 CSS pointer-events 点不动）', async () => {
+test('媒体详情：点「🏷 编辑标签」才解锁标签区（is-locked 必须移除，否则 CSS pointer-events 点不动）', async () => {
     const env = await boot();
     await goto(env, 'media');
     await act(env, { action: 'open-media', group: '-100_1' });
@@ -1111,14 +1265,20 @@ test('媒体详情：选中后标签区解锁（is-locked 必须移除，否则 
     assert.ok(block1.querySelector('.tag-edit').classList.contains('is-locked'), '未选中时锁定');
     assert.ok(!block1.querySelector('.tag-edit').classList.contains('is-active'));
 
+    // 选中：块高亮置顶，但标签仍锁定
     await actDialog(env, { action: 'detail-pick', file: 'AQAD1' }, { tagName: 'DIV' });
-    assert.ok(!block1.querySelector('.tag-edit').classList.contains('is-locked'), '选中后必须解锁');
-    assert.ok(block1.querySelector('.tag-edit').classList.contains('is-active'));
+    assert.ok(block1.querySelector('.tag-edit').classList.contains('is-locked'), '选中不等于解锁');
     assert.ok(block2.querySelector('.tag-edit').classList.contains('is-locked'), '其他媒体仍锁定');
+
+    // 点「🏷 编辑标签」：解锁
+    await actDialog(env, { action: 'tag-edit', file: 'AQAD1' }, { tagName: 'BUTTON' });
+    assert.ok(!block1.querySelector('.tag-edit').classList.contains('is-locked'), '点编辑标签后必须解锁');
+    assert.ok(block1.querySelector('.tag-edit').classList.contains('is-editing'));
 
     // 每个标签都带 ✎（改名）与 ✕（移除）按钮
     assert.match(body.innerHTML, /data-action="tag-rename" data-file="AQAD1"/);
     assert.match(body.innerHTML, /data-action="tag-remove" data-file="AQAD1"/);
+    assert.match(body.innerHTML, /data-action="tag-edit" data-file="AQAD1"/, '有「🏷 编辑标签」入口');
 
     // 取消选中 → 重新锁定
     await actDialog(env, { action: 'detail-pick', file: 'AQAD1' }, { tagName: 'DIV' });
@@ -1153,7 +1313,7 @@ test('媒体详情：标签「✎ 改名」提交到 /api/tags/rename 并刷新�
     assert.deepStrictEqual(lastRequest(env, '/api/tags/rename', 'POST').body, { name: 'JK', to: 'JK2' });
 });
 
-test('媒体详情：只有一个媒体的组自动选中，标签区直接可点', async () => {
+test('媒体详情：只有一个媒体的组自动选中；点「🏷 编辑标签」后即可改标签', async () => {
     const env = await boot();
     await goto(env, 'media');
     await act(env, { action: 'open-media', group: '-100_4' });
@@ -1161,10 +1321,13 @@ test('媒体详情：只有一个媒体的组自动选中，标签区直接可�
     const body = env.document.querySelector('#detail-body');
     const block = body.querySelectorAll('.msg-block').find(b => b.dataset.msg === 'AQAD41');
     assert.ok(block.classList.contains('is-active'), '唯一的媒体自动选中');
-    assert.ok(!block.querySelector('.tag-edit').classList.contains('is-locked'), '标签区解锁');
+    assert.ok(block.querySelector('.tag-edit').classList.contains('is-locked'), '自动选中不解锁标签（需点编辑标签）');
+
+    await actDialog(env, { action: 'tag-edit', file: 'AQAD41' }, { tagName: 'BUTTON' });
+    assert.ok(!block.querySelector('.tag-edit').classList.contains('is-locked'), '点编辑标签后解锁');
     assert.strictEqual(block.querySelector('.tag-add-btn').disabled, false, '添加标签按钮可点');
 
-    // 直接就能移除已有标签
+    // 解锁后就能移除已有标签
     await actDialog(env, { action: 'tag-remove', file: 'AQAD41', tag: 'JK' }, { tagName: 'BUTTON' });
     assert.deepStrictEqual(lastRequest(env, '/api/media/tags', 'POST').body, { fileUniqueId: 'AQAD41', add: [], remove: ['JK'] });
 });
@@ -1174,7 +1337,7 @@ test('媒体详情：标签输入支持空格分隔多个 + `-标签` 移除（�
     await goto(env, 'media');
     await act(env, { action: 'open-media', group: '-100_1' });
     await actDialog(env, { action: 'detail-pick', file: 'AQAD1' }, { tagName: 'DIV' });
-    await actDialog(env, { action: 'tag-add-prompt', file: 'AQAD1' }, { tagName: 'BUTTON' });
+    await actDialog(env, { action: 'tag-edit', file: 'AQAD1' }, { tagName: 'BUTTON' });
 
     const body = env.document.querySelector('#detail-body');
     const block = body.querySelectorAll('.msg-block').find(b => b.dataset.msg === 'AQAD1');

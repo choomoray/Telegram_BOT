@@ -355,12 +355,29 @@ select { appearance: none; padding-right: 26px;
   position: relative; aspect-ratio: 16 / 10; background: var(--surface-2);
   display: grid; place-items: center; overflow: hidden; border-bottom: 1px solid var(--border-soft);
 }
-.media-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-/* 悬停：缩略图本身切到 contain（不再裁切，整图可见），并弹出放大预览（见 .thumb-zoom） */
-.media-thumb:hover img { object-fit: contain; }
 .media-thumb .ph { font-size: 30px; opacity: .55; }
-.media-thumb .badges { position: absolute; left: 8px; top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
-.media-thumb .badges .tag { backdrop-filter: blur(6px); background: color-mix(in srgb, var(--surface) 78%, transparent); }
+
+/* ---------- 媒体封面 ----------
+   预览框固定尺寸，封面是一层 background-image（.thumb-img），cover 裁切填满。
+   不做「悬停缩放到全貌」那套了：鼠标停够时间后弹出大图（.thumb-zoom），
+   同时把鼠标所在的这张小预览图模糊掉（.is-blur，带过渡），视线自然转到清晰的大图上。
+   标记：媒体库卡片 / 随机推荐 / 详情媒体条都走 .media-thumb，媒体详情条另有 .detail-thumb。 */
+.media-thumb .thumb-img,
+.detail-thumb .thumb-img {
+  position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  background-position: center; background-repeat: no-repeat;
+  background-size: cover;
+  transition: filter 320ms var(--ease), transform 320ms var(--ease);
+}
+/* 封面里那张只为读 naturalWidth/Height 的隐形真图（不参与显示） */
+.thumb-src { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+/* 大图出现中 / 已出现：小预览图模糊 + 轻微变暗，突出右侧那张清晰的大图 */
+.media-thumb.is-blur .thumb-img,
+.detail-item.is-blur .detail-thumb .thumb-img { filter: blur(7px) brightness(.72) saturate(.9); }
+/* 缩略图加载失败：清掉封面层，只留类型图标占位 */
+.media-thumb.is-fallback .thumb-img { display: none; }
+/* 卡片状态徽标（保留 / 可清理 / 类型）：不再压在封面上，改到描述下方的文字区 */
+.media-badges { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
 /* 预览图右下角的文件类型角标（图片 / 视频 / 音频 / 文件） */
 .thumb-type {
   position: absolute; right: 6px; bottom: 6px; z-index: 2;
@@ -382,7 +399,13 @@ select { appearance: none; padding-right: 26px;
 .media-text.is-empty { color: var(--text-3); font-style: italic; }
 .tags-line { display: flex; flex-wrap: wrap; gap: 5px; }
 .tag-pill { font-size: 11px; padding: 1.5px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.media-meta { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-3); margin-top: auto; }
+/* 卡片底部信息：横向一行排布（媒体数 / 组数 / 位置 / group_id），不换行、过长省略 */
+.media-meta {
+  display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--text-3); margin-top: auto; min-width: 0; white-space: nowrap;
+}
+.media-meta > span { flex: 0 0 auto; overflow: hidden; text-overflow: ellipsis; }
+.media-meta .spacer { flex: 1 1 auto; overflow: visible; }
 .media-meta .mono { font-size: 11px; }
 
 /* ---------- 表格（用户） ---------- */
@@ -479,6 +502,8 @@ td.right, th.right { text-align: right; }
   font-family: inherit; font-size: 12px; cursor: pointer; writing-mode: vertical-rl;
 }
 .dock-toggle:hover { background: var(--hover); color: var(--text); }
+/* 折叠后只剩这个竖排按钮：里面放一颗状态小灯（与左侧导航的日志灯同步闪烁连接状态） */
+.dock-toggle .dot { margin: 0; flex: 0 0 auto; }
 .app.dock-collapsed .dock-toggle { display: flex; }
 .app.dock-collapsed .dock-body { display: none; }
 .dock-body { display: flex; flex-direction: column; min-height: 0; flex: 1; }
@@ -499,7 +524,7 @@ td.right, th.right { text-align: right; }
 /* ---------- 对话框 ---------- */
 .dialog {
   border: 1px solid var(--border); border-radius: 16px; padding: 0; color: var(--text);
-  background: var(--surface); box-shadow: var(--shadow-3); width: min(880px, calc(100vw - 32px));
+  background: var(--surface); box-shadow: var(--shadow-3); width: min(1180px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);
 }
 .dialog-sm { width: min(460px, calc(100vw - 32px)); }
@@ -515,9 +540,41 @@ td.right, th.right { text-align: right; }
 .detail-item { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface-2); }
 .detail-item .cap { padding: 6px 8px; font-size: 11px; color: var(--text-3); display: flex; justify-content: space-between; gap: 6px; }
 .detail-item .ph { aspect-ratio: 1; display: grid; place-items: center; font-size: 26px; opacity: .6; }
-.detail-item img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
-/* 悬停：详情里的媒体缩略图同样不再裁切（整图可见），并把放大预览浮层显示在它旁边 */
-.detail-item:hover img { object-fit: contain; }
+/* 详情条封面同样是 .thumb-img 背景层（悬停整图可见，见上面「媒体封面」段） */
+.detail-thumb { aspect-ratio: 1; }
+/* 媒体详情：左右两栏，各自独立上下滚动 ——
+   左栏只放媒体条（组里媒体很多时在左栏里翻），右栏放定位信息 + 描述与标签（编辑都在右栏）。 */
+.detail-main {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 34%);
+  gap: 16px; align-items: stretch; min-height: min(54vh, 540px);
+}
+.detail-left, .detail-aside { min-height: 0; }
+.detail-left {
+  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+  padding: 12px 14px; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.detail-left > h4 { flex: 0 0 auto; margin-bottom: 2px; }
+.detail-left .detail-strip { flex: 0 0 auto; }
+.detail-aside {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 14px 4px;
+}
+.detail-aside > h4 { flex: 0 0 auto; }
+/* 定位信息现在排在「描述与标签」下面（与描述块列表互换位置） */
+.detail-aside > .detail-positions { flex: 0 0 auto; margin: 10px 0 12px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+/* 只有描述块列表滚动，标题与定位信息保持可见 */
+.detail-aside > .detail-msg-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 10px; }
+/* 详情条下方的常驻说明：不用原生 title 提示（会飘在图片上挡住画面） */
+.thumb-tip { padding: 0 8px 7px; font-size: 10.5px; line-height: 1.45; color: var(--text-3); }
+.detail-item.is-active .thumb-tip { color: var(--accent); }
+@media (max-width: 980px) {
+  .detail-main { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .detail-left, .detail-aside { overflow: visible; }
+  .detail-aside > .detail-msg-list { overflow: visible; }
+}
+
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 12.5px; }
 .kv .k { color: var(--text-3); }
 .kv .v { min-width: 0; overflow-wrap: anywhere; }
@@ -693,18 +750,53 @@ html[data-theme="light"] {
 .table-scroll { overflow-x: auto; }
 
 /* ---------- 缩略图悬停放大：整图可见（不裁切） ----------
-   缩略图用 object-fit: cover 裁切，浮层挂在 body 或「已打开的对话框」里，
-   用 position: fixed + object-fit: contain 展示完整图片，不受任何容器裁切。 */
+   缩略图用 background-size: cover 裁切，浮层挂在 body 或「已打开的对话框」里，
+   用 position: fixed + object-fit: contain 展示完整图片，不受任何容器裁切。
+   悬停满 0.18 秒才出现，从封面角上那个转圈的位置放大展开（transform-origin 由 JS 设为该角）；
+   出现 / 收起都有缩放 + 淡入淡出动画，不会生硬地「啪」一下。 */
 .thumb-zoom {
   position: fixed; z-index: 90; display: none; pointer-events: none;
   border: 1px solid var(--border-strong); border-radius: var(--radius);
   background: var(--surface-2); box-shadow: var(--shadow-3); overflow: hidden;
 }
-.thumb-zoom.is-on { display: block; animation: thumb-zoom-in var(--speed) var(--ease); }
+/* .is-off 必须在 .is-on 之后：收起时保持 display: block 把缩小动画播完，再由 JS 摘掉类 */
+.thumb-zoom.is-on { display: block; animation: thumb-zoom-in 240ms var(--ease); }
+.thumb-zoom.is-off { display: block; animation: thumb-zoom-out 200ms var(--ease) forwards; }
 .thumb-zoom img { width: 100%; height: 100%; object-fit: contain; display: block; }
+/* 封面角上的加载转圈（等待大图期间循环转动） */
+.thumb-load {
+  position: absolute; width: 20px; height: 20px; z-index: 3; pointer-events: none;
+  border-radius: 50%; border: 2px solid rgba(255, 255, 255, .32); border-top-color: #fff;
+  background: rgba(3, 7, 14, .32); backdrop-filter: blur(4px);
+  display: none; opacity: 0; transition: opacity 200ms var(--ease);
+  animation: thumb-spin .72s linear infinite;
+}
+/* 四个角：按浮层展开方向点亮其中一个（靠近预览图的一角） */
+.thumb-load.is-on { display: block; opacity: 1; }
+.thumb-load.is-top-left { left: 8px; top: 8px; }
+.thumb-load.is-top-right { right: 8px; top: 8px; }
+.thumb-load.is-bottom-left { left: 8px; bottom: 8px; }
+.thumb-load.is-bottom-right { right: 8px; bottom: 8px; }
+/* 等待大图时给封面一点内描边，暗示「马上要放大」 */
+.media-thumb.is-waiting, .detail-item.is-waiting { box-shadow: inset 0 0 0 1px var(--accent-soft); }
+@keyframes thumb-spin { to { transform: rotate(360deg); } }
+/* 从转圈那一角放大展开 / 缩回：240ms / 200ms —— 顺滑但不拖沓 */
 @keyframes thumb-zoom-in {
-  from { opacity: 0; transform: scale(.94); }
+  from { opacity: 0; transform: scale(.32); }
   to { opacity: 1; transform: none; }
+}
+@keyframes thumb-zoom-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: scale(.32); }
+}
+/* 尊重「减少动态效果」：不做模糊底与放大动画。
+   注意 .thumb-img 故意不在这里禁用过渡 —— 封面缩放是这个界面的核心观感，
+   关掉会变成「啪」一下硬切，比动画本身更刺眼。 */
+@media (prefers-reduced-motion: reduce) {
+  .thumb-load { transition: none; }
+  .thumb-load { animation-duration: 1.6s; }
+  .thumb-zoom.is-on, .thumb-zoom.is-off { animation: none; }
+  .thumb-zoom.is-off { display: none; }
 }
 
 /* ---------- 数据库视图：集合明细表可点行切换浏览 ---------- */
@@ -754,11 +846,15 @@ html[data-theme="light"] {
 .msg-block.is-draft .msg-input { border-color: var(--accent); }
 /* 常规（未选中）时标签区灰掉且不可点 */
 .tag-edit.is-locked { opacity: .5; filter: grayscale(.4); pointer-events: none; }
-/* 选中后必须重新打开鼠标事件，否则「➕ 添加标签」和标签上的 ✕ / ✎ 都点不动 */
+/* 选中媒体后只是把它置顶，标签仍锁定；点「🏷 编辑标签」才进入编辑态 */
 .tag-edit.is-active { opacity: 1; filter: none; pointer-events: auto; }
+/* ✎ 改名 / ✕ 移除 只在进入编辑态后出现（与「✏️ 编辑描述」一致：需要显式点一下） */
 .tag-edit .tag-pill button { display: none; }
-.tag-edit.is-active .tag-pill button { display: inline; }
-.tag-edit.is-active .tag-pill { background: var(--accent); color: #fff; }
+.tag-edit.is-editing .tag-pill button { display: inline; }
+.tag-edit.is-editing .tag-pill { background: var(--accent); color: #fff; }
+/* 「🏷 编辑标签」按钮：选中某个块后才出现 */
+.tag-edit-btn { display: none; }
+.msg-block.is-active .tag-edit-btn, .msg-block.is-draft .tag-edit-btn { display: inline-flex; }
 .tag-edit .tag-add-btn { font-size: 11.5px; }
 .tag-edit.is-active .tag-add-btn.is-highlight {
   border-color: var(--accent); color: var(--accent); background: var(--accent-soft);

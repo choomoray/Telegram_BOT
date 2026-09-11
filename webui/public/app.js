@@ -57,7 +57,7 @@
     collectionsView: { q: '', type: 'all', items: [], counts: { all: 0, collection: 0, misc: 0 } }, // 「合集 / 杂集」视图数据
     dbstats: { data: null },
     random: {
-      types: [], tags: [], tagMode: 'any', q: '', duration: 'all', scope: 'all', count: 6,
+      types: [], tags: [], tagMode: 'any', q: '', duration: 'all', scope: 'all', count: 20,
       items: [], total: 0
     },
     stats: { year: new Date().getFullYear(), metric: 'all', data: null },
@@ -67,7 +67,7 @@
     detailSelectedFile: null,          // 媒体详情里当前选中的媒体（决定哪条标签可改）
     detailTag: null,                   // 标签详情里当前查看的标签（异步加载媒体列表时防串台）
     tagsMode: 'normal',                // 标签视图模式：normal | delete | sort
-    logPaused: false, logFilter: 'all', logBuffer: [], loading: false
+    logPaused: false, logFilter: 'all', logBuffer: [], loading: false, showPromise: null, pendingView: null
   };
 
   /* ============================ 基础设施 ============================ */
@@ -104,16 +104,102 @@
     return `${API}/thumb?fileUniqueId=${encodeURIComponent(fileUniqueId)}&token=${encodeURIComponent(token())}`;
   }
 
-  /* ---------------- 预览图悬停放大（媒体库卡片 / 媒体详情条） ----------------
-     缩略图用 object-fit: cover 裁切显示，鼠标移上去时：
-       1) 缩略图本身切到 contain，不再裁切；
-       2) 在旁边弹出一个固定定位的浮层，用完整比例的图片展示放大预览（不裁切）。
+  /**
+   * 封面缩略图（媒体库卡片 / 随机推荐 / 详情媒体条通用）。
+   * 用 background-image 而不是 <img>：方便统一控制裁切、模糊（.is-blur）与加载失败降级。
+   * 预览框尺寸固定、cover 裁切；悬停放大交给 .thumb-zoom 大图，小图只做模糊处理。
+   * 加载失败 → is-fallback，由 JS 换成类型图标占位。
+   */
+  function thumbCover(source) {
+    const id = typeof source === 'string' ? source : (source && source.file_unique_id);
+    if (!id) return '';
+    const url = thumbUrl(id);
+    // 封面图（background-size: cover 裁切填满）+ 内部那张只为读尺寸的隐形真图
+    return `<span class="thumb-img" data-src="${esc(url)}" style="background-image:url('${url}')">${thumbProbe(url)}</span>`;
+  }
+
+  /**
+   * 封面里放一张「不可见的真图」：只为拿到图片真实宽高（大图要按图片比例展示）。
+   * background-image 拿不到 naturalWidth/Height，这张图也顺带兜住加载失败的降级。
+   * 用内联钩子而不是 addEventListener：卡片会被反复重渲染，钩子只挂在 window 上一次。
+   */
+  function thumbProbe(url) {
+    return `<img class="thumb-src" alt="" src="${url}" loading="lazy" decoding="async"
+      onload="window.__thumbLoad&&window.__thumbLoad(this)"
+      onerror="window.__thumbFail&&window.__thumbFail(this)">`;
+  }
+
+  /** 封面里记录下来的图片真实比例（没有就返回 0，调用方退回封面比例） */
+  function coverRatio(cover) {
+    const img = cover && cover.querySelector ? cover.querySelector('.thumb-src') : null;
+    const r = img && img.dataset ? Number(img.dataset.ratio) : 0;
+    return r > 0 ? r : 0;
+  }
+
+  /** 缩略图加载失败 / 不可缩略：清掉图片层，退回类型图标占位 */
+  function thumbFallback(wrap) {
+    if (!wrap || !wrap.classList) return;
+    wrap.classList.add('is-fallback');
+    const box = wrap.querySelector('.thumb-img');
+    if (box) box.remove();
+    if (!wrap.querySelector('.ph')) {
+      const span = document.createElement('span');
+      span.className = 'ph';
+      span.textContent = '🖼';
+      wrap.prepend(span);
+    }
+  }
+
+
+  /* ---------------- 预览图悬停放大（媒体库卡片 / 随机推荐 / 媒体详情条） ----------------
+     封面是 background-image 层（见 .thumb-img）：
+       1) 悬停满 ZOOM_DELAY 后，在旁边弹出整图放大浮层（.thumb-zoom）；
+          同时把鼠标所在那张小预览图模糊掉（.is-blur，带过渡）——
+          视线自然转到清晰的大图上，也不用再做「缩放到全貌」那套缩放；
+       2) 等待期间：浮层将出现位置的那一角显示一个小转圈（.thumb-load），
+          浮层出现时从转圈所在的一角放大展开（transform-origin 对齐该角）。
      浮层挂在 body 上；若此时有对话框打开（原生 dialog 在顶层，挂 body 会被盖住），就挂进该对话框。 */
 
-  const ZOOM_MAX = 460;   // 放大预览最大边长（px）
-  const ZOOM_GAP = 14;    // 与缩略图的间距 / 距视口边缘的安全距离
-  let zoomLayer = null;   // 浮层元素（懒创建）
-  let zoomImg = null;     // 当前正在放大的缩略图
+  const ZOOM_MAX = 460;    // 放大预览最大边长（px）
+  const ZOOM_GAP = 14;     // 与缩略图的间距 / 距视口边缘的安全距离
+  const ZOOM_DELAY = 130;  // 悬停满多久才弹出放大预览（期间显示加载转圈）
+  const ZOOM_OUT_MS = 200; // 浮层「缩小消失」动画时长（与 CSS 里 .is-off 保持一致）
+  let zoomLayer = null;    // 浮层元素（懒创建）
+  let zoomImg = null;      // 当前正在放大的封面层
+  let zoomWrap = null;     // 当前正在放大的封面容器
+  let zoomTimer = null;    // 「悬停满 ZOOM_DELAY 再展开」的定时器
+  let zoomOutTimer = null; // 收起浮层动画结束后的清理定时器
+  let zoomPending = null;  // 已排定展开的封面
+  let zoomSpinner = null;  // 当前显示在封面角上的加载转圈
+  const thumbRatioCache = new Map(); // 缩略图地址 → 图片真实比例（大图按图片比例展示）
+
+  /** 展开延迟：默认 0.13 秒；测试可用 window.__thumbZoomDelay 覆盖 */
+  function zoomDelay() {
+    const override = window.__thumbZoomDelay;
+    return Number.isFinite(override) && override >= 0 ? override : ZOOM_DELAY;
+  }
+
+  /** 大图出现时把小的预览图模糊掉（带过渡，由 CSS 的 .is-blur 负责） */
+  function setCoverBlur(wrap, on) {
+    if (!wrap || !wrap.classList) return;
+    wrap.classList.toggle('is-blur', !!on);
+  }
+
+  /** 记下图片真实比例（大图按它撑开，避免被封面的 16:10 / 1:1 裁切比例带偏） */
+  function cacheRatio(url, w, h) {
+    if (url && w && h) thumbRatioCache.set(url, w / h);
+  }
+
+  /**
+   * 取图片真实比例：优先用封面里 .thumb-src 记下的值（<img> onload 写进 data-ratio），
+   * 再看缓存；都没有就退回封面比例（detail 条是 1:1，卡片是 16:10）。
+   */
+  function ratioFor(src, cover, fallback) {
+    const own = coverRatio(cover);
+    if (own) return own;
+    const cached = thumbRatioCache.get(src);
+    return cached || fallback;
+  }
 
   /** 触屏设备没有 hover，不启用（避免点一下浮层不消失） */
   function hoverEnabled() {
@@ -124,13 +210,31 @@
     }
   }
 
-  /** 从事件目标找到它所属的缩略图 <img>（媒体库卡片 / 详情媒体条） */
-  function thumbImgFrom(target) {
+  /** 从事件目标找到它所属的封面容器（媒体库卡片 / 随机推荐卡片 / 详情媒体条） */
+  function thumbBoxFrom(target) {
     if (!target || !target.closest) return null;
-    const wrap = target.closest('.media-thumb') || target.closest('.detail-item');
-    if (!wrap) return null;
-    const img = wrap.querySelector ? wrap.querySelector('img') : null;
-    return img && img.src ? img : null;
+    // 分开探测，不用逗号选择器：兼容不支持多选择器的极简 DOM 实现
+    return target.closest('.media-thumb') || target.closest('.detail-item');
+  }
+
+  /** 容器里真正承载缩略图的元素（.thumb-img 背景层；加载失败被移除后就没有了） */
+  function coverEl(wrap) {
+    return wrap ? wrap.querySelector('.thumb-img') : null;
+  }
+
+  /** 该封面是否参与「悬停放大 + 延迟大图」（占位图标 / 加载失败的没有封面层，直接跳过） */
+  function zoomableBox(wrap) {
+    if (!wrap || !wrap.dataset || wrap.dataset.zoom !== '1') return null;
+    return coverEl(wrap);
+  }
+
+  /** 封面图片地址（.thumb-img 的 data-src / 背景图） */
+  function coverSrc(cover) {
+    if (!cover) return '';
+    if (cover.dataset && cover.dataset.src) return cover.dataset.src;
+    const bg = (cover.style && cover.style.backgroundImage) || '';
+    const m = /url\(["']?(.*?)["']?\)/.exec(bg);
+    return m ? m[1] : '';
   }
 
   /** 浮层挂载点：有打开的对话框就挂进对话框（原生 dialog 在顶层，挂 body 会被盖住），否则挂 body */
@@ -147,66 +251,208 @@
       zoomLayer = document.createElement('div');
       zoomLayer.className = 'thumb-zoom';
       zoomLayer.innerHTML = '<img alt="">';
+      const view = zoomLayer.querySelector('img');
+      if (view) {
+        view.addEventListener('load', () => {
+          const src = view.getAttribute('src');
+          cacheRatio(src, view.naturalWidth, view.naturalHeight);
+          // 图片真正加载出来后按图片真实比例再摆一次（加载前用的是封面比例）
+          if (src && zoomLayer.dataset.src === src && zoomImg && zoomWrap
+            && zoomLayer.classList.contains('is-on')) {
+            applyZoomSize(zoomLayer, zoomImg, ratioFor(src, zoomImg, view.naturalWidth / view.naturalHeight || 1));
+          }
+        });
+        view.addEventListener('error', () => {
+          // 这张缩略图取不到：收回浮层，别留个空框
+          if (zoomLayer.dataset.src === view.getAttribute('src')) hideThumbZoom();
+        });
+      }
+      // 收起动画播完就彻底摘掉类：万一 is-off 残留（切换页面、快速来回悬停），
+      // 元素会一直停在「缩小+透明」状态，看起来像是飘着一段没放完的放大动画
+      zoomLayer.addEventListener('animationend', () => {
+        if (zoomLayer.classList.contains('is-off')) zoomLayer.classList.remove('is-off');
+      });
     }
     const host = zoomHost();
     if (zoomLayer.parentElement !== host) host.appendChild(zoomLayer);
     return zoomLayer;
   }
 
-  /** 弹出放大预览（整图可见） */
-  function showThumbZoom(img) {
-    if (!hoverEnabled()) return;
-    const rect = img.getBoundingClientRect ? img.getBoundingClientRect() : null;
-    if (!rect || !rect.width || !rect.height) return;
+  /** 清掉「延迟展开」的等待状态：定时器 + 封面角上的加载转圈 */
+  function clearZoomWait() {
+    if (zoomTimer) { clearTimeout(zoomTimer); zoomTimer = null; }
+    zoomPending = null;
+    if (zoomSpinner) {
+      zoomSpinner.classList.remove('is-on');
+      if (zoomSpinner.parentElement) zoomSpinner.parentElement.classList.remove('is-waiting');
+      zoomSpinner = null;
+    }
+  }
+
+  /** 在封面靠近浮层那一角放一个加载转圈（.thumb-load，四个角各一个，按方向点亮） */
+  function armZoomSpinner(wrap, dir) {
+    if (!wrap || !hoverEnabled()) return;
+    let spinner = wrap.querySelector('.thumb-load');
+    if (!spinner) {
+      spinner = document.createElement('span');
+      spinner.className = 'thumb-load';
+      wrap.appendChild(spinner);
+    }
+    if (zoomSpinner && zoomSpinner !== spinner) {
+      zoomSpinner.classList.remove('is-on');
+      if (zoomSpinner.parentElement) zoomSpinner.parentElement.classList.remove('is-waiting');
+    }
+    spinner.className = `thumb-load is-${dir}`;
+    spinner.classList.add('is-on');
+    if (wrap.classList) wrap.classList.add('is-waiting');
+    zoomSpinner = spinner;
+  }
+
+  /**
+   * 放大浮层的目标位置 / 尺寸 / 展开角。
+   * rect 用「封面图元素」的矩形（不是整个卡片），这样浮层紧贴鼠标所在的那张预览图。
+   * 返回 dirX（浮层在封面的左/右）与 dirY（浮层中心在封面中心的上下方）→ 决定转圈画在哪个角。
+   */
+  function zoomTarget(rect, ratio) {
     const right = rect.right === undefined ? rect.left + rect.width : rect.right;
     const vw = window.innerWidth || 1280;
     const vh = window.innerHeight || 800;
-    // 原图宽高比（拿不到原始尺寸时退回缩略图比例）
-    const ratio = (img.naturalWidth && img.naturalHeight)
-      ? img.naturalWidth / img.naturalHeight
-      : rect.width / rect.height;
     const maxW = Math.max(180, Math.min(ZOOM_MAX, Math.round(vw * 0.6)));
     const maxH = Math.max(180, Math.min(ZOOM_MAX, Math.round(vh * 0.72)));
     let w = maxW;
     let h = Math.round(w / ratio);
     if (h > maxH) { h = maxH; w = Math.round(h * ratio); }
-    // 位置：优先贴在缩略图右侧，右边放不下改放左侧，最后夹进视口内
-    let left = right + ZOOM_GAP;
-    if (left + w > vw - ZOOM_GAP) left = rect.left - ZOOM_GAP - w;
-    if (left < ZOOM_GAP) left = Math.max(ZOOM_GAP, Math.min(vw - w - ZOOM_GAP, rect.left + rect.width / 2 - w / 2));
-    let top = rect.top + rect.height / 2 - h / 2;
-    top = Math.max(ZOOM_GAP, Math.min(vh - h - ZOOM_GAP, top));
 
-    const layer = ensureZoomLayer();
-    const view = layer.querySelector('img');
-    if (view && view.src !== img.src) view.src = img.src;
-    layer.style.left = `${Math.round(left)}px`;
-    layer.style.top = `${Math.round(top)}px`;
-    layer.style.width = `${w}px`;
-    layer.style.height = `${h}px`;
-    layer.classList.add('is-on');
-    zoomImg = img;
+    const dirX = (right + ZOOM_GAP + w > vw - ZOOM_GAP && rect.left - ZOOM_GAP - w >= ZOOM_GAP) ? 'left' : 'right';
+    let left = dirX === 'left' ? rect.left - ZOOM_GAP - w : right + ZOOM_GAP;
+    if (left + w > vw - ZOOM_GAP || left < ZOOM_GAP) {
+      // 左右都放不下（窄屏）→ 贴着封面居中
+      left = Math.max(ZOOM_GAP, Math.min(vw - w - ZOOM_GAP, rect.left + rect.width / 2 - w / 2));
+    }
+    const center = rect.top + rect.height / 2;
+    const top = Math.max(ZOOM_GAP, Math.min(vh - h - ZOOM_GAP, center - h / 2));
+    const dirY = center < vh / 2 ? 'top' : 'bottom';
+    return { left: Math.round(left), top: Math.round(top), w, h, dirX, dirY };
   }
 
-  function hideThumbZoom() {
+  /** 弹出放大预览：大图按「图片真实比例」展示（不裁切、不变形），从转圈那一角放大展开 */
+  function showThumbZoom(wrap, cover) {
+    if (!hoverEnabled()) return;
+    const rect = cover.getBoundingClientRect ? cover.getBoundingClientRect() : null;
+    if (!rect || !rect.width || !rect.height) return;
+    const src = coverSrc(cover);
+    const layer = ensureZoomLayer();
+    const view = layer.querySelector('img');
+    layer.dataset.src = src;
+    // 有原图尺寸就用原图比例；没有先按封面比例摆好，图片加载出来后自动校正
+    applyZoomSize(layer, cover, ratioFor(src, cover, rect.width / rect.height));
+    // src 相同时不要重复赋值，否则浏览器会重绘 / 闪一下
+    if (view && src && view.getAttribute('src') !== src) view.setAttribute('src', src);
+    // 重新触发「放大展开」动画：先摘掉类，下一帧再加回来（否则同一个元素第二次悬停不会播）。
+    // 关键：这一帧回调必须校验「这张图还是当前要放大的那张」——
+    // 否则用户在 130ms 延迟刚过就点侧边栏切页时，hideThumbZoom() 已经收起了浮层，
+    // 这一帧再把 is-on 加回去，就会在别的页面上冒出一次放大动画。
+    if (zoomOutTimer) { clearTimeout(zoomOutTimer); zoomOutTimer = null; }
+    layer.classList.remove('is-off');
+    layer.classList.remove('is-on');
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        if (zoomImg !== cover) return; // 已被收起 / 换成了别的封面，丢弃这一帧
+        layer.classList.add('is-on');
+      });
+    } else {
+      layer.classList.add('is-on');
+    }
+    zoomImg = cover;
+    zoomWrap = wrap;
+    setCoverBlur(wrap, true); // 小的预览图同时模糊掉（带过渡），视线交给大图
+  }
+
+  /** 按图片比例设置浮层尺寸 / 位置 / 展开角（保持浮层始终贴着那张预览图） */
+  function applyZoomSize(layer, cover, ratio) {
+    const rect = cover.getBoundingClientRect ? cover.getBoundingClientRect() : null;
+    if (!rect || !rect.width || !rect.height) return;
+    const at = zoomTarget(rect, ratio);
+    layer.style.transformOrigin = `${at.dirX === 'left' ? '100%' : '0%'} ${at.dirY === 'top' ? '0%' : '100%'}`;
+    layer.style.left = `${at.left}px`;
+    layer.style.top = `${at.top}px`;
+    layer.style.width = `${at.w}px`;
+    layer.style.height = `${at.h}px`;
+  }
+
+  /**
+   * 收起浮层：默认先播「缩小消失」动画（鼠标移开时用，观感平滑），
+   * 预览图同时恢复清晰。
+   * instant=true 时立刻隐藏 —— 用户点了卡片 / 点了侧边栏这种「有后续动作」的场景必须用这个：
+   * 否则浮层会带着 200ms 的缩小动画，正好悬在刚弹出的对话框上面（看起来就是「大图还挂在页面上」）。
+   */
+  function hideThumbZoom(instant = false) {
+    if (zoomWrap) setCoverBlur(zoomWrap, false);
     zoomImg = null;
-    if (zoomLayer) zoomLayer.classList.remove('is-on');
+    zoomWrap = null;
+    clearZoomWait();
+    if (!zoomLayer) return;
+    zoomLayer.classList.remove('is-on');
+    if (zoomOutTimer) { clearTimeout(zoomOutTimer); zoomOutTimer = null; }
+    if (instant) {
+      zoomLayer.classList.remove('is-off');
+      return;
+    }
+    zoomLayer.classList.add('is-off');
+    zoomOutTimer = setTimeout(() => {
+      zoomOutTimer = null;
+      if (zoomLayer) zoomLayer.classList.remove('is-off');
+    }, ZOOM_OUT_MS);
+  }
+
+  /** 鼠标停在封面上：先在「浮层将出现的那一角」显示加载转圈，0.13 秒后再展开大图 */
+  function scheduleThumbZoom(wrap, cover) {
+    if (!hoverEnabled() || zoomImg === cover || zoomPending === cover) return;
+    clearZoomWait();
+    // 转圈画在鼠标悬停的那张预览图上（不是整个卡片），位置取封面图元素本身
+    const host = wrap.querySelector('.detail-thumb') || wrap;
+    const anchor = cover.getBoundingClientRect ? cover.getBoundingClientRect() : null;
+    if (!anchor || !anchor.width || !anchor.height) return;
+    const at = zoomTarget(anchor, anchor.width / anchor.height);
+    // 「靠近预览图的一角」= 朝向浮层的那一角；浮层就从这里长出来
+    armZoomSpinner(host, `${at.dirY}-${at.dirX}`);
+    zoomPending = cover;
+    zoomTimer = setTimeout(() => {
+      zoomTimer = null;
+      zoomPending = null;
+      if (zoomSpinner) {
+        zoomSpinner.classList.remove('is-on');
+        if (zoomSpinner.parentElement) zoomSpinner.parentElement.classList.remove('is-waiting');
+        zoomSpinner = null;
+      }
+      showThumbZoom(wrap, cover);
+    }, zoomDelay());
+  }
+
+  /**
+   * 只取消「还在等延迟」的那次放大，不动已经显示出来的浮层。
+   * 点击时用这个：用户点东西时鼠标还停在预览图上，
+   * 若直接把浮层收掉（hideThumbZoom），移开/再触发就会又放大一次，来回闪。
+   */
+  function cancelPendingZoom() {
+    clearZoomWait();
   }
 
   /** 绑定悬停放大：媒体库 #view 与媒体详情对话框都要有（对话框在顶层，不在 #view 内） */
   function bindThumbZoomEvents(root) {
     if (!root || !root.addEventListener) return;
     root.addEventListener('mouseover', (e) => {
-      const img = thumbImgFrom(e.target);
-      if (!img || img === zoomImg) return;
-      showThumbZoom(img);
+      const wrap = thumbBoxFrom(e.target);
+      const cover = zoomableBox(wrap);
+      if (!cover || cover === zoomImg || cover === zoomPending) return;
+      scheduleThumbZoom(wrap, cover);
     });
     root.addEventListener('mouseout', (e) => {
-      const img = thumbImgFrom(e.target);
-      if (!img || img !== zoomImg) return;
+      const box = thumbBoxFrom(e.target);
+      if (!box) return;
       const to = e.relatedTarget;
-      // 在同一条预览内部移动（缩略图 → 徽标 / 说明）不算离开
-      if (to && img.parentElement && img.parentElement.contains && img.parentElement.contains(to)) return;
+      // 在同一个封面内部移动（缩略图 → 角标 / 卡片下方说明）不算离开，等待继续
+      if (to && box.contains && box.contains(to)) return;
       hideThumbZoom();
     });
     // 滚动 / 点击后缩略图位置会变，直接收起
@@ -707,7 +953,7 @@
   function mediaCard(item, action = 'open-media') {
     const p = item.preview;
     const thumb = p && p.thumbable
-      ? `<img loading="lazy" decoding="async" src="${thumbUrl(p.file_unique_id)}" alt="">`
+      ? thumbCover(p)
       : `<span class="ph">${typeIcon(p ? p.media_type : null)}</span>`;
     const typeTags = (item.types || []).map(t => `<span class="tag">${typeIcon(t)} ${typeLabel(t)}</span>`).join('');
     const loc = [
@@ -721,16 +967,16 @@
     const moreTags = (item.tags || []).length > 4 ? `<span class="tag-pill">+${item.tags.length - 4}</span>` : '';
 
     return `<article class="media-card" data-action="${esc(action)}" data-group="${esc(item.group_id)}">
-      <div class="media-thumb">
+      <div class="media-thumb" data-zoom="1">
         ${thumb}
         ${typeBadgeHtml(p ? p.media_type : null)}
-        <div class="badges">
-          <span class="tag ${item.cleanable ? 'warn' : 'ok'}">${item.cleanable ? '可清理' : '保留'}</span>
-          ${typeTags}
-        </div>
       </div>
       <div class="media-body">
         <div class="media-text ${item.text ? '' : 'is-empty'}">${text}</div>
+        <div class="media-badges">
+          <span class="tag ${item.cleanable ? 'warn' : 'ok'}">${item.cleanable ? '可清理' : '保留'}</span>
+          ${typeTags}
+        </div>
         <div class="tags-line">${tags}${moreTags}</div>
         <div class="media-meta">
           <span>${fmtNum(item.mediaCount)} 个媒体</span>
@@ -739,6 +985,7 @@
           <span>·</span>
           <span>${loc}</span>
           <span class="spacer"></span>
+          <span class="dim">点击进详情</span>
           <span class="mono">${esc(shortId(item.group_id, 14))}</span>
         </div>
       </div>
@@ -1531,7 +1778,7 @@
   /** 随机推荐卡片：单条媒体（点卡片进媒体组详情，↗ 直接跳 Telegram） */
   function randomCardHtml(item) {
     const thumb = item.thumbable
-      ? `<img loading="lazy" decoding="async" src="${thumbUrl(item.file_unique_id)}" alt="">`
+      ? thumbCover(item)
       : `<span class="ph">${typeIcon(item.media_type)}</span>`;
     const link = item.chat_id && item.message_id
       ? `https://t.me/c/${toLinkChatId(item.chat_id)}/${item.message_id}`
@@ -1540,22 +1787,22 @@
       ? esc(item.text.length > 90 ? item.text.slice(0, 90) + '…' : item.text)
       : '空描述（可清理）';
     const tags = (item.tags || []).slice(0, 4).map(t => `<span class="tag-pill">${esc(t)}</span>`).join('');
-    return `<article class="media-card" data-action="open-media" data-group="${esc(item.group_id)}" title="打开该媒体组详情（可改描述 / 改标签）">
-      <div class="media-thumb">
+    return `<article class="media-card" data-action="open-media" data-group="${esc(item.group_id)}" aria-label="打开该媒体组详情（可改描述 / 改标签）">
+      <div class="media-thumb" data-zoom="1">
         ${thumb}
         ${typeBadgeHtml(item.media_type)}
-        <div class="badges">
-          <span class="tag ${item.cleanable ? 'warn' : 'ok'}">${item.cleanable ? '可清理' : '保留'}</span>
-          ${item.mark ? `<span class="tag">★ ${fmtNum(item.mark)}</span>` : ''}
-        </div>
       </div>
       <div class="media-body">
         <div class="media-text ${item.text ? '' : 'is-empty'}">${text}</div>
+        <div class="media-badges">
+          <span class="tag ${item.cleanable ? 'warn' : 'ok'}">${item.cleanable ? '可清理' : '保留'}</span>
+        </div>
         <div class="tags-line">${tags}</div>
         <div class="media-meta">
           <span>${typeIcon(item.media_type)} ${typeLabel(item.media_type)}</span>
-          ${item.video_time ? `<span>· ${fmtDuration(item.video_time)}</span>` : ''}
+          ${item.video_time ? `<span>·</span><span>${fmtDuration(item.video_time)}</span>` : ''}
           <span class="spacer"></span>
+          <span class="dim">点击进详情</span>
           ${link ? `<a class="btn btn-ghost btn-xs" href="${link}" target="_blank" rel="noopener" title="在 Telegram 打开">↗</a>` : ''}
         </div>
       </div>
@@ -1573,11 +1820,15 @@
       .join('') + chip(!r.types.length, 'random-type', 'data-type=""', '全部类型');
     const scopeChips = [['all', '全部'], ['kept', '保留（有描述）'], ['cleanable', '可清理']]
       .map(([v, l]) => chip(r.scope === v, 'random-scope', `data-scope="${v}"`, l)).join('');
-    const tagChips = (state.tags || []).slice(0, 30)
+    // 标签筛选只列出「手动置顶」的标签（pin > 0），置顶位次靠前者在前
+    const pinnedTags = (state.tags || [])
+      .filter(t => Number(t.pin) > 0)
+      .sort((a, b) => Number(a.pin) - Number(b.pin));
+    const tagChips = pinnedTags
       .map(t => chip(r.tags.includes(t.name), 'random-tag', `data-tag="${esc(t.name)}"`, esc(t.name))).join('');
     const durationOptions = RANDOM_DURATIONS
       .map(([v, l]) => `<option value="${v}" ${r.duration === v ? 'selected' : ''}>${l}</option>`).join('');
-    const countOptions = [3, 6, 12, 24]
+    const countOptions = [10, 20, 40, 100]
       .map(n => `<option value="${n}" ${r.count === n ? 'selected' : ''}>抽 ${n} 个</option>`).join('');
 
     const cards = items.length
@@ -1607,7 +1858,7 @@
           <div class="filter-row"><span class="k">范围</span><div class="chips">${scopeChips}</div></div>
           <div class="filter-row"><span class="k">标签</span>
             <div class="chips">
-              ${tagChips || '<span class="dim">标签库为空</span>'}
+              ${tagChips || '<span class="dim">还没有手动置顶的标签（到「标签」页给常用标签点置顶即可在这里筛选）</span>'}
               ${tagChips ? chip(r.tagMode === 'all', 'random-tagmode', '', r.tagMode === 'all' ? '需同时含全部标签' : '含任一标签') : ''}
             </div>
           </div>
@@ -1673,7 +1924,8 @@
     const { add, remove } = parseTagInput(text);
     if (!add.length && !remove.length) { toast('请输入标签名（多个用空格分隔，-标签 表示移除）', true); return; }
     if (!file) { toast('未找到目标媒体，请重新打开详情', true); return; }
-    await applyMediaTags(file, { add, remove });
+    // 输入框提交后详情会重渲染，重新打开该块的标签编辑态，方便连续加标签
+    await applyMediaTags(file, { add, remove }, true);
   }
 
   /**
@@ -1697,7 +1949,7 @@
       : '输入新的描述；留空保存 = 清空描述（该组变为可清理）';
     return `
       <div class="${cls.join(' ')}" data-msg="${file}" data-idx="${opts.idx === undefined ? '' : opts.idx}" data-action="detail-pick" data-file="${file}">
-        <div class="text msg-text" data-role="text">${text ? esc(text) : (opts.noRecord ? '（暂无描述 · 点选后可在下方补描述并打标签）' : '（空描述）')}</div>
+        <div class="text msg-text" data-role="text">${text ? esc(text) : (opts.noRecord ? '（暂无描述 · 点「✏️ 编辑描述」补描述，点「🏷 编辑标签」打标签）' : '（空描述）')}</div>
         <div class="editor msg-editor hidden" data-role="editor">
           <textarea class="msg-input" data-role="input" placeholder="${placeholder}">${esc(text)}</textarea>
           <div class="editor-row">
@@ -1714,6 +1966,7 @@
           </span>
           <span class="spacer"></span>
           <button class="btn btn-ghost btn-xs" data-action="desc-edit">✏️ 编辑描述</button>
+          <button class="btn btn-ghost btn-xs tag-edit-btn" data-action="tag-edit" data-file="${file}">🏷 编辑标签</button>
         </div>
         <div class="tag-picker hidden" data-role="tag-picker">
           <div class="editor-row" style="margin-top:8px">
@@ -1823,13 +2076,8 @@
     const emptyEl = list.querySelector('.empty');
     if (emptyEl) emptyEl.classList.toggle('hidden', ordered.length > 0);
 
-    // 6) 新增块直接进入编辑态（省掉一次「✏️ 编辑描述」）
-    if (draft) {
-      const textEl = draft.querySelector('.msg-text');
-      const editorEl = draft.querySelector('.msg-editor');
-      if (textEl) textEl.classList.add('hidden');
-      if (editorEl) editorEl.classList.remove('hidden');
-    }
+    // 6) 点选媒体后统一是「只选中」：不给新增块预先展开描述 / 标签编辑，
+    //    要改就点「✏️ 编辑描述 / 🏷 编辑标签」，与已有描述的媒体保持一致
     return draft;
   }
 
@@ -1877,17 +2125,17 @@
       return `
       <div class="detail-item${hasMsg ? '' : ' no-msg'}"
            data-action="detail-pick" data-file="${esc(m.file_unique_id)}"
-           title="${hasMsg ? '点击选中该媒体，随后可补描述 / 修改它的标签' : '该媒体还没有文本记录，点选后可补描述并打标签'}">
+           data-zoom="1"
+           aria-label="${hasMsg ? '点击选中该媒体，随后可补描述 / 修改它的标签' : '该媒体还没有文本记录，点选后可补描述并打标签'}">
         <div class="detail-thumb">
-          ${m.thumbable
-        ? `<img loading="lazy" decoding="async" src="${thumbUrl(m.file_unique_id)}" alt="">`
-        : `<div class="ph">${typeIcon(m.media_type)}</div>`}
+          ${m.thumbable ? thumbCover(m) : `<div class="ph">${typeIcon(m.media_type)}</div>`}
           ${typeBadgeHtml(m.media_type)}
         </div>
         <div class="cap">
           <span>#${m.subgroup} · ${typeLabel(m.media_type)}</span>
           <span class="mono">${m.video_time ? fmtDuration(m.video_time) : 'msg ' + m.message_id}</span>
         </div>
+        <div class="thumb-tip">${hasMsg ? '点击可补描述 / 改标签' : '无文本记录，点选后可补描述并打标签'}</div>
       </div>`;
     }).join('') || '<div class="empty">该组没有媒体记录</div>';
 
@@ -1911,18 +2159,20 @@
         <span class="spacer"></span>
         <span class="dim" style="font-size:11.5px">is_delete = ${esc(String(g.is_delete))}${cleanable ? ` · ${fmtAgo(g.is_delete)}` : ''}</span>
       </div>
-      <div class="section">
-        <h4>媒体（${media.length}）</h4>
-        <div class="detail-strip">${strip}</div>
-        <div class="dim" style="font-size:11.5px;margin-top:8px">👆 点击上方任一媒体即可补描述、改标签：点没有描述的媒体会在下面「描述与标签」顶部出现一个新增编辑区（同一时间只有一个，保存时自动补建记录）；点已有描述的媒体则把它自己的编辑区置顶</div>
-      </div>
-      <div class="section">
-        <h4>描述与标签</h4>
-        <div class="detail-msg-list">${msgBlocks}</div>
-      </div>
-      <div class="section">
-        <h4>定位信息</h4>
-        <div class="kv">${positions.map(([k, v]) => `<span class="k">${k}</span><span class="v mono">${esc(v)}</span>`).join('')}</div>
+      <div class="detail-main">
+        <div class="detail-left">
+          <h4>媒体（${media.length}）</h4>
+          <div class="detail-strip">${strip}</div>
+          <div class="dim" style="font-size:11.5px;margin-top:8px">👆 点左侧任一媒体把它置顶到右栏；无论有没有描述，都再点「✏️ 编辑描述 / 🏷 编辑标签」才开始改</div>
+        </div>
+        <aside class="detail-aside">
+          <h4>描述与标签</h4>
+          <div class="detail-msg-list">${msgBlocks}</div>
+          <div class="section detail-positions">
+            <h4>定位信息</h4>
+            <div class="kv">${positions.map(([k, v]) => `<span class="k">${k}</span><span class="v mono">${esc(v)}</span>`).join('')}</div>
+          </div>
+        </aside>
       </div>`;
 
     $('#detail-foot').innerHTML = `
@@ -1950,9 +2200,11 @@
     const file = state.detailSelectedFile;
     body.querySelectorAll('.detail-item').forEach(el => el.classList.remove('is-active'));
     body.querySelectorAll('.msg-block').forEach(el => el.classList.remove('is-active'));
-    // 未选中的标签区加回 is-locked（CSS 里 pointer-events: none，防止误点）
-    body.querySelectorAll('.tag-edit').forEach(el => { el.classList.remove('is-active'); el.classList.add('is-locked'); });
+    // 标签区回到「锁定态」：选中媒体只是把它的块置顶，改标签仍需点「🏷 编辑标签」
+    // （与「✏️ 编辑描述」一致：都是先选中媒体，再点对应按钮进入编辑）
+    body.querySelectorAll('.tag-edit').forEach(el => { el.classList.remove('is-active', 'is-editing'); el.classList.add('is-locked'); });
     body.querySelectorAll('.tag-add-btn').forEach(el => { el.disabled = true; el.classList.remove('is-highlight'); });
+    setTagPicker(body, false);
 
     // 「描述与标签」区重排：新增块只跟着选中的无描述媒体，已有描述则把它的块置顶
     layoutDetailBlocks();
@@ -1965,18 +2217,47 @@
     if (!block) return;
 
     block.classList.add('is-active');
+    // 与已有描述的媒体一致：选中只是把它的块置顶，描述 / 标签都要再点按钮才进入编辑
+  }
+
+  /**
+   * 解锁某个块的标签编辑（对应「🏷 编辑标签」）：
+   *   · 标签胶囊的 ✎ / ✕ 按钮开始可点（.is-editing）
+   *   · 「➕ 添加标签」可点；该媒体没有标签时高亮提示
+   * openPicker=true 时顺带展开输入区（新增描述块用 / 提交标签后继续改）
+   */
+  function unlockBlockTags(block, openPicker = false) {
+    if (!block) return;
     const tagEdit = block.querySelector('.tag-edit');
-    const addBtn = block.querySelector('.tag-add-btn');
     if (tagEdit) {
       // 关键：移除 is-locked，否则 pointer-events: none 会让标签按钮全都点不动
       tagEdit.classList.remove('is-locked');
-      tagEdit.classList.add('is-active');
+      tagEdit.classList.add('is-active', 'is-editing');
     }
+    const addBtn = block.querySelector('.tag-add-btn');
     if (addBtn) {
       addBtn.disabled = false;
       // 该媒体还没有标签 → 高亮「添加标签」
       if (!block.querySelector('.tag-pill')) addBtn.classList.add('is-highlight');
     }
+    if (openPicker) setTagPicker(block, true);
+  }
+
+  /**
+   * 退出某个块的标签编辑（取消时用）：收起输入区、清空输入，标签胶囊的 ✎ / ✕ 也收起来。
+   * 只收起输入区而不摘掉 .is-editing 的话，取消后标签仍可点，看着像“没取消掉”。
+   */
+  function lockBlockTags(block) {
+    if (!block) return;
+    setTagPicker(block, false);
+    const tagEdit = block.querySelector('.tag-edit');
+    if (tagEdit) tagEdit.classList.remove('is-editing', 'is-active');
+    const addBtn = block.querySelector('.tag-add-btn');
+    if (addBtn) {
+      addBtn.disabled = true;
+      addBtn.classList.remove('is-highlight');
+    }
+    // 选中的块退出编辑态后仍是「已选中」，标签区回到锁定外观即可
   }
 
   /** 点击媒体（缩略图或描述块）：选中/取消选中 */
@@ -2002,13 +2283,25 @@
     await openMediaDetail(state.detail.group.group_id);
   }
 
-  async function applyMediaTags(fileUniqueId, { add = [], remove = [] }) {
+  /**
+   * 应用标签增删后整个详情会重渲染（块被重建 → 回到未选中态），
+   * keepEditing=true 时把该块的标签编辑态重新打开，方便连续改多个标签；
+   * 移除时有确认框、中断处理由外层负责，这里不做额外分支。
+   */
+  async function applyMediaTags(fileUniqueId, { add = [], remove = [] }, keepEditing = false) {
     const r = await apiPost('/media/tags', { fileUniqueId, add, remove });
     const parts = [];
     if ((r.added || []).length) parts.push(`添加 ${r.added.join('、')}`);
     if ((r.removed || []).length) parts.push(`移除 ${r.removed.join('、')}`);
     toast(`🏷 ${parts.join(' · ') || '标签已更新'}（当前：${(r.tags || []).join('、') || '无'}）`);
     await openMediaDetail(state.detail.group.group_id);
+    if (keepEditing) {
+      const block = detailMsgBlock(fileUniqueId);
+      if (block) {
+        block.classList.add('is-active');
+        unlockBlockTags(block, true);
+      }
+    }
   }
 
   /**
@@ -2522,7 +2815,19 @@
 
   async function show(view) {
     if (!VIEW_META[view]) return;
-    hideThumbZoom(); // 视图要整体重渲染，旧的缩略图马上就不存在了，先收起悬停放大浮层
+    // 视图要整体重渲染，旧的缩略图马上就不存在了 —— 无论后面走哪条分支，
+    // 先把悬停放大浮层收掉（它挂在 body / dialog 上，#view 重渲染不会带走它）。
+    // 用 instant：切页时浮层不该再播一段缩小动画飘在新页面上。
+    // 注意必须放在「正在加载就排队」的判断之前，否则加载期间点导航时浮层会留在页面上。
+    hideThumbZoom(true);
+    // 上一次视图还在加载（首屏最容易碰到）：不能直接丢掉这次请求，
+    // 否则点了导航却没有请求、页面一直停在「正在加载…」。等它跑完再接着渲染。
+    if (state.loading) {
+      // 同一次导航（如打开详情时顺带刷新媒体库）等当前这次跑完即可；不同视图则排队
+      if (view !== state.view) state.pendingView = view;
+      await (state.showPromise || Promise.resolve());
+      return;
+    }
     state.view = view;
     document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('is-active', b.dataset.view === view));
     $('#page-title').textContent = VIEW_META[view].title;
@@ -2530,8 +2835,13 @@
     $('#view').classList.toggle('view-fill', view === 'stats');
     setSearchVisible(view);
 
-    if (state.loading) return;
     state.loading = true;
+    state.showPromise = runShow(view);
+    await state.showPromise;
+  }
+
+  /** 真正加载并渲染一个视图（由 show 串行调度，不直接被调用） */
+  async function runShow(view) {
     $('#view').innerHTML = '<div class="loading">正在加载…</div>';
     try {
       await VIEW_META[view].load();
@@ -2541,11 +2851,18 @@
         <button class="btn btn-sm" data-action="retry">重试</button></div>`;
     } finally {
       state.loading = false;
+      state.showPromise = null;
+      // 加载期间被点掉的导航：现在补上（后点的生效）
+      if (state.pendingView) {
+        const next = state.pendingView;
+        state.pendingView = null;
+        show(next);
+      }
     }
   }
 
   async function refreshCurrent() {
-    if (state.loading) return;
+    if (state.loading) { state.pendingView = state.view; return; }
     if (state.view !== 'overview') loadOverview().catch(() => { });
     await show(state.view);
   }
@@ -2591,10 +2908,15 @@
     });
 
     view.addEventListener('click', async (e) => {
-      hideThumbZoom(); // 点击后可能重渲染 / 弹窗，悬停放大浮层先收起
+      // 点的是「没有动作」的空白 / 文字：鼠标还停在预览图上，只取消「还在等延迟」的那次放大，
+      // 已经显示出来的浮层保持不动 —— 否则移开/再触发就会又放大一次，看着像每点一下就闪。
+      cancelPendingZoom();
       const el = e.target.closest('[data-action]');
       if (!el) return;
       const action = el.dataset.action;
+      // 有后续动作（开详情对话框 / 打开面板 / 重渲染列表）：
+      // 必须「立刻」收起浮层。若走 200ms 缩小动画，浮层会正好悬在刚弹出的对话框上面。
+      hideThumbZoom(true);
 
       try {
         switch (action) {
@@ -2647,7 +2969,7 @@
             await loadRandom(); renderRandom(); break;
           case 'random-reset':
             state.random = {
-              types: [], tags: [], tagMode: 'any', q: '', duration: 'all', scope: 'all', count: 6,
+              types: [], tags: [], tagMode: 'any', q: '', duration: 'all', scope: 'all', count: 20,
               items: [], total: 0
             };
             await loadRandom(); renderRandom(); break;
@@ -2785,17 +3107,12 @@
     });
 
     // 缩略图加载失败 → 退化为类型图标占位
+    // 封面现在是 background-image（.thumb-img，预加载探测失败时已由 thumbFallback 处理），
+    // 这里兜住放大浮层里的 <img>（同样贴在同一张封面上）
     view.addEventListener('error', (e) => {
       const img = e.target;
       if (img && img.tagName === 'IMG' && img.closest('.media-thumb, .detail-item')) {
-        const wrap = img.parentElement;
-        img.remove();
-        if (!wrap.querySelector('.ph')) {
-          const span = document.createElement('span');
-          span.className = 'ph';
-          span.textContent = '🖼';
-          wrap.prepend(span);
-        }
+        thumbFallback(img.parentElement);
       }
     }, true);
 
@@ -2844,7 +3161,7 @@
         await loadRandom();
         renderRandom();
       } else if (el.id === 'random-count') {
-        state.random.count = parseInt(el.value, 10) || 6;
+        state.random.count = parseInt(el.value, 10) || 20;
         await loadRandom();
         renderRandom();
       }
@@ -3108,6 +3425,9 @@
     if (s) s.textContent = t;
     const d = $('#log-dot');
     if (d) d.classList.toggle('on', logConnected);
+    // 日志坞折叠后只剩一个竖排按钮，状态灯就靠它（与左侧导航那个小灯同步）
+    const dd = $('#dock-dot');
+    if (dd) dd.classList.toggle('on', logConnected);
     const vs = $('#log-view-status');
     if (vs) { vs.textContent = t; vs.className = 'tag ' + (logConnected ? 'ok' : 'warn'); }
   }
@@ -3199,7 +3519,7 @@
   function bindDetailEvents() {
     const dlg = $('#detail-dialog');
     dlg.addEventListener('click', async (e) => {
-      hideThumbZoom(); // 选中媒体 / 关闭对话框前先收起悬停放大浮层
+      hideThumbZoom(true); // 对话框里点任何东西都立刻收起浮层（不能带缩小动画飘在对话框上）
       const el = e.target.closest('[data-action]');
       if (!el && e.target.dataset.close === undefined) return;
       const action = el ? el.dataset.action : 'detail-close';
@@ -3244,9 +3564,17 @@
             setTagPicker(block, picker.classList.contains('hidden'));
             break;
           }
+          case 'tag-edit': {
+            // 「🏷 编辑标签」：与「✏️ 编辑描述」一致的入口 —— 解锁该块的标签编辑并展开输入区
+            const block = el.closest('.msg-block');
+            if (!block) break;
+            const picker = block.querySelector('.tag-picker');
+            unlockBlockTags(block, picker && picker.classList.contains('hidden'));
+            break;
+          }
           case 'tag-cancel': {
-            // 取消：收起标签选择区、清空输入（不写库）
-            setTagPicker(el.closest('.msg-block'), false);
+            // 取消：收起标签选择区、清空输入，并退出标签编辑态（✎ / ✕ 一起收起来，不写库）
+            lockBlockTags(el.closest('.msg-block'));
             break;
           }
           case 'tag-add': {
@@ -3257,13 +3585,13 @@
             const file = el.dataset.file || (block ? block.dataset.msg : '');
             if (el.dataset.tag) {
               if (!file) { toast('未找到目标媒体，请重新打开详情', true); break; }
-              await applyMediaTags(file, { add: [el.dataset.tag] });
+              await applyMediaTags(file, { add: [el.dataset.tag] }, true);
               break;
             }
             await submitTagInput(block, file, input ? input.value : '');
             break;
           }
-          case 'tag-remove': await applyMediaTags(el.dataset.file, { remove: [el.dataset.tag] }); break;
+          case 'tag-remove': await applyMediaTags(el.dataset.file, { remove: [el.dataset.tag] }, true); break;
           case 'tag-rename': {
             const oldName = el.dataset.tag;
             renameTagForm(oldName);
@@ -3438,6 +3766,21 @@
 
   function init() {
     applyTheme(themeMode());
+    // 封面里那张隐形 <img> 的钩子（内联 onload/onerror 拿不到页面闭包里的函数）
+    // 加载成功：记下图片真实比例，供放大浮层按图片比例展示
+    window.__thumbLoad = (img) => {
+      const cover = img && img.closest ? img.closest('.thumb-img') : null;
+      if (!cover) return;
+      if (img.naturalWidth && img.naturalHeight) {
+        cover.dataset.ratio = String(img.naturalWidth / img.naturalHeight);
+        cacheRatio(coverSrc(cover), img.naturalWidth, img.naturalHeight);
+      }
+    };
+    // 加载失败：清掉封面层，退回类型图标占位
+    window.__thumbFail = (img) => {
+      const cover = img && img.closest ? img.closest('.thumb-img') : null;
+      thumbFallback(cover || (img && img.parentElement));
+    };
     bindSearch();
     bindAutoRefresh();
     bindOptions();
@@ -3449,6 +3792,9 @@
     if (window.addEventListener) {
       window.addEventListener('scroll', hideThumbZoom, true);
       window.addEventListener('resize', hideThumbZoom);
+      // 鼠标直接移到窗口外（不经过封面的 mouseout）也要收起浮层与等待中的转圈
+      window.addEventListener('blur', hideThumbZoom);
+      document.addEventListener('mouseleave', hideThumbZoom);
     }
     $('#login-btn').addEventListener('click', login);
     $('#login-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });

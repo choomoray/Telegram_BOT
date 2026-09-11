@@ -87,8 +87,15 @@ test('style.css：选中的标签区必须重新打开 pointer-events（否则�
 
 test('style.css：缩略图悬停放大必须「整图可见」（不裁切）', () => {
   const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
-  assert.match(css, /\.media-thumb:hover img\s*\{[^}]*object-fit:\s*contain/, '媒体库缩略图悬停不再裁切');
-  assert.match(css, /\.detail-item:hover img\s*\{[^}]*object-fit:\s*contain/, '媒体详情条悬停不再裁切');
+  // 封面：固定尺寸 + cover 裁切；大图由 .thumb-zoom 浮层按完整比例展示
+  const cover = (css.match(/\.media-thumb \.thumb-img,[\s\S]*?\}/) || [''])[0];
+  assert.ok(cover, '缺少封面图片层 .thumb-img 规则');
+  assert.match(cover, /background-size:\s*cover/, '封面 cover 裁切填满预览框');
+  // 大图出现时小预览图模糊（带过渡）
+  const blur = (css.match(/\.media-thumb\.is-blur[\s\S]*?\}/) || [''])[0];
+  assert.ok(blur, '缺少封面模糊态 .is-blur 规则');
+  assert.match(blur, /filter:\s*blur\(/, '模糊态必须真的模糊');
+  assert.match(cover, /transition:[^;]*filter/, '模糊必须带过渡（否则会硬跳）');
   const zoom = (css.match(/\.thumb-zoom\s*\{[^}]*\}/) || [''])[0];
   assert.ok(zoom, '缺少 .thumb-zoom 浮层规则');
   assert.match(zoom, /position:\s*fixed/, '浮层用固定定位，避免被容器裁切');
