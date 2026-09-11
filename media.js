@@ -1,5 +1,6 @@
 // media.js
 const { getCollection, COLLECTIONS } = require('./db/getCollection');
+const { sortMediaDocsByPosition } = require('./db/media');
 const { escapeHTML } = require('./utils/sanitize');
 const logger = require('./logger');
 const bot = require('./bot');
@@ -239,14 +240,15 @@ async function clearMediaGroupState(userId, sendCollected = true, rawState = nul
 
 async function getMediaByGroupIdSorted(groupId) {
     const mediaCol = getCollection(COLLECTIONS.MEDIA);
-    const mediaList = await mediaCol.find({ group_id: groupId }).sort({ subgroup: 1, message_id: 1 }).toArray();
+    // 位置在 group / channel 子文档里（旧数据才是顶层 message_id），排序按解析出的位置来
+    const mediaList = sortMediaDocsByPosition(await mediaCol.find({ group_id: groupId }).toArray());
     logger.info(`获取媒体组 group_id=${groupId}，共 ${mediaList.length} 条`);
     return mediaList;
 }
 
 async function getMediaByGroupIdAndSubgroup(groupId, subgroup) {
     const mediaCol = getCollection(COLLECTIONS.MEDIA);
-    const mediaList = await mediaCol.find({ group_id: groupId, subgroup: subgroup }).sort({ message_id: 1 }).toArray();
+    const mediaList = sortMediaDocsByPosition(await mediaCol.find({ group_id: groupId, subgroup }).toArray());
     logger.info(`获取媒体组 group_id=${groupId}, subgroup=${subgroup}，共 ${mediaList.length} 条`);
     return mediaList;
 }

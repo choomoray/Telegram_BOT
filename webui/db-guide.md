@@ -41,10 +41,14 @@
 - `updated_at`: number — 最近修改时间戳
 
 ### media（媒体文件）
-- `group_id`: string、`subgroup`: number（默认 1）、`message_id`: number
+- `group_id`: string、`subgroup`: number（默认 1）
 - `file_id`: string、`file_unique_id`: string（唯一索引）、`media_type`: string
 - `group`: `{ chat_id, message_id }`（群组位置，可选）
 - `channel`: `{ chat_id, message_id }`（频道位置，可选；频道转发媒体两者都有）
+- **位置以 `group` / `channel` 子文档为唯一权威**（都带 chat_id，能直接定位到哪条消息）；
+  新数据**不再写顶层 `message_id`**（它等于"首次收录位置的消息 ID"，与子文档重复）。
+  旧数据可能仍有顶层 `message_id`（那时还没拆出子文档），读取统一走 `db/media.js: resolveMediaPosition()`
+  （优先 group_id 前缀对应的位置 → 顶层字段兜底 → group → channel）。
 - `video_time`: number（视频秒数，仅视频）
 - `thumb_file_id`: string（视频/文档/音频的封面 file_id，可选；Web 界面缩略图用）
 - `pwd`: string（访问密码，可选）
@@ -53,10 +57,18 @@
 - `group_id`: string（唯一索引）
 - `is_group`: number — 组内媒体数量
 - `is_delete`: number — **0 = 组内仍有描述（保留，不清理）；大于 0 = 时间戳，表示空描述可被 `/clean` 清理**；`null` = 刚建组尚未判定
-- `mark`: number — 被标记次数、`last_mark_time`: number|null
+- `mark`: number — 被标记次数（建组时写 0，只增不减）
+- `last_mark_time`: number — **仅被 `/mark` 标记过的组才有**该字段（最后一次标记的毫秒时间戳）；没标记过的组不含此字段
 
 ### tags（标签库）
 - `name`: string（唯一，大写）、`pin`: number（0=不置顶；>0=按钮网格位置）、`count`: number（使用次数）
+
+### mark（标记历史）
+- `mode`: string — `mark` = 正常标记（媒体存在于媒体库）｜`record` = **仅记录**（不标记任何媒体/媒体组）
+- `userId`: number、`time`: number（毫秒）、`date`: Date
+- 仅 `mode='mark'` 才有：`group_id`、`file_unique_id`、`media_type`、`isGroup`
+- 说明：本集合只是「谁在什么时候标记/记录了哪个媒体/媒体组」的历史；
+  `group_list.mark`（被标记次数）与 `last_mark_time` 的语义不变，仍只由正常标记路径维护
 
 ### users（用户）
 - `id`: number（唯一索引）、`name`: string

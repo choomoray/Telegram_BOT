@@ -31,6 +31,8 @@ const {
 const { reMatchMessageTags, clearMessageTags } = require('../utils/tagSync');
 const { removeLevelSuffix } = require('../utils/levelExtractor');
 const { updateMessageDb } = require('../handlers/modes/editMode');
+const { resolveEditTargets, editCaptionWithFallback } = require('../utils/editTarget');
+const { sortMediaDocsByPosition, mediaPositionMessageId } = require('../db/media');
 const { transportLinkUrl } = require('../utils/tgLink');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -198,16 +200,10 @@ function sortTags(tags) {
     return [...pinned, ...normal];
 }
 
-/** 媒体组代表媒体：subgroup、message_id 最小的一条（用于列表缩略图） */
+/** 媒体组代表媒体：subgroup、位置消息 ID 最小的一条（用于列表缩略图） */
 function pickPreviewMedia(mediaDocs) {
-    let best = null;
-    for (const doc of mediaDocs) {
-        if (!best) { best = doc; continue; }
-        const a = [Number(doc.subgroup) || 0, Number(doc.message_id) || 0];
-        const b = [Number(best.subgroup) || 0, Number(best.message_id) || 0];
-        if (a[0] < b[0] || (a[0] === b[0] && a[1] < b[1])) best = doc;
-    }
-    return best;
+    // 位置在 group / channel 子文档里（旧数据才是顶层 message_id），统一按解析出的位置比较
+    return sortMediaDocsByPosition(mediaDocs)[0] || null;
 }
 
 /** 媒体组最新描述消息：updated_at（缺失时退回 message_id）最大的一条 */
@@ -632,10 +628,12 @@ async function handleMediaDetail(D, url) {
 
     const groupCol = D.getCollection(COLLECTIONS.GROUP_LIST);
     const mediaCol = D.getCollection(COLLECTIONS.MEDIA);
-    const [groupDoc, mediaDocs] = await Promise.all([
+    const [groupDoc, mediaDocsRaw] = await Promise.all([
         groupCol.findOne({ group_id: groupId }),
-        mediaCol.find({ group_id: groupId }).sort({ subgroup: 1, message_id: 1 }).limit(500).toArray()
+        // 只按 subgroup 取（位置消息 ID 在 group / channel 子文档里，取回后在内存里按位置排）
+        mediaCol.find({ group_id: groupId }).sort({ subgroup: 1 }).limit(500).toArray()
     ]);
+    const mediaDocs = sortMediaDocsByPosition(mediaDocsRaw);
     if (!groupDoc && mediaDocs.length === 0) {
         return { status: 404, data: { error: '未找到该媒体组' } };
     }
@@ -663,7 +661,8 @@ async function handleMediaDetail(D, url) {
                 media_type: doc.media_type ?? null,
                 file_unique_id: doc.file_unique_id ?? null,
                 file_id: doc.file_id ?? null,
-                message_id: doc.message_id ?? null,
+                // 位置消息 ID：解析 group / channel 子文档（旧数据兜底顶层 message_id）
+                message_id: mediaPositionMessageId(doc) || null,
                 video_time: doc.video_time ?? null,
                 group: doc.group ?? null,
                 channel: doc.channel ?? null,
@@ -868,14 +867,22 @@ async function handleMediaDescription(D, url, body) {
     const isClearing = !rawText.trim();
     const cleanText = isClearing ? '' : removeLevelSuffix(rawText);
     const targetGroupId = mediaDoc.group_id || null;
-    const pos = mediaDoc.group || mediaDoc.channel || null;
-    const targetChatId = (pos && pos.chat_id) || null;
-    const targetMessageId = (pos && pos.message_id) || mediaDoc.message_id || null;
+    // 编辑目标位置：频道源位置优先（频道 → 讨论群自动转发时改频道源消息，Telegram 自动同步到群里的副本），
+    // 其次群组位置；改不了的会在调用 Telegram 时自动降级到下一个位置
+    const editTargets = resolveEditTargets(mediaDoc);
+    const primary = editTargets[0] || null;
+    const targetChatId = primary ? primary.chatId : null;
+    const targetMessageId = primary ? primary.messageId : (mediaPositionMessageId(mediaDoc) || null);
 
     const messageCol = D.getCollection(COLLECTIONS.MESSAGE);
     const before = await messageCol.findOne({ file_unique_id: fileUniqueId });
 
-    // 1) 数据库：message 记录增/改/删 + group_list.is_delete 重算（复用机器人编辑逻辑）
+    // 1) 清空描述 = 移除该 message 的标签：必须先清标签（此刻记录还在，才能递减标签使用次数）
+    if (isClearing && typeof clearMessageTags === 'function') {
+        await clearMessageTags(fileUniqueId);
+    }
+
+    // 2) 数据库：message 记录增/改/删 + group_list.is_delete 重算（复用机器人编辑逻辑）
     await updateMessageDb(messageCol, {
         isClearing,
         targetChatId,
@@ -886,21 +893,23 @@ async function handleMediaDescription(D, url, body) {
         cleanText
     });
 
-    // 2) 标签跟随文本重算
-    if (isClearing) {
-        if (typeof clearMessageTags === 'function') await clearMessageTags(fileUniqueId);
-    } else {
+    // 3) 标签：编辑描述**保留已有标签**，只补充新文本匹配到的（清空描述已在上一步清掉）
+    if (!isClearing) {
         await reMatchMessageTags(fileUniqueId, cleanText);
     }
 
-    // 3) 尝试同步 Telegram 描述（超 48 小时/权限不足会失败，但数据库已更新）
+    // 4) 尝试同步 Telegram 描述（超 48 小时 / 消息不是机器人发送的会失败，但数据库已更新）
     let telegramEdited = false;
     let telegramError = null;
+    let telegramVia = null;
     const wantTelegram = body.editTelegram !== false;
-    if (wantTelegram && targetChatId && targetMessageId) {
+    if (wantTelegram && editTargets.length) {
         try {
-            await D.editCaption(targetChatId, targetMessageId, isClearing ? null : cleanText);
+            const edited = await editCaptionWithFallback(editTargets, (t) =>
+                D.editCaption(t.chatId, t.messageId, isClearing ? null : cleanText)
+            );
             telegramEdited = true;
+            telegramVia = edited.via;
         } catch (err) {
             telegramError = err.message || '修改 Telegram 描述失败';
             logger.warn(`WebUI 修改 Telegram 描述失败 [${targetChatId}/${targetMessageId}]: ${telegramError}`);
@@ -921,11 +930,12 @@ async function handleMediaDescription(D, url, body) {
             after: cleanText || undefined,
             clearing: isClearing,
             telegramEdited,
+            telegramEditVia: telegramVia || undefined,
             over48h: !telegramEdited && wantTelegram ? true : undefined
         }
     }).catch(() => { });
 
-    return { status: 200, data: { ok: true, text: isClearing ? '' : cleanText, clearing: isClearing, telegramEdited, telegramError, tags } };
+    return { status: 200, data: { ok: true, text: isClearing ? '' : cleanText, clearing: isClearing, telegramEdited, telegramEditVia: telegramVia, telegramError, tags } };
 }
 
 /**
@@ -1338,11 +1348,14 @@ function aggregateLogs(docs) {
         activeDays.add(day);
         addCounts(totals, doc.counts);
 
-        if (!byDay.has(day)) byDay.set(day, { day, count: 0, media: 0, groups: 0 });
+        if (!byDay.has(day)) byDay.set(day, { day, count: 0, media: 0, groups: 0, actions: {}, categories: {} });
         const dayRow = byDay.get(day);
         dayRow.count += 1;
         dayRow.media += (doc.counts && doc.counts.media) || 0;
         dayRow.groups += (doc.counts && doc.counts.groups) || 0;
+        // 每日按动作 / 大类分别计数：供「每日操作量」方格图手动切换查看项（如只看「标记」）
+        dayRow.actions[action] = (dayRow.actions[action] || 0) + 1;
+        dayRow.categories[category] = (dayRow.categories[category] || 0) + 1;
 
         // 活跃时间：按北京时间整点归桶（前端画 24 小时分布）
         const hour = new Date(at + 8 * 3600 * 1000).getUTCHours();

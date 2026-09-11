@@ -5,7 +5,6 @@ const { connectDB, getClient, getDb } = require('./database');
 const { initCollections } = require('./db/index');
 const { loadSettings } = require('./db/settings');
 const { logOperation } = require('./utils/opLog');
-const { addUserToGroup, removeUserFromGroup, updateLastSeen, banUserFully, userOperationLocks, isRecentlyUnbanned } = require('./db/users');
 const { upsertChannelGroup, getChannelGroupById } = require('./db/channelGroup');
 const { startHealthServer } = require('./healthServer');
 
@@ -76,6 +75,11 @@ function startTransportHealthCheck() {
 // test 模式（node index test）：在 webui 基础上，日志额外复制一份到 test-log（启动时重置）
 const TEST_MODE = process.argv.includes('test');
 
+/**
+ * 管理员在 Telegram 侧解除封禁（频道/群「已移除用户 / 黑名单」里移除某个用户）的处理逻辑
+ * 见 handlers/chatMemberHandler.js: syncManualUnban()。
+ */
+
 async function start() {
     try {
         // 1. 连接数据库
@@ -87,6 +91,12 @@ async function start() {
         // 2.5 迁移旧标签数据（settings.tags -> 独立 tags 集合）
         const { migrateTagsFromSettings } = require('./db/tags');
         await migrateTagsFromSettings().catch(err => logger.error(`标签迁移失败: ${err.message}`));
+        // 2.6 清理未标记媒体组的 last_mark_time 空字段（该字段只在 /mark 标记时写入）
+        const { cleanupNullMarkTime } = require('./db/groupList');
+        await cleanupNullMarkTime().catch(err => logger.error(`清理 last_mark_time 失败: ${err.message}`));
+        // 2.7 清理 media 里与 group / channel 位置重复的顶层 message_id（位置以子文档为唯一权威）
+        const { cleanupDuplicateMediaMessageId } = require('./db/media');
+        await cleanupDuplicateMediaMessageId().catch(err => logger.error(`清理 media 顶层 message_id 失败: ${err.message}`));
         // 3. 加载动态设置
         await loadSettings(config);
         // test 模式：初始化临时日志（重置 test-log/log.log、error.log，仅启动时初始化）
@@ -121,63 +131,9 @@ async function start() {
             await handleCallbackQuery(query);
         }));
 
-        // 成员变动事件
-        bot.on('chat_member', safeHandler(async (update) => {
-            const { chat, new_chat_member } = update;
-            if (!new_chat_member || !new_chat_member.user) return;
-            const userId = new_chat_member.user.id;
-            const userName = new_chat_member.user.username ||
-                `${new_chat_member.user.first_name || ''} ${new_chat_member.user.last_name || ''}`.trim() ||
-                `User${userId}`;
-
-            if (userOperationLocks.has(userId)) {
-                logger.info(`用户 ${userId} 正在被管理员操作，忽略自动成员变动事件`);
-                return;
-            }
-
-            const newStatus = new_chat_member.status;
-            await updateLastSeen(userId).catch(() => { });
-
-            if (['member', 'administrator', 'creator'].includes(newStatus)) {
-                const { getCollection, COLLECTIONS } = require('./db/getCollection');
-                const usersCol = getCollection(COLLECTIONS.USERS);
-                const user = await usersCol.findOne({ id: userId });
-                if (user && user.state === 0) {
-                    logger.warn(`封禁用户 ${userId} 尝试加入群组 ${chat.id}，立即踢出并全面封禁`);
-                    await banUserFully(userId, 'auto').catch(err => logger.error(`踢出封禁用户失败: ${err.message}`));
-                    return;
-                }
-                await addUserToGroup(userId, userName, chat.id);
-                logger.info(`用户 ${userId} (${userName}) 加入群组 ${chat.id} (状态: ${newStatus})`);
-                logOperation({
-                    action: 'user_join',
-                    source: 'system',
-                    userId,
-                    chatId: chat.id,
-                    target: { type: 'user', id: userId },
-                    counts: { users: 1 },
-                    detail: { userName, status: newStatus, chatName: chat.title || chat.username || undefined }
-                }).catch(() => { });
-            } else if (['left', 'kicked'].includes(newStatus)) {
-                // 解封动作回显：用户刚被机器人解封（unban 会产生 left 状态更新），
-                // 不视为主动退群，跳过"退出即封禁"，避免"管理员解封后机器人立刻又封禁"
-                if (isRecentlyUnbanned(userId)) {
-                    logger.info(`用户 ${userId} 刚被解封，忽略 left/kicked 状态更新，不做退出封禁`);
-                    return;
-                }
-                await removeUserFromGroup(userId, chat.id);
-                logger.info(`用户 ${userId} 离开群组 ${chat.id} (状态: ${newStatus})`);
-                logOperation({
-                    action: 'user_leave',
-                    source: 'system',
-                    userId,
-                    chatId: chat.id,
-                    target: { type: 'user', id: userId },
-                    counts: { users: 1 },
-                    detail: { userName, status: newStatus, autoBanned: true, chatName: chat.title || chat.username || undefined }
-                }).catch(() => { });
-            }
-        }));
+        // 成员变动事件（成员进出 / 管理员解封；逻辑见 handlers/chatMemberHandler.js）
+        const { handleChatMemberUpdate } = require('./handlers/chatMemberHandler');
+        bot.on('chat_member', safeHandler(handleChatMemberUpdate));
 
         // 机器人管理员状态变更
         bot.on('my_chat_member', safeHandler(async (update) => {

@@ -242,7 +242,7 @@ async function transferRecordToGroup(msg, mediaInfo, channelForwardInfo) {
                 file_id: fileId,
                 file_unique_id: fileUniqueId,
                 media_type: type,
-                message_id: msg.message_id,
+                // 位置只写 group / channel 子文档（顶层 message_id 已废弃）
                 group: { chat_id: msg.chat.id, message_id: msg.message_id }
             };
             if (type === 'video' && videoTime !== undefined && videoTime !== null) {
@@ -472,7 +472,6 @@ async function handleNewMediaMessage(msg) {
             file_id: fileId,
             file_unique_id: fileUniqueId,
             media_type: type,
-            message_id: messageId,
             video_time: videoTime,
             thumb_file_id: thumbFileId,
             ...location

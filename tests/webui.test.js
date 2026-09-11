@@ -512,7 +512,12 @@ function applyUpdate(target, update, filter) {
         const setSpec = (update[0] && update[0].$set) || {};
         for (const [key, expr] of Object.entries(setSpec)) {
             const add = expr.$max[1].$add;
-            const cur = target[add[0].slice(1)] || 0;
+            // $add[0] 可能是 '$count'（字符串）或 { $ifNull: ['$count', 0] }（tagUsed 实际写法）
+            const operand = add[0];
+            const field = typeof operand === 'string'
+                ? operand.slice(1)
+                : (operand && Array.isArray(operand.$ifNull) ? String(operand.$ifNull[0]).slice(1) : null);
+            const cur = (field && target[field]) || 0;
             target[key] = Math.max(expr.$max[0], cur + add[1]);
         }
         return;
@@ -926,6 +931,27 @@ test('GET /api/media/detail 返回 group / media / messages', async () => {
     });
 });
 
+test('GET /api/media/detail：新结构 media（无顶层 message_id）也能按位置排序并给出位置消息 ID', async () => {
+    const data = makeDomainData();
+    data.group_list.push({ _id: '0099', group_id: '-100_9', is_group: 3, is_delete: 0, mark: 0, last_mark_time: null });
+    // 新结构：只有 group / channel 子文档，没有顶层 message_id（写入端已不再产生该字段）
+    data.media = [
+        { _id: 'n1', group_id: '-100_9', subgroup: 1, media_type: 'photo', file_id: 'AgN1', file_unique_id: 'N1', group: { chat_id: -900, message_id: 300 } },
+        { _id: 'n2', group_id: '-100_9', subgroup: 1, media_type: 'photo', file_id: 'AgN2', file_unique_id: 'N2', group: { chat_id: -900, message_id: 100 } },
+        { _id: 'n3', group_id: '-100_9', subgroup: 2, media_type: 'video', file_id: 'AgN3', file_unique_id: 'N3', channel: { chat_id: -901, message_id: 50 }, video_time: 5 }
+    ];
+    data.message = [];
+
+    const deps = makeMemoryDeps(data);
+    await withDomain(deps, async (b, auth) => {
+        const r = await domainReq(b, auth, '/api/media/detail?groupId=-100_9');
+        assert.strictEqual(r.status, 200);
+        // subgroup 升序 → 位置消息 ID 升序（100 < 300），subgroup=2 在后
+        assert.deepStrictEqual(r.body.media.map(m => [m.subgroup, m.message_id]), [[1, 100], [1, 300], [2, 50]]);
+        assert.deepStrictEqual(r.body.media.map(m => m._id), ['n2', 'n1', 'n3']);
+    });
+});
+
 // ---------------- 清理 ----------------
 
 test('POST /api/clean 非法 scope 返回 400', async () => {
@@ -1336,12 +1362,37 @@ test('POST /api/media/description 修改描述：更新数据库 + 调用 Telegr
         });
         assert.strictEqual(r.status, 200);
         assert.strictEqual(r.body.telegramEdited, true);
-        assert.deepStrictEqual(captionCalls[0], { chatId: -100, messageId: 12, text: '新的视频描述' });
+        // 双位置媒体（频道 → 讨论群自动转发）：优先改频道源消息，Telegram 会自动同步到群里的转发副本
+        assert.deepStrictEqual(captionCalls[0], { chatId: -200, messageId: 9, text: '新的视频描述' });
+        assert.strictEqual(r.body.telegramEditVia, 'channel');
         const msg = deps.getCollection('message').docs.find(m => m.file_unique_id === 'AQAD2');
         assert.strictEqual(msg.text, '新的视频描述');
         assert.strictEqual(msg.group_id, '-100_1');
         // 组内本来就有一条文本，is_delete 仍应为 0
         assert.strictEqual(deps.getCollection('group_list').docs.find(g => g.group_id === '-100_1').is_delete, 0);
+    });
+});
+
+test('POST /api/media/description：频道位置改不了时自动降级到群组位置', async () => {
+    const deps = makeMemoryDeps(makeDomainData());
+    const captionCalls = [];
+    deps.editCaption = async (chatId, messageId, text) => {
+        captionCalls.push({ chatId, messageId });
+        if (chatId === -200) throw new Error("ETELEGRAM: 400 Bad Request: message can't be edited");
+        return true;
+    };
+    await withDomain(deps, async (b, auth) => {
+        const r = await domainReq(b, auth, '/api/media/description', {
+            method: 'POST',
+            body: JSON.stringify({ fileUniqueId: 'AQAD2', text: '降级到群组' })
+        });
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(r.body.telegramEdited, true);
+        assert.strictEqual(r.body.telegramEditVia, 'group');
+        assert.deepStrictEqual(captionCalls.map(c => `${c.chatId}/${c.messageId}`), ['-200/9', '-100/12']);
+        // 库记录按实际改成功的位置更新
+        const msg = deps.getCollection('message').docs.find(m => m.file_unique_id === 'AQAD2');
+        assert.strictEqual(msg.text, '降级到群组');
     });
 });
 
@@ -1583,6 +1634,15 @@ test('GET /api/stats 月份报表：汇总/每日趋势/动作与用户分布/�
         assert.ok(r.body.failures.count >= 1, '失败计数进入报表');
         assert.ok(r.body.previous && 'operationsDelta' in r.body.previous, '应带环比信息');
         assert.ok(r.body.catalog.actions.length > 10);
+
+        // 每日方格图可按查看项切换：byDay 里带分动作 / 分类计数
+        const dayWithLogs = r.body.byDay.find(x => x.count > 0);
+        assert.ok(dayWithLogs.actions && typeof dayWithLogs.actions === 'object', '每日数据应带分动作计数');
+        assert.ok(dayWithLogs.categories && typeof dayWithLogs.categories === 'object', '每日数据应带分类计数');
+        const actionSum = Object.values(dayWithLogs.actions).reduce((s, v) => s + v, 0);
+        assert.strictEqual(actionSum, dayWithLogs.count, '分动作计数之和 = 当天操作数');
+        const categorySum = Object.values(dayWithLogs.categories).reduce((s, v) => s + v, 0);
+        assert.strictEqual(categorySum, dayWithLogs.count, '分类计数之和 = 当天操作数');
 
         const year = await domainReq(b, auth, '/api/stats?period=year&year=' + new Date().getFullYear());
         assert.strictEqual(year.body.period, 'year');

@@ -3,7 +3,9 @@ const bot = require('../../bot');
 const logger = require('../../logger');
 const { findMediaByFileUniqueId } = require('../../db/media');
 const { incrementMark, findGroupList } = require('../../db/groupList');
+const { insertMarkRecord } = require('../../db/mark');
 const { extractMediaFromMessage } = require('../../media');
+const { deleteUserState } = require('../../states');
 const { logOperation } = require('../../utils/opLog');
 
 // 用于防止同一媒体组被多次处理的锁集合
@@ -62,7 +64,7 @@ async function handleMarkMode(msg, state) {
 
         const groupId = mediaDoc.group_id;
 
-        // 更新 group_list：mark +1，并记录最后标记时间
+        // 更新 group_list：mark +1，并记录最后标记时间（语义保持不变）
         const newMark = await incrementMark(groupId);
 
         if (newMark === null) {
@@ -75,10 +77,22 @@ async function handleMarkMode(msg, state) {
             return true;
         }
 
-        await bot.editMessageText('✅ 标记成功', {
+        // 标记历史（mark 集合）：时间 + 用户 + 媒体/媒体组
+        await insertMarkRecord({
+            userId,
+            mode: 'mark',
+            groupId,
+            fileUniqueId,
+            mediaType: mediaInfo.type,
+            isGroup: !!mediaGroupId
+        });
+
+        await bot.editMessageText(`✅ 标记成功（${newMark} 次）\n已退出标记模式`, {
             chat_id: userId,
             message_id: processingMsg.message_id
         });
+        // 单选题：完成一次标记后退出标记模式（媒体组剩下的相册消息会被静默忽略）
+        deleteUserState(userId);
         // 标记成功留痕（group_id 来自 media；组内媒体数与新 mark 值用于报表）
         const groupDoc = await findGroupList(groupId);
         logOperation({
@@ -94,7 +108,7 @@ async function handleMarkMode(msg, state) {
                 fileUniqueId
             }
         }).catch(() => { });
-        logger.info(`用户 ${userId} 标记成功: group_id=${groupId}, mark 新值=${newMark}`);
+        logger.info(`用户 ${userId} 标记成功: group_id=${groupId}, mark 新值=${newMark}，已退出标记模式`);
     } catch (err) {
         logger.error(`标记模式处理失败: ${err.message}`);
         logOperation({

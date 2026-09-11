@@ -71,6 +71,12 @@ async function initCollections() {
         const tagsCol = db.collection(COLLECTIONS.TAGS);
         await tagsCol.createIndex({ name: 1 }, { unique: true });
 
+        // mark 集合索引（标记历史：按时间/用户查询）
+        const markCol = db.collection(COLLECTIONS.MARK);
+        await markCol.createIndex({ time: -1 });
+        await markCol.createIndex({ userId: 1, time: -1 });
+        await markCol.createIndex({ group_id: 1 });
+
         logger.success('数据库集合索引创建完成');
     } catch (err) {
         logger.error('初始化集合索引失败:', err.message);

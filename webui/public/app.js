@@ -56,7 +56,7 @@
     collections: [],                       // 「原始数据」/ AI 面板用的集合名列表
     collectionsView: { q: '', type: 'all', items: [], counts: { all: 0, collection: 0, misc: 0 } }, // 「合集 / 杂集」视图数据
     dbstats: { data: null },
-    stats: { year: new Date().getFullYear(), data: null },
+    stats: { year: new Date().getFullYear(), metric: 'all', data: null },
     oplogs: { page: 1, pageSize: 30, total: 0, totalPages: 1, items: [], category: 'all', result: 'all', q: '' },
     selectedRaw: null,
     detail: null,
@@ -98,6 +98,115 @@
   /** 缩略图地址：<img> 无法带 header，因此用 query 传 token（与日志流一致） */
   function thumbUrl(fileUniqueId) {
     return `${API}/thumb?fileUniqueId=${encodeURIComponent(fileUniqueId)}&token=${encodeURIComponent(token())}`;
+  }
+
+  /* ---------------- 预览图悬停放大（媒体库卡片 / 媒体详情条） ----------------
+     缩略图用 object-fit: cover 裁切显示，鼠标移上去时：
+       1) 缩略图本身切到 contain，不再裁切；
+       2) 在旁边弹出一个固定定位的浮层，用完整比例的图片展示放大预览（不裁切）。
+     浮层挂在 body 上；若此时有对话框打开（原生 dialog 在顶层，挂 body 会被盖住），就挂进该对话框。 */
+
+  const ZOOM_MAX = 460;   // 放大预览最大边长（px）
+  const ZOOM_GAP = 14;    // 与缩略图的间距 / 距视口边缘的安全距离
+  let zoomLayer = null;   // 浮层元素（懒创建）
+  let zoomImg = null;     // 当前正在放大的缩略图
+
+  /** 触屏设备没有 hover，不启用（避免点一下浮层不消失） */
+  function hoverEnabled() {
+    try {
+      return !(window.matchMedia && window.matchMedia('(hover: none)').matches);
+    } catch (e) {
+      return true;
+    }
+  }
+
+  /** 从事件目标找到它所属的缩略图 <img>（媒体库卡片 / 详情媒体条） */
+  function thumbImgFrom(target) {
+    if (!target || !target.closest) return null;
+    const wrap = target.closest('.media-thumb') || target.closest('.detail-item');
+    if (!wrap) return null;
+    const img = wrap.querySelector ? wrap.querySelector('img') : null;
+    return img && img.src ? img : null;
+  }
+
+  /** 浮层挂载点：有打开的对话框就挂进对话框（原生 dialog 在顶层，挂 body 会被盖住），否则挂 body */
+  function zoomHost() {
+    const dlg = $('#detail-dialog');
+    if (dlg && dlg.open) return dlg;
+    const anyOpen = document.querySelector ? document.querySelector('dialog[open]') : null;
+    if (anyOpen && anyOpen.open !== false) return anyOpen;
+    return document.body || document.documentElement;
+  }
+
+  function ensureZoomLayer() {
+    if (!zoomLayer) {
+      zoomLayer = document.createElement('div');
+      zoomLayer.className = 'thumb-zoom';
+      zoomLayer.innerHTML = '<img alt="">';
+    }
+    const host = zoomHost();
+    if (zoomLayer.parentElement !== host) host.appendChild(zoomLayer);
+    return zoomLayer;
+  }
+
+  /** 弹出放大预览（整图可见） */
+  function showThumbZoom(img) {
+    if (!hoverEnabled()) return;
+    const rect = img.getBoundingClientRect ? img.getBoundingClientRect() : null;
+    if (!rect || !rect.width || !rect.height) return;
+    const right = rect.right === undefined ? rect.left + rect.width : rect.right;
+    const vw = window.innerWidth || 1280;
+    const vh = window.innerHeight || 800;
+    // 原图宽高比（拿不到原始尺寸时退回缩略图比例）
+    const ratio = (img.naturalWidth && img.naturalHeight)
+      ? img.naturalWidth / img.naturalHeight
+      : rect.width / rect.height;
+    const maxW = Math.max(180, Math.min(ZOOM_MAX, Math.round(vw * 0.6)));
+    const maxH = Math.max(180, Math.min(ZOOM_MAX, Math.round(vh * 0.72)));
+    let w = maxW;
+    let h = Math.round(w / ratio);
+    if (h > maxH) { h = maxH; w = Math.round(h * ratio); }
+    // 位置：优先贴在缩略图右侧，右边放不下改放左侧，最后夹进视口内
+    let left = right + ZOOM_GAP;
+    if (left + w > vw - ZOOM_GAP) left = rect.left - ZOOM_GAP - w;
+    if (left < ZOOM_GAP) left = Math.max(ZOOM_GAP, Math.min(vw - w - ZOOM_GAP, rect.left + rect.width / 2 - w / 2));
+    let top = rect.top + rect.height / 2 - h / 2;
+    top = Math.max(ZOOM_GAP, Math.min(vh - h - ZOOM_GAP, top));
+
+    const layer = ensureZoomLayer();
+    const view = layer.querySelector('img');
+    if (view && view.src !== img.src) view.src = img.src;
+    layer.style.left = `${Math.round(left)}px`;
+    layer.style.top = `${Math.round(top)}px`;
+    layer.style.width = `${w}px`;
+    layer.style.height = `${h}px`;
+    layer.classList.add('is-on');
+    zoomImg = img;
+  }
+
+  function hideThumbZoom() {
+    zoomImg = null;
+    if (zoomLayer) zoomLayer.classList.remove('is-on');
+  }
+
+  /** 绑定悬停放大：媒体库 #view 与媒体详情对话框都要有（对话框在顶层，不在 #view 内） */
+  function bindThumbZoomEvents(root) {
+    if (!root || !root.addEventListener) return;
+    root.addEventListener('mouseover', (e) => {
+      const img = thumbImgFrom(e.target);
+      if (!img || img === zoomImg) return;
+      showThumbZoom(img);
+    });
+    root.addEventListener('mouseout', (e) => {
+      const img = thumbImgFrom(e.target);
+      if (!img || img !== zoomImg) return;
+      const to = e.relatedTarget;
+      // 在同一条预览内部移动（缩略图 → 徽标 / 说明）不算离开
+      if (to && img.parentElement && img.parentElement.contains && img.parentElement.contains(to)) return;
+      hideThumbZoom();
+    });
+    // 滚动 / 点击后缩略图位置会变，直接收起
+    root.addEventListener('scroll', hideThumbZoom, true);
   }
 
   /* ---------------- 主题（跟随系统 / 浅色 / 深色） ---------------- */
@@ -172,7 +281,7 @@
     return `${val >= 100 ? val.toFixed(0) : val.toFixed(val >= 10 ? 1 : 2)} ${units[i]}`;
   }
 
-  /** 与 fmtBytes 相同，但固定保留两位小数（平均文档大小等需要精确读数的列） */
+  /** 与 fmtBytes 相同，但固定保留两位小数（集合明细等需要精确读数的列） */
   function fmtBytesFixed(n, digits = 2) {
     if (n === null || n === undefined || !Number.isFinite(Number(n))) return '—';
     const v = Number(n);
@@ -539,7 +648,7 @@
             <button class="chip" data-action="goto" data-view="transport">🚚 搬运收录</button>
             <button class="chip" data-action="goto" data-view="articles">📄 文章</button>
             <button class="chip" data-action="goto" data-view="collections">📚 合集</button>
-            <button class="chip" data-action="goto" data-view="raw">🗄 数据库 / 原始数据</button>
+            <button class="chip" data-action="goto" data-view="raw">🗄 数据库</button>
             <button class="chip" data-action="goto" data-view="stats">📈 统计报表</button>
             <button class="chip" data-action="palette">🧠 AI 翻译</button>
           </div>
@@ -1062,23 +1171,57 @@
     return Math.min(4, Math.floor((count - 1) / step) + 1);
   }
 
+  /** 查看项的中文名与单位（方格图图例 / 悬停提示用） */
+  function cgMetricMeta(metric, d) {
+    if (metric === 'media') return { label: '媒体', unit: '个' };
+    if (metric && metric.startsWith('action:')) {
+      const key = metric.slice(7);
+      const row = (((d || {}).byAction) || []).find(a => a.action === key);
+      return { label: row ? row.label : key, unit: '次' };
+    }
+    if (metric && metric.startsWith('category:')) {
+      const key = metric.slice(9);
+      const cat = ((d || {}).catalog && d.catalog.categories) || {};
+      return { label: cat[key] || key, unit: '次' };
+    }
+    return { label: '操作', unit: '次' };
+  }
+
   /**
-   * 方格总览（统计报表「每日操作量」）
+   * 方格「查看项」取值：默认全部操作；可按系统指标（媒体数）、大类、单个动作（如 mark）单独看
+   * @param {Object} row - 服务端 byDay 的一行 { day, count, media, groups, actions, categories }
+   * @param {string} metric - 'all' | 'media' | 'action:<key>' | 'category:<key>'
+   * @returns {number}
+   */
+  function cgMetricValue(row, metric) {
+    if (!row) return 0;
+    if (!metric || metric === 'all') return row.count || 0;
+    if (metric === 'media') return row.media || 0;
+    if (metric.startsWith('action:')) return (row.actions && row.actions[metric.slice(7)]) || 0;
+    if (metric.startsWith('category:')) return (row.categories && row.categories[metric.slice(9)]) || 0;
+    return 0;
+  }
+
+  /** 方格总览（统计报表「每日操作量」）
    * 版面：GitHub 全年贡献图 —— 7 行 = 周一…周日，每列一周，整年铺满；列宽自适应撑满卡片
    * @param {number} year
-   * @param {Array} byDay - 服务端聚合的每日数据 [{day, count, media}]
-   * 悬停显示：日期 + 操作次数 + 媒体数
+   * @param {Array} byDay - 服务端聚合的每日数据 [{day, count, media, actions, categories}]
+   * @param {string} [metric] - 查看项（'all' 默认全部操作 / 'media' / 'action:xxx' / 'category:xxx'）
+   * @param {string} [metricLabel] - 查看项名称（悬停提示与图例用）
+   * @param {string} [metricUnit] - 单位（次 / 个）
    */
-  function contribGridHtml(year, byDay) {
+  function contribGridHtml(year, byDay, metric = 'all', metricLabel = '操作', metricUnit = '次') {
     const rows = cgBuildDays(year);
     const map = new Map((byDay || []).map(x => [x.day, x]));
-    const max = Math.max(0, ...(byDay || []).map(x => x.count || 0));
+    const valueOf = (row) => cgMetricValue(row, metric);
+    const max = Math.max(0, ...(byDay || []).map(x => valueOf(x)));
     const cols = Math.max(1, rows.length / 7);
     const cells = rows.map(day => {
       if (!day) return '<i class="cg-cell" data-empty="1" title=""></i>';
       const row = map.get(day) || { count: 0, media: 0 };
-      const lv = cgLevel(row.count, max);
-      const title = `${day} 周${CG_DAY_LABELS[cgWeekIndex(new Date(day + 'T00:00:00Z').getUTCDay())]} · ${row.count} 次操作 · ${row.media || 0} 个媒体`;
+      const value = valueOf(row);
+      const lv = cgLevel(value, max);
+      const title = `${day} 周${CG_DAY_LABELS[cgWeekIndex(new Date(day + 'T00:00:00Z').getUTCDay())]} · ${metricLabel} ${value} ${metricUnit} · 当天共 ${row.count || 0} 次操作 · ${row.media || 0} 个媒体`;
       return `<i class="cg-cell${lv ? ` lv${lv}` : ''}" title="${esc(title)}"></i>`;
     }).join('');
 
@@ -1098,7 +1241,7 @@
       <span>少</span>
       <i></i><i class="lv1"></i><i class="lv2"></i><i class="lv3"></i><i class="lv4"></i>
       <span>多</span>
-      <span class="cg-tip">最高 ${fmtNum(max)} 次/天 · 色深随操作量递增</span>
+      <span class="cg-tip">最高 ${fmtNum(max)} ${metricUnit}/天 · 色深随${metricLabel}递增</span>
     </div>`;
 
     return `<div class="cg-wrap">
@@ -1205,6 +1348,23 @@
         <td class="log-detail">${esc(item.error || JSON.stringify(item.detail || {}).slice(0, 120))}</td>
       </tr>`).join('') || '<tr><td colspan="6"><div class="empty">没有符合条件的日志</div></td></tr>';
 
+    // 每日操作量「查看项」：默认全部操作；可按大类 / 单个动作（如「媒体标记」）单独看
+    const metricFixed = [{ v: 'all', l: '全部操作' }, { v: 'media', l: '媒体数' }];
+    const metricCategories = Object.entries((d.catalog && d.catalog.categories) || {})
+      .map(([k, l]) => ({ v: `category:${k}`, l }));
+    const metricActions = (d.byAction || [])
+      .map(a => ({ v: `action:${a.action}`, l: `${a.label}（${fmtNum(a.count)}）` }));
+    // 切换年份后原来的查看项可能没有数据了 → 回到默认「全部操作」
+    const metricAvailable = new Set([...metricFixed, ...metricCategories, ...metricActions].map(x => x.v));
+    if (!metricAvailable.has(s.metric)) s.metric = 'all';
+    const cgMetric = { value: s.metric, ...cgMetricMeta(s.metric, d) };
+    const metricOpt = (x) => `<option value="${esc(x.v)}" ${s.metric === x.v ? 'selected' : ''}>${esc(x.l)}</option>`;
+    const metricSelectOptions = [
+      metricFixed.map(metricOpt).join(''),
+      metricCategories.length ? `<optgroup label="按大类">${metricCategories.map(metricOpt).join('')}</optgroup>` : '',
+      metricActions.length ? `<optgroup label="按动作">${metricActions.map(metricOpt).join('')}</optgroup>` : ''
+    ].join('');
+
     $('#view').innerHTML = `
       <div class="toolbar">
         <span class="tag accent">${esc(d.label)}</span>
@@ -1220,11 +1380,14 @@
       <div class="card" style="margin-top:16px">
         <div class="card-head">
           <h3>每日操作量</h3>
-          <span class="dim">每格 = 一天，颜色越深操作越多（悬停看当天媒体数）· 7 行 = 周一…周日 · 每列一周</span>
+          <select id="contrib-metric" style="width:auto" title="选择方格图查看项（默认全部操作，可只看某类或某个动作，如「媒体标记」）">
+            ${metricSelectOptions}
+          </select>
+          <span class="dim">每格 = 一天，颜色越深「${esc(cgMetric.label)}」越多（悬停看当天详情）· 7 行 = 周一…周日 · 每列一周</span>
           <span class="spacer"></span>
           <span class="dim">${s.year} 全年</span>
         </div>
-        ${contribGridHtml(s.year, d.byDay)}
+        ${contribGridHtml(s.year, d.byDay, cgMetric.value, cgMetric.label, cgMetric.unit)}
       </div>
       <div class="grid-2">
         <div class="card">
@@ -1309,21 +1472,10 @@
     }
 
     $('#view').innerHTML = `
-      ${dbStatsSectionHtml()}
-      <div class="raw-toolbar">
-        <b style="font-size:13px">📁 集合浏览</b>
-        <select id="raw-collection" style="width:190px">${options}</select>
-        <select id="raw-sort" style="width:132px" ${isAll ? 'disabled' : ''}>
-          <option value="-1" ${r.sort === -1 ? 'selected' : ''}>最新在前</option>
-          <option value="1" ${r.sort === 1 ? 'selected' : ''}>最早在前</option>
-        </select>
-        <button class="btn btn-sm" data-action="raw-insert" ${isAll ? 'disabled' : ''}>➕ 插入数据</button>
-        <button class="btn btn-sm" data-action="palette">🧠 AI 翻译 / 执行</button>
-        <span class="grow"></span>
-        <span class="dim">${isAll ? '跨集合浏览（每集合最多 50 条）' : `共 ${fmtNum(r.total)} 条`}</span>
-      </div>
+      ${dbToolbarHtml(options, isAll, r)}
       <div class="doc-list">${listHtml}</div>
       ${isAll ? '' : paginationHtml(r, 'raw-page')}`;
+
     const db = state.dbstats.data;
     updatePageSub(db && db.available && db.totals
       ? `数据库 ${db.database} · ${fmtNum(db.totals.objects)} 个文档 · ${fmtBytes(db.totals.storageSize)} 存储占用 · ${isAll ? '跨集合浏览' : `${r.collection} 共 ${fmtNum(r.total)} 条`}`
@@ -2114,49 +2266,66 @@
     await show('collections');
   }
 
-  /* ============================ 数据库存储（并入「原始数据」） ============================ */
+  /* ============================ 数据库视图（集合浏览 + 集合明细整合） ============================ */
 
-  /** 数据库存储统计区块：整库汇总卡片 + 各集合明细表 */
-  function dbStatsSectionHtml() {
+  /**
+   * 数据库视图的整合版面：
+   *   上栏 = 集合浏览控制（选集合 / 排序 / 插入 / AI / 重新统计）+ 库信息
+   *   中部 = 整库汇总卡片（不含「平均文档」）
+   *   下方 = 各集合明细表（表格化，点行即切换集合浏览）
+   */
+  function dbToolbarHtml(options, isAll, r) {
     const d = state.dbstats.data;
-    if (!d) return '<div class="callout"><span>🗄</span><div>数据库统计加载中…</div></div>';
-    const t = d.totals || {};
-    const rows = (d.collections || []).map(c => `<tr>
+    const t = d && d.totals;
+
+    const cards = !d
+      ? '<div class="callout" style="margin-bottom:14px"><span>🗄</span><div>数据库统计加载中…</div></div>'
+      : (d.available && t
+        ? `<div class="stats">${[
+          statCard('🗄 集合数', t.collections, 'database: ' + (d.database || '—')),
+          statCard('📄 文档总数', t.objects, '整库 objects'),
+          sizeCard('💾 存储占用', t.storageSize, 'storageSize（磁盘实际占用）', 'is-accent'),
+          sizeCard('📦 数据体积', t.dataSize, 'dataSize（未压缩）'),
+          sizeCard('🔑 索引占用', t.indexSize, `${fmtNum(t.indexes)} 个索引`)
+        ].join('')}</div>`
+        : `<div class="stats">${statCard('🗄 数据库统计', null, '当前套餐不允许读取存储大小', 'is-warn')}</div>
+           <div class="callout" style="margin:14px 0"><span>⚠️</span><div><b>无法读取存储大小：</b>${esc(d.reason || '未知原因')}<br>
+           当前仅在支持 <code>dbStats</code> / <code>collStats</code> 的 MongoDB 部署上显示大小；文档数仍可在下方浏览中查看。</div></div>`);
+
+    const isCurrent = (name) => !isAll && r.collection === name;
+    const rows = ((d && d.collections) || []).map(c => `<tr data-action="raw-collection" data-collection="${esc(c.name)}" class="${isCurrent(c.name) ? 'is-active' : ''}" title="点这一行 → 在下方浏览 ${esc(c.name)}">
       <td><b class="mono">${esc(c.name)}</b> <span class="dim">${esc(c.label)}</span></td>
       <td class="num">${fmtNum(c.count)}</td>
       <td class="num">${fmtBytes(c.size)}</td>
       <td class="num">${fmtBytes(c.storageSize)}</td>
       <td class="num">${fmtBytes(c.indexSize)}</td>
       <td class="num">${fmtNum(c.nindexes)}</td>
-      <td class="num">${fmtBytesFixed(c.avgObjSize)}</td>
     </tr>`).join('');
 
-    const stats = d.available && t
-      ? [
-        statCard('🗄 集合数', t.collections, 'database: ' + (d.database || '—')),
-        statCard('📄 文档总数', t.objects, '整库 objects'),
-        sizeCard('💾 存储占用', t.storageSize, 'storageSize（磁盘实际占用）', 'is-accent'),
-        sizeCard('📦 数据体积', t.dataSize, 'dataSize（未压缩）'),
-        sizeCard('🔑 索引占用', t.indexSize, `${fmtNum(t.indexes)} 个索引`),
-        sizeCard('📐 平均文档', t.avgObjSize, 'avgObjSize')
-      ].join('')
-      : statCard('🗄 数据库统计', null, '当前套餐不允许读取存储大小', 'is-warn');
-
     return `
-      <div class="toolbar">
-        <b style="font-size:13px">🗄 数据库存储</b>
+      <div class="toolbar db-toolbar">
+        <b style="font-size:13px">🗄 数据库</b>
+        <select id="raw-collection" style="width:190px" title="选择要浏览的集合">${options}</select>
+        <select id="raw-sort" style="width:132px" title="排序方式" ${isAll ? 'disabled' : ''}>
+          <option value="-1" ${r.sort === -1 ? 'selected' : ''}>最新在前</option>
+          <option value="1" ${r.sort === 1 ? 'selected' : ''}>最早在前</option>
+        </select>
+        <button class="btn btn-sm" data-action="raw-insert" ${isAll ? 'disabled' : ''}>➕ 插入数据</button>
+        <button class="btn btn-sm" data-action="palette">🧠 AI 翻译 / 执行</button>
         <button class="btn btn-sm" data-action="dbstats-refresh">🔄 重新统计</button>
-        <span class="dim">库名 <code>${esc(d.database || '—')}</code> · 统计时间 ${fmtTime(d.at)}${d.available ? '' : ' · 已降级'}</span>
+        <span class="grow"></span>
+        <span class="dim">库名 <code>${esc((d && d.database) || '—')}</code>${d && d.at ? ` · 统计 ${fmtTime(d.at)}` : ''} · ${isAll ? '跨集合浏览（每集合最多 50 条）' : `${esc(r.collection)} 共 ${fmtNum(r.total)} 条`}</span>
       </div>
-      <div class="stats">${stats}</div>
-      ${d.available ? '' : `<div class="callout" style="margin:14px 0"><span>⚠️</span><div><b>无法读取存储大小：</b>${esc(d.reason || '未知原因')}<br>
-        当前仅在支持 <code>dbStats</code> / <code>collStats</code> 的 MongoDB 部署上显示大小；文档数仍可在下方跨集合浏览中查看。</div></div>`}
-      <div class="card" style="margin-bottom:18px">
-        <div class="card-head"><h3>各集合明细</h3><span class="dim">按数据体积降序</span></div>
+      ${cards}
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head">
+          <h3>集合明细</h3>
+          <span class="dim">按数据体积降序 · 点任意一行即在下方浏览该集合</span>
+        </div>
         <div class="table-wrap table-scroll">
-          <table>
-            <thead><tr><th>集合</th><th class="num">文档数</th><th class="num">数据体积</th><th class="num">存储占用</th><th class="num">索引占用</th><th class="num">索引数</th><th class="num">平均文档</th></tr></thead>
-            <tbody>${rows || '<tr><td colspan="7"><div class="empty">没有集合数据</div></td></tr>'}</tbody>
+          <table class="db-table">
+            <thead><tr><th>集合</th><th class="num">文档数</th><th class="num">数据体积</th><th class="num">存储占用</th><th class="num">索引占用</th><th class="num">索引数</th></tr></thead>
+            <tbody>${rows || '<tr><td colspan="6"><div class="empty">没有集合数据</div></td></tr>'}</tbody>
           </table>
         </div>
       </div>`;
@@ -2191,8 +2360,8 @@
     collections: { title: '合集 / 杂集', load: loadCollections, render: renderCollections },
     stats: { title: '统计报表', load: loadStats, render: renderStats },
     raw: {
-      title: '原始数据',
-      // 「原始数据」= 数据库存储统计 + 集合浏览（原来的「数据库」视图已并入这里）
+      title: '数据库',
+      // 数据库视图 = 集合浏览（上栏）+ 集合明细表 + 原始文档浏览（增删改）
       load: async () => { await Promise.all([loadRaw(), loadDbStats(false).catch(() => { })]); },
       render: renderRaw
     },
@@ -2210,6 +2379,7 @@
 
   async function show(view) {
     if (!VIEW_META[view]) return;
+    hideThumbZoom(); // 视图要整体重渲染，旧的缩略图马上就不存在了，先收起悬停放大浮层
     state.view = view;
     document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('is-active', b.dataset.view === view));
     $('#page-title').textContent = VIEW_META[view].title;
@@ -2278,6 +2448,7 @@
     });
 
     view.addEventListener('click', async (e) => {
+      hideThumbZoom(); // 点击后可能重渲染 / 弹窗，悬停放大浮层先收起
       const el = e.target.closest('[data-action]');
       if (!el) return;
       const action = el.dataset.action;
@@ -2477,6 +2648,10 @@
         state.oplogs.result = el.value;
         state.oplogs.page = 1;
         await loadOpLogs();
+        renderStats();
+      } else if (el.id === 'contrib-metric') {
+        // 每日操作量方格图：切换查看项（纯前端重绘，不重新请求）
+        state.stats.metric = el.value || 'all';
         renderStats();
       }
     });
@@ -2830,6 +3005,7 @@
   function bindDetailEvents() {
     const dlg = $('#detail-dialog');
     dlg.addEventListener('click', async (e) => {
+      hideThumbZoom(); // 选中媒体 / 关闭对话框前先收起悬停放大浮层
       const el = e.target.closest('[data-action]');
       if (!el && e.target.dataset.close === undefined) return;
       const action = el ? el.dataset.action : 'detail-close';
@@ -3073,6 +3249,13 @@
     bindOptions();
     bindViewEvents();
     bindDetailEvents();
+    // 缩略图悬停放大：媒体库在 #view 内，媒体详情在对话框（顶层）里，两处都要绑
+    bindThumbZoomEvents($('#view'));
+    bindThumbZoomEvents($('#detail-dialog'));
+    if (window.addEventListener) {
+      window.addEventListener('scroll', hideThumbZoom, true);
+      window.addEventListener('resize', hideThumbZoom);
+    }
     $('#login-btn').addEventListener('click', login);
     $('#login-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
     if (token()) enterApp();

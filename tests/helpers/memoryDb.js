@@ -93,7 +93,12 @@ function applyUpdate(doc, update) {
         const set = update[0].$set || {};
         for (const [k, expr] of Object.entries(set)) {
             const add = expr.$max[1].$add;
-            const cur = getPath(doc, '$' + add[0].slice(1)) || 0;
+            // $add[0] 可能是 '$count'（字符串）或 { $ifNull: ['$count', 0] }（tagUsed 实际写法）
+            const operand = add[0];
+            const field = typeof operand === 'string'
+                ? operand.replace(/^\$/, '')
+                : (operand && Array.isArray(operand.$ifNull) ? String(operand.$ifNull[0]).replace(/^\$/, '') : null);
+            const cur = field ? (getPath(doc, field) || 0) : 0;
             setPath(doc, k, Math.max(expr.$max[0], cur + add[1]));
         }
         return;

@@ -356,6 +356,8 @@ select { appearance: none; padding-right: 26px;
   display: grid; place-items: center; overflow: hidden; border-bottom: 1px solid var(--border-soft);
 }
 .media-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 悬停：缩略图本身切到 contain（不再裁切，整图可见），并弹出放大预览（见 .thumb-zoom） */
+.media-thumb:hover img { object-fit: contain; }
 .media-thumb .ph { font-size: 30px; opacity: .55; }
 .media-thumb .badges { position: absolute; left: 8px; top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
 .media-thumb .badges .tag { backdrop-filter: blur(6px); background: color-mix(in srgb, var(--surface) 78%, transparent); }
@@ -502,6 +504,8 @@ td.right, th.right { text-align: right; }
 .detail-item .cap { padding: 6px 8px; font-size: 11px; color: var(--text-3); display: flex; justify-content: space-between; gap: 6px; }
 .detail-item .ph { aspect-ratio: 1; display: grid; place-items: center; font-size: 26px; opacity: .6; }
 .detail-item img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+/* 悬停：详情里的媒体缩略图同样不再裁切（整图可见），并把放大预览浮层显示在它旁边 */
+.detail-item:hover img { object-fit: contain; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 12.5px; }
 .kv .k { color: var(--text-3); }
 .kv .v { min-width: 0; overflow-wrap: anywhere; }
@@ -676,6 +680,27 @@ html[data-theme="light"] {
 .log-detail { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); word-break: break-all; }
 .table-scroll { overflow-x: auto; }
 
+/* ---------- 缩略图悬停放大：整图可见（不裁切） ----------
+   缩略图用 object-fit: cover 裁切，浮层挂在 body 或「已打开的对话框」里，
+   用 position: fixed + object-fit: contain 展示完整图片，不受任何容器裁切。 */
+.thumb-zoom {
+  position: fixed; z-index: 90; display: none; pointer-events: none;
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--surface-2); box-shadow: var(--shadow-3); overflow: hidden;
+}
+.thumb-zoom.is-on { display: block; animation: thumb-zoom-in var(--speed) var(--ease); }
+.thumb-zoom img { width: 100%; height: 100%; object-fit: contain; display: block; }
+@keyframes thumb-zoom-in {
+  from { opacity: 0; transform: scale(.94); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- 数据库视图：集合明细表可点行切换浏览 ---------- */
+.db-table tbody tr[data-action] { cursor: pointer; }
+.db-table tbody tr[data-action]:hover { background: var(--hover); }
+.db-table tbody tr.is-active { background: var(--accent-soft); }
+.db-table tbody tr.is-active td:first-child b { color: var(--accent); }
+
 /* ---------- 统计报表：底部日志表撑满剩余高度（否则悬在中间、不贴底） ---------- */
 .view-fill { display: flex; flex-direction: column; }
 .view-fill > .toolbar,
@@ -683,10 +708,12 @@ html[data-theme="light"] {
 .view-fill > .grid-2,
 .view-fill > .card { flex: 0 0 auto; }
 .view-fill > .stats-logs-card {
-  flex: 1 1 auto; display: flex; flex-direction: column; min-height: 280px;
+  flex: 1 1 auto; display: flex; flex-direction: column;
+  /* 之前只有 280px（约 4 行），可查看区域太小 → 加长到约 14 行，窄屏按视口自适应 */
+  min-height: min(760px, 92vh);
 }
 .view-fill > .stats-logs-card > .table-wrap {
-  flex: 1 1 auto; min-height: 0; overflow: auto;
+  flex: 1 1 auto; min-height: min(620px, 72vh); overflow: auto;
 }
 
 /* ---------- 媒体详情：选中媒体后高亮其可改标签 ---------- */

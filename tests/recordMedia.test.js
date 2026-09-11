@@ -166,7 +166,10 @@ test('/send：空描述单条媒体照常收录，is_delete 记为时间戳', as
     const groupId = `${TARGET}_7001`;
     const doc = getMedia().find(d => d.group_id === groupId);
     assert.ok(doc, '空描述媒体应收录进 media');
-    assert.deepEqual(doc.group, { chat_id: TARGET, message_id: doc.message_id });
+    // 位置只写子文档（不再写顶层 message_id）
+    assert.equal(doc.group.chat_id, TARGET);
+    assert.ok(doc.group.message_id > 0, '群组位置应带消息 ID');
+    assert.ok(!('message_id' in doc), '顶层 message_id 已废弃，不应再写');
     assert.equal(getMessages().length, 0);
     assert.ok(findGroupList(groupId).is_delete > 0);
 });

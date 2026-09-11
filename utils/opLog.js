@@ -60,6 +60,7 @@ const ACTIONS = {
     media_clean_execute: { type: 18, category: 'clean', label: '执行清理' },
     media_clean_scan: { type: 18, category: 'clean', label: '清理扫描' },
     mark: { type: 20, category: 'media', label: '媒体标记' },
+    mark_record: { type: 20, category: 'media', label: '标记仅记录' },
 
     // ---------- 发送 / 回复 / 合并 ----------
     send_media: { type: 25, category: 'send', label: '发送媒体' },

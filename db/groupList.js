@@ -18,8 +18,9 @@ async function upsertGroupList(groupId, count = 1) {
                 $setOnInsert: {
                     group_id: groupId,
                     is_delete: null,      // 🔁 默认 null，表示“未确定状态”
-                    mark: 0,
-                    last_mark_time: null // ⏱ 最后标记时间（毫秒时间戳）
+                    mark: 0
+                    // last_mark_time 不在这里写：没被标记过的组不该有该字段，
+                    // 只在 /mark 标记成功时由 incrementMark 写入
                 }
             },
             { upsert: true }
@@ -112,7 +113,7 @@ async function deleteGroupList(groupId) {
 }
 
 /**
- * 标记次数 +1，并记录最后标记时间
+ * 标记次数 +1，并记录最后标记时间（**只有标记过的组才有 last_mark_time 字段**）
  * @param {string} groupId - 媒体组ID
  * @returns {Promise<number|null>} 更新后的 mark 值（未匹配到则返回 null）
  */
@@ -132,6 +133,28 @@ async function incrementMark(groupId) {
     } catch (err) {
         logger.error(`incrementMark 失败: ${err.message}`);
         throw err;
+    }
+}
+
+/**
+ * 一次性清理历史数据：把「没被标记过」（last_mark_time 为 null）的字段直接删掉，
+ * 让 group_list 里只有真正标记过的组才带 last_mark_time。
+ * 幂等：清理完再跑一次匹配 0 条。
+ * @returns {Promise<number>} 清理的文档数
+ */
+async function cleanupNullMarkTime() {
+    try {
+        const col = getCollection(COLLECTIONS.GROUP_LIST);
+        const result = await col.updateMany(
+            { last_mark_time: null },
+            { $unset: { last_mark_time: '' } }
+        );
+        const cleaned = result.modifiedCount || 0;
+        if (cleaned > 0) logger.success(`group_list 清理未标记的 last_mark_time 字段: ${cleaned} 条`);
+        return cleaned;
+    } catch (err) {
+        logger.error(`清理 last_mark_time 失败: ${err.message}`);
+        return 0;
     }
 }
 
@@ -156,5 +179,6 @@ module.exports = {
     findGroupList,
     deleteGroupList,
     incrementMark,
+    cleanupNullMarkTime,
     getMarkedGroups
 };

@@ -35,6 +35,12 @@ test('index.html 包含既有测试依赖的文案', () => {
   assert.ok(html.includes('全部数据库'), '需包含“全部数据库”选项');
 });
 
+test('index.html：导航里「数据库 / 原始数据」已改名为「数据库」', () => {
+  assert.match(html, /data-view="raw"/, '数据库视图入口还在');
+  assert.match(html, /<span class="nav-ico">🗄<\/span><span>数据库<\/span>/, '导航文案为「数据库」');
+  assert.ok(!html.includes('数据库 / 原始数据'), '旧名字已去掉');
+});
+
 test('app.js 引用的元素 id 都存在于 index.html 或视图模板中', () => {
   // 视图 HTML 在 app.js 内以模板字符串渲染，因此模板里的 id 也算已定义
   const ids = new Set([...idsInHtml(html), ...idsInHtml(js)]);
@@ -72,4 +78,26 @@ test('style.css：选中的标签区必须重新打开 pointer-events（否则�
   const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
   assert.match(css, /\.tag-edit\.is-locked\s*\{[^}]*pointer-events:\s*none/, '未选中时禁用鼠标事件');
   assert.match(css, /\.tag-edit\.is-active\s*\{[^}]*pointer-events:\s*auto/, '选中后必须恢复鼠标事件');
+});
+
+test('style.css：缩略图悬停放大必须「整图可见」（不裁切）', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  assert.match(css, /\.media-thumb:hover img\s*\{[^}]*object-fit:\s*contain/, '媒体库缩略图悬停不再裁切');
+  assert.match(css, /\.detail-item:hover img\s*\{[^}]*object-fit:\s*contain/, '媒体详情条悬停不再裁切');
+  const zoom = (css.match(/\.thumb-zoom\s*\{[^}]*\}/) || [''])[0];
+  assert.ok(zoom, '缺少 .thumb-zoom 浮层规则');
+  assert.match(zoom, /position:\s*fixed/, '浮层用固定定位，避免被容器裁切');
+  assert.match(css, /\.thumb-zoom img\s*\{[^}]*object-fit:\s*contain/, '浮层内按完整比例展示图片');
+});
+
+test('style.css：统计报表「操作日志明细」可查看区域已加长', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  const card = (css.match(/\.view-fill > \.stats-logs-card\s*\{[^}]*\}/) || [''])[0];
+  assert.ok(card, '缺少 .stats-logs-card 规则');
+  const cardH = card.match(/min-height:\s*min\((\d+)px/);
+  assert.ok(cardH && Number(cardH[1]) >= 600, `日志明细卡片最小高度应 ≥600px，实际 ${cardH ? cardH[1] : '无'}`);
+  const wrap = (css.match(/\.view-fill > \.stats-logs-card > \.table-wrap\s*\{[^}]*\}/) || [''])[0];
+  assert.ok(wrap, '缺少日志表格区域规则');
+  const wrapH = wrap.match(/min-height:\s*min\((\d+)px/);
+  assert.ok(wrapH && Number(wrapH[1]) >= 500, `日志表格可滚动高度应 ≥500px，实际 ${wrapH ? wrapH[1] : '无'}`);
 });

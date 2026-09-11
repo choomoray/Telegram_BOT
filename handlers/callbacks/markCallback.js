@@ -4,7 +4,9 @@ const logger = require('../../logger');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { getMarkedGroups } = require('../../db/groupList');
 const { createSession, getSession, getPageResults } = require('../../utils/queryCache');
-const { deleteUserState, updateUserActivity } = require('../../states');
+const { deleteUserState, getRawUserState, updateUserActivity } = require('../../states');
+const { insertMarkRecord } = require('../../db/mark');
+const { logOperation } = require('../../utils/opLog');
 const {
     sortMarkRecords,
     formatMarkRecords,
@@ -95,6 +97,7 @@ async function handleMarkMenuCallback(query) {
 
     switch (action) {
         case 'start': {
+            // 兼容旧消息里的「✅ 开始标记」按钮（新菜单已不再展示）
             updateUserActivity(userId);
             await bot.editMessageText('✅ 开始标记\n请发送要标记的媒体（支持媒体组，仅处理第一条媒体）。', {
                 chat_id: chatId,
@@ -102,6 +105,37 @@ async function handleMarkMenuCallback(query) {
             });
             await bot.answerCallbackQuery(query.id, { text: '开始标记' });
             logger.info(`用户 ${userId} 通过菜单开始标记`);
+            break;
+        }
+        case 'record': {
+            // 仅记录：不标记任何媒体/媒体组，只在 mark 集合记一条（不带 group_id / 媒体字段）
+            const st = getRawUserState(userId);
+            if (!st || st.mode !== 'mark') {
+                // 单选题：已经用另一种方式结束过（或超时），旧按钮不再生效
+                await bot.answerCallbackQuery(query.id, { text: '❌ 标记模式已结束，请重新 /mark' });
+                break;
+            }
+            updateUserActivity(userId);
+            const saved = await insertMarkRecord({ userId, mode: 'record' });
+            logOperation({
+                action: 'mark_record',
+                source: 'private',
+                userId,
+                chatId,
+                messageId,
+                target: { type: 'record', id: `record:${userId}` },
+                counts: { records: 1 },
+                detail: { via: 'mark_menu_record' }
+            }).catch(() => { });
+            await bot.editMessageText(saved
+                ? '✅ 记录完成（仅记录，未标记任何媒体/媒体组）\n已退出标记模式'
+                : '❌ 记录失败，请稍后重试', {
+                chat_id: chatId,
+                message_id: messageId
+            }).catch(() => { });
+            await bot.answerCallbackQuery(query.id, { text: saved ? '✅ 记录完成' : '❌ 记录失败' });
+            deleteUserState(userId);
+            logger.info(`用户 ${userId} 仅记录完成（未标记任何媒体/媒体组），已退出标记模式`);
             break;
         }
         case 'records': {

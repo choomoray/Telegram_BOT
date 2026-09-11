@@ -350,7 +350,6 @@ async function recordSentMedia(sentMsg, targetChatId, groupId, mediaInfo, target
         file_id: sentMsg.photo ? sentMsg.photo[sentMsg.photo.length - 1].file_id : (sentMsg.video ? sentMsg.video.file_id : (sentMsg.audio ? sentMsg.audio.file_id : sentMsg.document.file_id)),
         file_unique_id: fileUniqueId,
         media_type: type,
-        message_id: sentMsg.message_id,
         video_time: videoTime,
         thumb_file_id: thumbFileId,
         ...location
@@ -602,7 +601,8 @@ async function sendSuccessWithTags(userId, text, groupId, caption, editMessageId
     }
 
     // 自动识别媒体文本中出现的标签：标签按 message 独立——
-    // 只写入该条 message（file_unique_id），并替换它原有的标签（新消息原标签为空，等价于直接打上）；
+    // 只写入该条 message（file_unique_id）；**保留已有标签，只补充新匹配到且尚未打上的**
+    // （编辑描述后弹出的打标签界面不会再清掉之前手动打好的标签）；
     // 不传 file_unique_id（旧调用兜底）时退化为整组添加
     const allTags = await getTags();
     const matched = matchTagsInText(caption, allTags);
@@ -610,11 +610,8 @@ async function sendSuccessWithTags(userId, text, groupId, caption, editMessageId
     if (fileUniqueId) {
         const prev = await getMessageTags(fileUniqueId);
         prevTags = prev;
-        for (const tag of prev) {
-            await removeTagFromMessage(fileUniqueId, tag);
-            await tagUsed(tag, -1);
-        }
         for (const tag of matched) {
+            if (prev.includes(tag)) continue;
             await addTagToMessage(fileUniqueId, tag);
             await tagUsed(tag, 1);
         }

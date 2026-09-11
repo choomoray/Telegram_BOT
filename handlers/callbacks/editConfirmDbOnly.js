@@ -27,16 +27,16 @@ async function handleEditConfirmDbOnly(query) {
 
     try {
         if (isClearing) {
+            // 清空描述：先清标签（此刻 message 记录还在，才能递减标签使用次数），再删 message 记录
+            if (targetFileUniqueId) {
+                const { clearMessageTags } = require('../../utils/tagSync');
+                await clearMessageTags(targetFileUniqueId);
+            }
             const existing = await messageCol.findOne({ chat_id: targetChatId, message_id: targetMessageId });
             if (existing) {
                 await messageCol.deleteOne({ chat_id: targetChatId, message_id: targetMessageId });
                 // 描述清空后按组内剩余文本统一重算（还有文本 → 0；已无文本 → 时间戳可清理）
                 await syncGroupDeleteByText(targetGroupId);
-            }
-            // 标签跟随文本：清空该 message 的标签
-            if (targetFileUniqueId) {
-                const { clearMessageTags } = require('../../utils/tagSync');
-                await clearMessageTags(targetFileUniqueId);
             }
         } else {
             const existing = await messageCol.findOne({ chat_id: targetChatId, message_id: targetMessageId });
@@ -57,7 +57,7 @@ async function handleEditConfirmDbOnly(query) {
                 });
             }
             await syncGroupDeleteByText(targetGroupId);
-            // 标签跟随文本：按新文本重算该 message 的标签
+            // 标签：编辑描述**保留已有标签**，只补充新文本匹配到的（不再清空重打）
             if (targetFileUniqueId) {
                 const { reMatchMessageTags } = require('../../utils/tagSync');
                 await reMatchMessageTags(targetFileUniqueId, cleanText);

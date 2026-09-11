@@ -159,6 +159,8 @@ function parseTree(html, owner) {
         }
         child.id = (attrs.match(/id="([^"]*)"/) || [, ''])[1];
         child.value = (attrs.match(/value="([^"]*)"/) || [, ''])[1];
+        // <img src>：悬停放大浮层会读取缩略图的 src（测试里需要能断言）
+        child.src = (attrs.match(/src="([^"]*)"/) || [, ''])[1];
         child.disabled = /\sdisabled(\s|>|$)/.test(attrs);
         const top = stack[stack.length - 1];
         child.parentElement = top.el;
@@ -169,13 +171,18 @@ function parseTree(html, owner) {
     return out;
 }
 
-/** 在元素子树里按 class 选择器查找（仅支持 .cls 与 tag.cls 的简化形式） */
+/** 在元素子树里按选择器查找（支持 .cls / tag.cls / #id 的简化形式） */
 function queryAll(root, selector) {
-    const cls = String(selector).replace(/^[a-zA-Z]+/, '').replace(/^\./, '');
+    const raw = String(selector);
+    const byId = raw.startsWith('#');
+    const cls = byId ? raw.slice(1) : raw.replace(/^[a-zA-Z]+/, '').replace(/^\./, '');
     const results = [];
     const walk = (nodes) => {
         for (const n of nodes) {
-            if ((n.classList && n.classList.contains(cls)) || n.className === cls) results.push(n);
+            const hit = byId
+                ? n.id === cls
+                : ((n.classList && n.classList.contains(cls)) || n.className === cls);
+            if (hit) results.push(n);
             if (n.children && n.children.length) walk(n.children);
         }
     };
@@ -345,7 +352,7 @@ function fixtures() {
             return {
                 group: { group_id: '-100_1', is_group: 2, is_delete: 0, mark: 1, cleanable: false },
                 media: [
-                    { file_unique_id: 'AQAD1', media_type: 'photo', subgroup: 1, message_id: 11, thumbable: false, group: { chat_id: -100, message_id: 11 } },
+                    { file_unique_id: 'AQAD1', media_type: 'photo', subgroup: 1, message_id: 11, thumbable: true, group: { chat_id: -100, message_id: 11 } },
                     { file_unique_id: 'AQAD2', media_type: 'video', subgroup: 1, message_id: 12, video_time: 30, thumbable: false, group: { chat_id: -100, message_id: 12 } }
                 ],
                 messages: [
@@ -359,6 +366,8 @@ function fixtures() {
             const period = params.get('period') === 'year' ? 'year' : 'month';
             const year = Number(params.get('year')) || 2026;
             const month = Number(params.get('month')) || 1;
+            // 「媒体标记」只在今年有数据：用于验证切换年份后查看项自动回落
+            const hasMark = year === new Date().getFullYear();
             return {
                 period,
                 year,
@@ -368,15 +377,28 @@ function fixtures() {
                 totals: { operations: 3, media: 1, groups: 1, activeDays: 2, avgPerDay: 1.5 },
                 previous: { label: '上期', totals: { operations: 1 }, operationsDelta: 200, mediaDelta: null },
                 byDay: [
-                    { day: `${year}-${String(month).padStart(2, '0')}-02`, count: 1, media: 1, groups: 1 },
-                    { day: `${year}-${String(month).padStart(2, '0')}-05`, count: 4, media: 0, groups: 0 }
+                    { day: `${year}-${String(month).padStart(2, '0')}-02`, count: 1, media: 1, groups: 1, actions: { media_save: 1 }, categories: { media: 1 } },
+                    {
+                        day: `${year}-${String(month).padStart(2, '0')}-05`, count: 4, media: 0, groups: 0,
+                        actions: hasMark ? { media_save: 2, mark: 2 } : { media_save: 4 },
+                        categories: { media: 4 }
+                    }
                 ],
                 byHour: Array.from({ length: 24 }, (_, h) => ({ hour: h, count: h === 9 ? 2 : (h === 21 ? 4 : 0), media: 0 })),
-                byAction: [{ action: 'media_save', label: '媒体收录', category: 'media', count: 3, media: 1, groups: 1, fail: 0, users: 1 }],
+                byAction: [
+                    { action: 'media_save', label: '媒体收录', category: 'media', count: 3, media: 1, groups: 1, fail: 0, users: 1 },
+                    ...(hasMark ? [{ action: 'mark', label: '媒体标记', category: 'media', count: 2, media: 0, groups: 0, fail: 0, users: 1 }] : [])
+                ],
                 byCategory: [{ category: 'media', label: '媒体', count: 3, actions: {} }],
                 topUsers: [{ userId: 123, count: 3 }],
                 failures: { count: 0, byAction: {} },
-                catalog: { categories: { media: '媒体' }, actions: [{ action: 'media_save', label: '媒体收录', category: 'media' }] }
+                catalog: {
+                    categories: { media: '媒体' },
+                    actions: [
+                        { action: 'media_save', label: '媒体收录', category: 'media' },
+                        ...(hasMark ? [{ action: 'mark', label: '媒体标记', category: 'media' }] : [])
+                    ]
+                }
             };
         },
         '/api/oplogs': { total: 0, page: 1, pageSize: 30, totalPages: 1, items: [], catalog: { categories: {}, actions: [] } },
@@ -476,22 +498,55 @@ test('文章 / 合集视图：渲染与表单', async () => {
     assert.ok(env.requests.some(r => r.url.includes('type=misc')));
 });
 
-// ---------------- 数据库并入原始数据 ----------------
+// ---------------- 数据库视图：集合浏览 + 集合明细整合 ----------------
 
-test('「原始数据」已整合数据库统计：汇总卡 + 集合明细 + 平均文档两位小数', async () => {
+test('「数据库」视图：上栏（集合浏览）+ 集合明细表 整合，且不再有「平均文档」', async () => {
     const env = await boot();
     const view = await goto(env, 'raw');
     const html = view.innerHTML;
-    assert.match(html, /🗄 数据库存储/);
-    assert.match(html, /各集合明细/);
+
+    // 页标题已改名为「数据库」（导航文案由 uiStatic.test.js 校验 index.html）
+    assert.match(env.document.querySelector('#page-title').textContent, /数据库/);
+
+    // 上栏 = 集合浏览控制 + 库信息（同一个工具条）
+    assert.match(html, /<div class="toolbar db-toolbar">/);
+    assert.match(html, /🗄 数据库/);
+    assert.match(html, /id="raw-collection"/, '上栏有集合选择');
+    assert.match(html, /id="raw-sort"/, '上栏有排序');
+    assert.match(html, /data-action="raw-insert"/, '上栏有插入');
+    assert.match(html, /data-action="palette"/, '上栏有 AI 翻译');
+    assert.match(html, /data-action="dbstats-refresh"/, '上栏有重新统计');
+    assert.match(html, /库名 <code>telegram_bot_test<\/code>/);
+
+    // 中部：整库汇总卡片（保留），但没有「平均文档」
+    assert.match(html, /class="stats"/);
+    assert.match(html, /🗄 集合数/);
+    assert.match(html, /📄 文档总数/);
+    assert.match(html, /💾 存储占用/);
+    assert.ok(!html.includes('平均文档'), '「平均文档」卡片与表头列都已移除');
+    assert.ok(!html.includes('avgObjSize'), '不再展示 avgObjSize');
+
+    // 下方：集合明细表格化（数据列保留 2.00 KB 这类读数）
+    assert.match(html, /<h3>集合明细<\/h3>/);
+    assert.match(html, /<table class="db-table">/);
     assert.match(html, /媒体文件/);
     assert.match(html, /2\.00 KB/, '集合 storageSize 2048 → 2.00 KB');
-    assert.match(html, /204\.57 B/, '平均文档保留两位小数');
-    assert.match(html, /集合浏览/);
-    assert.ok(env.requests.some(r => r.url.startsWith('/api/db-stats')));
+    assert.ok(html.includes('data-action="raw-collection" data-collection="media" class=""'), '明细行可点；「全部数据库」时不选中任何行');
 
+    assert.ok(env.requests.some(r => r.url.startsWith('/api/db-stats')));
     await act(env, { action: 'dbstats-refresh' });
     assert.ok(env.requests.some(r => r.url.includes('/api/db-stats?force=1')));
+});
+
+test('「数据库」视图：点集合明细行即切换浏览该集合（高亮当前行）', async () => {
+    const env = await boot();
+    await goto(env, 'raw');
+    // 点 media 那一行
+    await act(env, { action: 'raw-collection', collection: 'media' });
+    const html = env.document.querySelector('#view').innerHTML;
+    assert.match(html, /option value="media" selected/, '上栏集合切换为 media');
+    assert.match(html, /data-collection="media" class="is-active"/, '当前集合行高亮');
+    assert.ok(env.requests.some(r => r.url.startsWith('/api/db/query') && r.body && r.body.collection === 'media'), '按该集合拉取文档');
 });
 
 test('数据库不可读取大小（降级）时给出提示而不是报错', async () => {
@@ -540,6 +595,49 @@ test('媒体库：点媒体卡片能进入详情（data-action 必须是 open-me
 });
 
 // ---------------- 媒体详情：点选媒体后高亮可改标签 ----------------
+
+test('媒体库缩略图悬停：弹出「整图可见」的放大预览，移出后收起', async () => {
+    const env = await boot();
+    const view = await goto(env, 'media');
+
+    const thumb = view.querySelector('.media-thumb');
+    assert.ok(thumb, '媒体卡片应有缩略图容器');
+    const img = thumb.querySelector('img');
+    assert.ok(img && img.src, '缩略图应带 src');
+
+    await view.fire('mouseover', { target: img });
+    const host = env.document.body || env.document.documentElement;
+    const layer = host.querySelector('.thumb-zoom');
+    assert.ok(layer, '悬停应创建放大预览浮层');
+    assert.ok(layer.classList.contains('is-on'), '浮层应显示');
+    assert.strictEqual(layer.querySelector('img').src, img.src, '浮层展示同一张图（完整比例，不裁切）');
+    assert.match(String(layer.style.left), /px$/, '浮层应定位到缩略图旁');
+    assert.match(String(layer.style.width), /px$/, '浮层应有明确尺寸');
+
+    await view.fire('mouseout', { target: img, relatedTarget: null });
+    assert.ok(!layer.classList.contains('is-on'), '移出缩略图后浮层收起');
+});
+
+test('媒体详情条悬停：放大预览挂进对话框（顶层，否则会被遮住）', async () => {
+    const env = await boot();
+    await goto(env, 'media');
+    await act(env, { action: 'open-media', group: '-100_1' });
+
+    const dlg = env.document.querySelector('#detail-dialog');
+    const item = env.document.querySelector('#detail-body').querySelector('.detail-item');
+    const img = item.querySelector('img');
+    assert.ok(img && img.src, '详情媒体条应带缩略图');
+
+    await dlg.fire('mouseover', { target: img });
+    const layer = dlg.querySelector('.thumb-zoom');
+    assert.ok(layer, '详情条悬停也要有放大浮层');
+    assert.strictEqual(layer.parentElement, dlg, '浮层必须挂进已打开的对话框（原生 dialog 在顶层）');
+    assert.ok(layer.classList.contains('is-on'));
+    assert.strictEqual(layer.querySelector('img').src, img.src);
+
+    await dlg.fire('mouseout', { target: img, relatedTarget: null });
+    assert.ok(!layer.classList.contains('is-on'), '移出后收起');
+});
 
 test('媒体详情：移除整组操作，未选中时标签区灰掉不可点', async () => {
     const env = await boot();
@@ -638,6 +736,47 @@ test('统计报表：每日操作量统一为全年 GitHub 方格（当天天数
     assert.match(html, /12月/);
     assert.ok(!html.includes('最活跃的日子'), '右侧「最活跃的日子」已移除');
     assert.ok(!html.includes('cg-flex'), '不再用左右分栏，方格独占整条');
+});
+
+test('统计报表：每日操作量可手动切换查看项（默认全部操作，可只看「媒体标记」）', async () => {
+    const env = await boot();
+    const view = await goto(env, 'stats');
+    const year = new Date().getFullYear();
+
+    const sel = view.querySelector('#contrib-metric');
+    assert.ok(sel, '方格图应带「查看项」选择器');
+    assert.match(view.innerHTML, /<select id="contrib-metric"[^>]*>[\s\S]*?全部操作[\s\S]*?<\/select>/, '选择器里有「全部操作」');
+    assert.ok(view.innerHTML.includes('<optgroup label="按大类">'), '可按大类查看');
+    assert.ok(view.innerHTML.includes('<optgroup label="按动作">'), '可按动作单独查看（如媒体标记）');
+    assert.match(view.innerHTML, /<option value="action:mark"[^>]*>媒体标记（2）<\/option>/, '动作项带次数，便于挑选');
+    assert.match(view.innerHTML, /<option value="all" selected>全部操作<\/option>/, '默认选中全部操作');
+
+    // 默认视图：全部操作（5 次那天最深、提示写「操作」）
+    assert.match(view.innerHTML, /媒体标记/);           // 选择器里能看到
+    assert.match(view.innerHTML, /色深随操作递增/);
+
+    // 切到「媒体标记」→ 只按 mark 计数，提示与图例都换名称
+    await view.fire('change', { target: { id: 'contrib-metric', value: 'action:mark' } });
+    const html = view.innerHTML;
+    // 注意：报表按年请求（不带 month），测试数据里的日子落在 1 月
+    assert.match(html, new RegExp(`title="${year}-01-05 周[一二三四五六日] · 媒体标记 2 次 · 当天共 4 次操作`), '悬停提示按所选查看项展示');
+    assert.match(html, new RegExp(`title="${year}-01-02 周[一二三四五六日] · 媒体标记 0 次`), '没有该动作的日子为 0');
+    assert.match(html, /色深随媒体标记递增/, '图例跟随查看项');
+    assert.match(html, /最高 2 次\/天/, '分级上限按所选查看项计算');
+    assert.match(html, /<option value="action:mark" selected>媒体标记（2）<\/option>/, '选择器保持选中态');
+});
+
+test('统计报表：切换年份后如果该查看项没有数据，自动回到「全部操作」', async () => {
+    const env = await boot();
+    const view = await goto(env, 'stats');
+    await view.fire('change', { target: { id: 'contrib-metric', value: 'action:mark' } });
+    assert.match(view.innerHTML, /色深随媒体标记递增/);
+
+    // 换一年：该年数据里没有 mark → 选择器回落默认（避免选着一个空白项）
+    await act(env, { action: 'stats-year-prev' });
+    const html = env.document.querySelector('#view').innerHTML;
+    assert.match(html, /色深随操作递增/, '回落到全部操作');
+    assert.match(html, /<option value="all" selected>全部操作<\/option>/);
 });
 
 test('统计报表：顶栏右上角 ◀ ▶ 切换年份（无月报/年报页签）', async () => {

@@ -15,6 +15,12 @@ const { setUserState, deleteUserState, getRawUserState } = require('../states');
 const { isAdmin } = require('../utils/permissions');
 const { removeLevelSuffix } = require('../utils/levelExtractor');
 const { logOperation } = require('../utils/opLog');
+const {
+    isEditTargetError,
+    resolveEditTargets,
+    editCaptionWithFallback,
+    editCaptionHtml
+} = require('../utils/editTarget');
 
 const SUPPORTED_MEDIA_TYPES = ['photo', 'video', 'audio', 'document'];
 
@@ -39,17 +45,10 @@ function scheduleDelete(chatId, messageId) {
 
 /**
  * 编辑 caption：优先 HTML 解析；文本含 HTML 特殊字符解析失败时降级为纯文本编辑
+ * （editCaptionHtml 内置该降级，见 utils/editTarget.js）
  */
-async function editCaptionRobust(chatId, messageId, text) {
-    try {
-        await bot.editMessageCaption(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML' });
-    } catch (err) {
-        if ((err.message || '').includes('parse')) {
-            await bot.editMessageCaption(text, { chat_id: chatId, message_id: messageId });
-        } else {
-            throw err;
-        }
-    }
+function editCaptionRobust(chatId, messageId, text) {
+    return editCaptionHtml(bot, chatId, messageId, text);
 }
 
 /** 清理两步等待状态（若存在） */
@@ -64,7 +63,7 @@ function cleanupPendingState(userId) {
 /**
  * 执行修改：编辑 Telegram caption + 更新数据库 + 重算标签 + 确认提示 + 1 分钟后删除全部操作记录
  */
-async function applyReplyEdit(msg, { mediaDoc, targetChatId, targetMessageId, newText, promptMsgId }) {
+async function applyReplyEdit(msg, { mediaDoc, editTargets, newText, promptMsgId }) {
     const chatId = msg.chat.id;
     const userId = msg.from ? msg.from.id : null;
     const messageCol = getCollection(COLLECTIONS.MESSAGE);
@@ -78,19 +77,22 @@ async function applyReplyEdit(msg, { mediaDoc, targetChatId, targetMessageId, ne
     const { updateMessageDb } = require('./modes/editMode');
     const { reMatchMessageTags, clearMessageTags } = require('../utils/tagSync');
 
-    const updateDbAndTags = async () => {
+    const updateDbAndTags = async (target) => {
+        // 清空描述：先清标签（此刻 message 记录还在，才能递减标签使用次数），再删记录；
+        // 编辑描述：保留已有标签，只补充新文本匹配到的（放在 updateMessageDb 之后，确保记录存在）
+        if (isClearing) {
+            await clearMessageTags(mediaDoc.file_unique_id);
+        }
         await updateMessageDb(messageCol, {
             isClearing,
-            targetChatId,
-            targetMessageId,
+            targetChatId: target.chatId,
+            targetMessageId: target.messageId,
             targetGroupId: mediaDoc.group_id,
             targetFileUniqueId: mediaDoc.file_unique_id,
             targetMediaType: mediaDoc.media_type,
             cleanText
         });
-        if (isClearing) {
-            await clearMessageTags(mediaDoc.file_unique_id);
-        } else if (cleanText) {
+        if (!isClearing && cleanText) {
             await reMatchMessageTags(mediaDoc.file_unique_id, cleanText);
         }
     };
@@ -114,14 +116,18 @@ async function applyReplyEdit(msg, { mediaDoc, targetChatId, targetMessageId, ne
 
     try {
         // 1. 编辑 Telegram 消息的 caption
-        if (isClearing) {
-            await bot.editMessageCaption('', { chat_id: targetChatId, message_id: targetMessageId });
-        } else {
-            await editCaptionRobust(targetChatId, targetMessageId, newText);
-        }
+        //    位置：频道源位置优先（频道 → 讨论群自动转发时改动会自动同步到群里的副本），
+        //    该位置改不了（超 48 小时 / 不是机器人发的）时再退群组位置重试
+        const edited = await editCaptionWithFallback(editTargets, async (t) => {
+            if (isClearing) {
+                await bot.editMessageCaption('', { chat_id: t.chatId, message_id: t.messageId });
+            } else {
+                await editCaptionRobust(t.chatId, t.messageId, newText);
+            }
+        });
 
         // 2. 更新数据库 + 标签重算
-        await updateDbAndTags();
+        await updateDbAndTags(edited);
 
         // 3. 确认提示，1 分钟后删除全部操作记录
         const okMsg = await bot.sendMessage(chatId, isClearing ? '✅ 已清空描述' : '✅ 修改完毕', {
@@ -149,19 +155,19 @@ async function applyReplyEdit(msg, { mediaDoc, targetChatId, targetMessageId, ne
                 over48h: false,
                 groupId: mediaDoc.group_id,
                 mediaType: mediaDoc.media_type,
-                targetChatId,
-                targetMessageId
+                targetChatId: edited.chatId,
+                targetMessageId: edited.messageId,
+                editVia: edited.via
             }
         }).catch(() => { });
-        logger.info(`群组快捷编辑成功: chatId=${chatId}, target=${targetChatId}/${targetMessageId}, clearing=${isClearing}, userId=${userId}`);
+        logger.info(`群组快捷编辑成功: chatId=${chatId}, target=${edited.chatId}/${edited.messageId} (via=${edited.via}), clearing=${isClearing}, userId=${userId}`);
     } catch (err) {
-        const errMsg = err.message || '';
-        const isEditDenied = errMsg.includes("can't be edited") || errMsg.includes("Can't edit");
+        const isEditDenied = isEditTargetError(err);
 
         if (isEditDenied) {
-            // 超过 48 小时编辑时效：仅更新数据库 + 重算标签（群组内不弹确认按钮），并提示
+            // 超 48 小时 / 该位置不是机器人发的：仅更新数据库 + 重算标签（群组内不弹确认按钮），并提示
             try {
-                await updateDbAndTags();
+                await updateDbAndTags(editTargets[0]);
                 const warnMsg = await bot.sendMessage(chatId, '⚠️ 消息已超过编辑时效（48小时），已仅更新数据库中的描述', {
                     reply_to_message_id: msg.message_id,
                     allow_sending_without_reply: true
@@ -186,11 +192,11 @@ async function applyReplyEdit(msg, { mediaDoc, targetChatId, targetMessageId, ne
                         over48h: true,
                         groupId: mediaDoc.group_id,
                         mediaType: mediaDoc.media_type,
-                        targetChatId,
-                        targetMessageId
+                        targetChatId: editTargets[0].chatId,
+                        targetMessageId: editTargets[0].messageId
                     }
                 }).catch(() => { });
-                logger.info(`群组快捷编辑超时，仅更新数据库: chatId=${chatId}, target=${targetChatId}/${targetMessageId}`);
+                logger.info(`群组快捷编辑超时，仅更新数据库: chatId=${chatId}, target=${editTargets[0].chatId}/${editTargets[0].messageId}`);
             } catch (dbErr) {
                 logger.error(`群组快捷编辑仅更新数据库失败: ${dbErr.message}`);
                 const failMsg = await bot.sendMessage(chatId, '❌ 更新失败，请稍后重试', {
@@ -277,12 +283,10 @@ async function handleReplyEditCommand(msg, fullCommand) {
         return true;
     }
 
-    // 目标位置：优先群组位置，其次频道位置，最后顶层位置
-    const targetChatId = (mediaDoc.group && mediaDoc.group.chat_id) ||
-        (mediaDoc.channel && mediaDoc.channel.chat_id) || mediaDoc.chat_id;
-    const targetMessageId = (mediaDoc.group && mediaDoc.group.message_id) ||
-        (mediaDoc.channel && mediaDoc.channel.message_id) || mediaDoc.message_id;
-    if (!targetChatId || !targetMessageId) {
+    // 编辑目标位置：频道源位置优先（频道 → 讨论群自动转发时改频道源消息，Telegram 自动同步到群里的副本），
+    // 其次群组位置，最后顶层位置；改不了的位置会在编辑时自动降级到下一个
+    const editTargets = resolveEditTargets(mediaDoc);
+    if (!editTargets.length) {
         const errMsg = await bot.sendMessage(chatId, '❌ 媒体位置数据异常，无法编辑', {
             reply_to_message_id: msg.message_id,
             allow_sending_without_reply: true
@@ -299,8 +303,7 @@ async function handleReplyEditCommand(msg, fullCommand) {
         // 一步直接修改
         await applyReplyEdit(msg, {
             mediaDoc,
-            targetChatId,
-            targetMessageId,
+            editTargets,
             newText,
             promptMsgId: null
         });
@@ -327,8 +330,9 @@ async function handleReplyEditCommand(msg, fullCommand) {
     setUserState(userId, {
         mode: 'edit',
         step: 'waiting_for_group_text',
-        targetChatId,
-        targetMessageId,
+        targetChatId: editTargets[0].chatId,
+        targetMessageId: editTargets[0].messageId,
+        editTargets,
         targetGroupId: mediaDoc.group_id,
         targetFileUniqueId: mediaDoc.file_unique_id,
         targetMediaType: mediaDoc.media_type,
@@ -342,7 +346,7 @@ async function handleReplyEditCommand(msg, fullCommand) {
             try { await bot.deleteMessage(chatId, msg.message_id); } catch (e) { }
         }
     });
-    logger.info(`用户 ${userId} 群组快捷编辑进入两步等待: chatId=${chatId}, target=${targetChatId}/${targetMessageId}`);
+    logger.info(`用户 ${userId} 群组快捷编辑进入两步等待: chatId=${chatId}, target=${editTargets[0].chatId}/${editTargets[0].messageId} (via=${editTargets[0].via})`);
     return true;
 }
 

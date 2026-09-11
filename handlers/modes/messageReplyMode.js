@@ -649,7 +649,6 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         file_id: fileId,
         file_unique_id: fileUniqueId,
         media_type: type,
-        message_id: sentMsg.message_id,
         video_time: videoTime,
         thumb_file_id: mediaInfo.thumbFileId,
         ...location
@@ -785,7 +784,6 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
             file_id: originalItem.fileId,
             file_unique_id: originalItem.fileUniqueId,
             media_type: originalItem.type,
-            message_id: sentMsg.message_id,
             video_time: originalItem.videoTime,
             thumb_file_id: originalItem.thumbFileId,
             ...location

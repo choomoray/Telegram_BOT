@@ -26,7 +26,8 @@ const COLLECTION_LABELS = {
     sub_article: '子文章',
     collection: '合集',
     sub_collection: '子合集',
-    tags: '标签库'
+    tags: '标签库',
+    mark: '标记历史'
 };
 
 const CACHE_TTL = 15 * 1000; // 15 秒缓存，避免频繁刷新打爆 Atlas
