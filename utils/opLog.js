@@ -43,6 +43,7 @@ const ACTIONS = {
     // ---------- 系统 ----------
     bot_start: { type: 0, category: 'system', label: '机器人启动' },
     bot_stop: { type: 0, category: 'system', label: '机器人关闭' },
+    bot_watchdog_restart: { type: 0, category: 'system', label: '看门狗自动重启' },
     setting_update: { type: 24, category: 'setting', label: '设置更新' },
     webui_login: { type: 27, category: 'webui', label: '控制台登录' },
     webui_login_fail: { type: 27, category: 'webui', label: '控制台登录失败' },

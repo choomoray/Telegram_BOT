@@ -69,6 +69,25 @@
 
    在 webui 模式基础上，日志除正常写入 `logs/<年>/<月>/<周>/<日>.log` 外，额外复制一份到 `test-log/`（与 logs 平级，仅含 `log.log`、`error.log` 两个扁平文件），**供 AI 读取分析**。`test-log` 在**每次以 test 启动时初始化**（清空上次内容），关闭时不清理由 test 模式产生的数据。
 
+7. **（可选，推荐）看门狗模式（崩溃自动重启 + 通知管理员）：**
+
+   ```bash
+   node watchdog.js            # 等价于 node index.js
+   node watchdog.js webui      # 等价于 node index.js webui（或直接跑「Telegram BOT.bat」）
+   node watchdog.js test       # 等价于 node index.js test
+   ```
+
+   看门狗是**唯一入口**，参数与直接启动 bot 完全一致；崩溃后用**同一份参数**重新拉起（`node watchdog.js webui` 崩了就还是用 `webui` 重启）。
+
+   - **崩溃检测**：子进程退出（`exitCode != 0` / 被信号杀 / OOM / 未捕获致命错误）→ 记录退出码与最后日志 → 默认 **30 秒**后重启；
+   - **软卡死检测**：每 30 秒轮询 `GET /health`，连续 3 次无响应即判定"进程活着但已不工作"，走软重启；
+   - **重启前优雅关闭**：先 `POST /shutdown` 让 bot 自己收尾（关轮询 / 落盘日志 / 关数据库），超时才 `taskkill /T /F` 强杀进程树。Windows 上无法跨进程发信号，这个 HTTP 出口是唯一可行的优雅关闭途径；
+   - **通知管理员**：默认 `crash` 模式 —— 崩溃即发一条（含启动方式、原因、最后日志），重启成功后由 bot 再发一条「🔄 Bot 已自动重启」（这条同时证明重启成功）。重启失败或达到上限则由看门狗直接发；
+   - **重启风暴保护**：10 分钟内崩溃超过 5 次 → 停止自动重启并提醒人工介入；连续存活满 60 秒则重置计数（避免"很久崩一次"累积到上限）；
+   - **孤儿防护**：看门狗被硬杀（任务管理器结束进程等）时，bot 会通过 `BOT_PARENT_PID` 发现父进程消失并自行退出，不会留下抢轮询的孤儿实例（否则下次启动会出现 Telegram 409）；
+   - 看门狗自身日志在 `watchdog/watchdog.log`（独立于 bot 日志），崩溃现场写在 `watchdog/crash-marker.json` 并会被 bot 读取后删除（保证同一次崩溃只播报一次）；
+   - 所有参数都有默认值（见 `.env.example` 的 `WATCHDOG_*`），不配置也能跑。直接 `node index.js webui` 仍可正常使用（此时没有看门狗，行为与以前一致）。
+
 ---
 
 ## 目录

@@ -7,6 +7,9 @@ const { loadSettings } = require('./db/settings');
 const { logOperation } = require('./utils/opLog');
 const { upsertChannelGroup, getChannelGroupById } = require('./db/channelGroup');
 const { startHealthServer } = require('./healthServer');
+// 集中式停机状态 + 信号接管：require 即生效，覆盖整个启动期
+// （否则启动阶段卡在 connectDB 重试里时，Ctrl+C 会被静默吞掉，见 shutdown.js 注释）
+const { getAbortSignal, isShuttingDown, markStartupComplete, watchParentProcess } = require('./shutdown');
 
 // 全局异常兜底：防止单个事件处理器的漏网错误导致整个进程崩溃
 process.on('unhandledRejection', (reason) => {
@@ -31,6 +34,9 @@ function safeHandler(fn) {
 
 // Web UI 服务引用（node index.js webui / node index.js test 时启用）
 let webServer = null;
+
+// 健康检查端口（看门狗轮询 /health、调用 POST /shutdown 都用它）
+const HEALTH_PORT = config.HEALTH_PORT || 9699;
 
 // 搬运收录链接活性巡检：启动 1 分钟后首查，之后每 6 小时一次；新失效的链接提醒管理员
 const TRANSPORT_CHECK_INTERVAL = 6 * 60 * 60 * 1000;
@@ -82,8 +88,8 @@ const TEST_MODE = process.argv.includes('test');
 
 async function start() {
     try {
-        // 1. 连接数据库
-        await connectDB();
+        // 1. 连接数据库（可被 Ctrl+C / SIGTERM 中止，不必等完 6 次重试）
+        await connectDB(6, 5000, getAbortSignal());
         // 2. 初始化集合索引
         await initCollections().catch(err => {
             logger.error('初始化集合索引失败:', err.message);
@@ -224,16 +230,39 @@ async function start() {
         }).catch(() => { });
 
         // 启动健康检查 HTTP 服务
-        startHealthServer(9699, async () => {
+        //  - onReady：端口监听成功 = 启动完成（Ctrl+C 从"立即退出"切换为"优雅关闭"）
+        //  - onShutdown：看门狗用 POST /shutdown 请求优雅退出（Windows 上无法发信号，
+        //    只能走这条路，见 healthServer.js 注释）
+        startHealthServer(HEALTH_PORT, async () => {
             try {
                 await getDb().admin().ping();
                 return 'connected';
             } catch {
                 return 'disconnected';
             }
+        }, {
+            onReady: () => markStartupComplete(),
+            onShutdown: () => gracefulShutdown('POST /shutdown'),
+            token: config.HEALTH_SHUTDOWN_TOKEN || ''
         });
 
         logger.success('系统就绪，Telegram Bot 已启动并等待消息...');
+
+        // 若本次是被看门狗从崩溃中拉起来的，向管理员播报「已自动重启 + 崩溃原因」
+        // （读取 watchdog/crash-marker.json，读完即删；见 utils/crashNotify.js）
+        setTimeout(() => {
+            const { reportRestartFromWatchdog } = require('./utils/crashNotify');
+            reportRestartFromWatchdog().catch(err => logger.warn(`重启播报失败: ${err.message}`));
+        }, 3000).unref?.();
+
+        // 父进程（看门狗）看护：看门狗被硬杀时自行退出，避免变成孤儿实例抢轮询
+        // （只有经 watchdog.js 启动时才有 BOT_PARENT_PID，直接 node index.js 不受影响）
+        watchParentProcess({
+            onParentGone: () => {
+                logger.warn('看门狗已消失，本进程将优雅退出');
+                gracefulShutdown('watchdog-gone');
+            }
+        });
 
         // 搬运收录链接活性巡检（失效提醒管理员）
         startTransportHealthCheck();
@@ -244,6 +273,12 @@ async function start() {
             webServer = startWebUI();
         }
     } catch (err) {
+        // 启动期被 Ctrl+C / SIGTERM 中止：shutdown.js 已经在退出流程里，
+        // 这里不再重复报"启动失败"、也不要用 exit(1) 覆盖正常的退出码
+        if (isShuttingDown()) {
+            logger.info('启动已中止');
+            return;
+        }
         logger.error(`启动失败: ${err.message}`);
         process.exit(1);
     }
@@ -253,7 +288,19 @@ start();
 
 // 优雅关闭：停止轮询 → 关闭 Web UI → 关闭数据库连接 → 退出
 // 每一步都带超时兜底，另有 12 秒总超时强制退出，保证任何环节卡住进程都能结束
+//
+// 触发来源有两个，都必须幂等（只跑一次）：
+//   1. SIGINT / SIGTERM（用户 Ctrl+C、系统关机）
+//   2. 看门狗的 POST /shutdown（Windows 上无法发信号，只能走 HTTP）
+let gracefulShutdownStarted = false;
+
 async function gracefulShutdown(signal) {
+    if (gracefulShutdownStarted) {
+        logger.info(`已在优雅关闭中，忽略重复的 ${signal}`);
+        return;
+    }
+    gracefulShutdownStarted = true;
+
     logger.info(`收到 ${signal}，正在优雅关闭...`);
 
     // 总超时兜底：优雅关闭超过 12 秒仍未完成则强制退出

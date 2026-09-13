@@ -1,7 +1,15 @@
-﻿node_modules/
+node_modules/
 .env
 logs/
 test-log/
 .claude/
 desktop.ini
 Thumbs.db
+
+# 看门狗运行时产物（日志 + 崩溃标记），不进仓库
+watchdog/watchdog.log
+watchdog/crash-marker.json
+.env.bak-*
+
+# �ύ��Ϣ��ʱ�ļ�
+tmp-commit-msg.txt

@@ -49,6 +49,9 @@ module.exports = {
     WEBUI_PORT: parseInt(process.env.WEBUI_PORT) || 9700,
     // 登录密码不在此处配置：唯一来源是数据库 settings 集合的 webui_password 字段
     // （见 db/settings.js: getSettingPassword / webui/server.js）
+    // 健康检查服务：看门狗轮询 /health、并用 POST /shutdown 请求优雅退出
+    HEALTH_PORT: parseInt(process.env.HEALTH_PORT) || 9699,
+    HEALTH_SHUTDOWN_TOKEN: process.env.HEALTH_SHUTDOWN_TOKEN || '',
     // Web UI AI 辅助（DeepSeek，用于数据库增删改查）
     DEEPSEEK_API_URL: process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions',
     DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
