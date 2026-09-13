@@ -566,6 +566,8 @@ td.right, th.right { text-align: right; }
   font-family: var(--mono); font-size: 11.5px; line-height: 1.65;
 }
 .log-line { white-space: pre-wrap; word-break: break-word; padding: 1px 0; }
+/* 「实时日志」视图里的独立日志框高度（宽屏固定按视口算，窄屏见下方媒体查询） */
+#log-view-list { height: calc(100vh - 250px); }
 .log-line .log-time { color: var(--text-3); }
 .log-line .log-level { font-weight: 700; }
 .log-info { color: var(--accent); }
@@ -591,7 +593,7 @@ td.right, th.right { text-align: right; }
 .dialog-body.has-detail-main { overflow: hidden; display: flex; flex-direction: column; }
 .dialog-body.has-detail-main > .detail-main { flex: 1 1 auto; min-height: 0; }
 .dialog-body.has-detail-main > .toolbar { flex: 0 0 auto; }
-.dialog-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--surface-2); }
+.dialog-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--surface-2); }
 
 .detail-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
 .detail-item { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface-2); }
@@ -632,10 +634,15 @@ td.right, th.right { text-align: right; }
 /* 详情条下方的常驻说明：不用原生 title 提示（会飘在图片上挡住画面） */
 .thumb-tip { padding: 0 8px 7px; font-size: 10.5px; line-height: 1.45; color: var(--text-3); }
 .detail-item.is-active .thumb-tip { color: var(--accent); }
-@media (max-width: 980px) {
-  /* 窄屏单栏：两栏上下排列，改回"整体滚动"（各自滚动条在窄屏只会让人更难受） */
-  .detail-main { grid-template-columns: minmax(0, 1fr); min-height: 0; }
-  .detail-left, .detail-aside { max-height: none; overflow-y: visible; }
+/* 平板 / 窄屏单栏：两栏上下排列，改回"整体滚动"（各自滚动条在窄屏只会让人更难受）。
+   断点取 1040px：980px 时 768~1024px 的平板仍被挤成 左栏 456~536px + 固定 360px 空右栏，
+   比例明显失衡；1040px 起一律单栏。
+   必须显式写 grid-template-columns: minmax(0, 1fr)：只改 display 时，
+   `minmax(0,1fr) minmax(360px,34%)` 的第二条轨道仍是硬下限 360px，
+   在 360~440px 的手机上左栏会被压成 0 宽（内容整体溢出并被 .dialog 裁掉）。 */
+@media (max-width: 1040px) {
+  .detail-main { display: flex; flex-direction: column; gap: 12px; grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .detail-left, .detail-aside { max-height: none; overflow-y: visible; width: 100%; min-width: 0; }
 }
 
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 12.5px; }
@@ -958,9 +965,85 @@ html[data-theme="light"] {
   .rail-foot { margin: 0 0 0 auto; flex-direction: row; }
   .topbar { padding: 12px 14px; }
   .search { min-width: 0; flex: 1; }
-  .view { padding: 16px 14px 40px; }
+  .view { padding: 16px 14px 40px; overflow: visible; }
   .dock { display: none; }
   .stats { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+}
+
+/* ---------- 平板 / 手机：子界面排版修正 ----------
+   断点说明：1040px（详情双栏 → 单栏）、880px（外壳塌成单栏，媒体详情子界面也在这里收）、
+   640px（手机：工具栏 / 表格 / 卡片进一步收拢）。
+   下面只增补规则，不重排已有的 880px 外壳，避免把已经正确的窄屏骨架改坏。 */
+@media (max-width: 880px) {
+  /* 对话框内边距收窄：宽屏那套 18px×2 在窄屏浪费掉 1/10 的可用宽度 */
+  .dialog-head { padding: 12px 14px; }
+  .dialog-body { padding: 14px; }
+  /* 媒体详情的正文在单栏下要能整体滚（双栏时是 overflow:hidden 交给两栏各自滚） */
+  .dialog-body.has-detail-main { overflow-y: auto; }
+
+  /* 详情条 / 媒体条：手机上保证一屏能看到 2 列缩略图，而不是被硬塞成 1 列 */
+  .detail-strip { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+
+  /* 表格：users / transport 这种多列表格在窄屏改为横向滚动
+     （.table-wrap 本身是 overflow:hidden，会把最右侧的「操作」列直接裁掉且没有滚动条） */
+  .table-wrap { overflow-x: auto; }
+  th, td { padding: 8px 10px; }
+
+  /* 实时日志视图：原来内联 height:calc(100vh - 250px)，工具栏换行后会把整页撑出屏幕 */
+  #log-view-list { height: min(60vh, 460px); }
+
+  /* 统计报表「操作日志明细」在手机上不再强制半屏高（省掉一整屏的空白滚动） */
+  .view-fill > .stats-logs-card { min-height: 0; }
+  .view-fill > .stats-logs-card > .table-wrap { min-height: min(52vh, 360px); }
+
+  /* 全年方格：9px 的格子在任何触屏上都点不中，窄屏放大到 13px 并保留横向滚动 */
+  .cg-grid, .cg-months { grid-auto-columns: minmax(13px, 1fr); }
+
+  /* 触控目标：手机上一律不小于 ~32px，否则容易误触 */
+  .btn-sm { min-height: 34px; }
+  .btn-xs { min-height: 30px; }
+  .chip { padding: 8px 14px; }
+  .nav-item { padding: 12px 10px; }
+  .pagination .btn, .pagination .page-current { min-height: 34px; }
+  .search-clear { width: 26px; height: 26px; font-size: 14px; }
+
+  /* iOS：聚焦 13px 的输入框会自动放大整个视口（连带把固定定位的 AI 操作台撑坏） */
+  input, select, textarea { font-size: 16px; }
+  .search input { padding-left: 30px; padding-right: 30px; }
+
+  /* 窄屏下固定像素宽度的输入框一律改为弹性，避免 toolbar 被撑成好几行 */
+  .filter-row input { min-width: 0; flex: 1 1 140px; }
+  .filter-row .k { width: auto; }
+
+  /* toast 贴着安全区，避免被刘海 / 圆角 / 手势条压住 */
+  .toast { left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); max-width: none; }
+
+  /* 视口单位：100vh 在移动端浏览器里包含被地址栏挡住的高度，改用 dvh 兜底 */
+  .login-view { height: 100dvh; min-height: 100vh; }
+  .palette { padding-top: calc(16px + env(safe-area-inset-top)); align-items: start; }
+  .palette-box { max-height: calc(100dvh - 32px); }
+}
+
+@media (max-width: 640px) {
+  /* 手机：详情底部按钮换行后不再挤在一行（换行后 spacer 会把按钮推到右边，直接隐藏） */
+  .dialog-foot { padding: 10px 12px; gap: 8px; }
+  .dialog-foot .spacer { display: none; }
+  .dialog-foot .btn { flex: 1 1 auto; justify-content: center; }
+
+  /* 对话框占满更多可用宽度：18px 的内边距在 360px 屏上是可观的浪费 */
+  .dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 24px); }
+
+  /* 工具栏按钮允许收缩，避免长文案把整行撑爆 */
+  .toolbar { gap: 8px; }
+  .toolbar .btn { flex: 0 1 auto; }
+
+  /* 顶栏：标题与操作区各占一行，搜索框独占一行 */
+  .topbar { flex-direction: column; align-items: stretch; }
+  .topbar-actions { margin-left: 0; flex-wrap: wrap; }
+  .titles h1 { font-size: 17px; }
+
+  /* 横向滚动条在触屏上很难发现，给用户可以横扫的容器一点视觉暗示 */
+  .table-wrap, .cg-wrap, .nav { -webkit-overflow-scrolling: touch; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; }

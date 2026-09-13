@@ -445,7 +445,7 @@ async function handleTagCallback(query) {
             if (rawState._onExit) await rawState._onExit(userId, rawState).catch(() => { });
             require('../states').deleteUserState(userId);
         }
-        const { autoEnterReplyFromTag } = require('../modes/messageReplyMode');
+        const { autoEnterReplyFromTag } = require('../handlers/modes/messageReplyMode');
         const result = await autoEnterReplyFromTag(userId, groupId, panelMsgId || -1, fileUniqueId);
         if (!result.ok) {
             await bot.sendMessage(userId, result.error).catch(() => { });

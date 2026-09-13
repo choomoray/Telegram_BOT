@@ -1302,7 +1302,7 @@
           </select>
         </label>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
         <table>
           <thead><tr><th>用户</th><th>ID</th><th>状态</th><th>所在群组</th><th>最近活跃</th><th class="right">操作</th></tr></thead>
           <tbody>${rows || '<tr><td colspan="6"><div class="empty">没有符合条件的用户</div></td></tr>'}</tbody>
@@ -1920,7 +1920,7 @@
         <button class="btn btn-sm" data-action="log-clear">🗑 清空</button>
         <span class="tag ${logConnected ? 'ok' : 'warn'}" id="log-view-status">${logConnected ? '已连接' : '重连中'}</span>
       </div>
-      <div class="log-list" id="log-view-list" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;height:calc(100vh - 250px)"></div>`;
+      <div class="log-list" id="log-view-list" style="background:var(--surface);border:1px solid var(--border);border-radius:12px"></div>`;
     renderLogList();
   }
 
@@ -2442,7 +2442,7 @@
           </select>
         </label>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
         <table>
           <thead><tr><th>活性</th><th>名称</th><th>chat_id</th><th>跳转</th><th>搬运次数</th><th>最近检查</th><th class="right">操作</th></tr></thead>
           <tbody>${rows || '<tr><td colspan="7"><div class="empty">没有符合条件的收录记录</div></td></tr>'}</tbody>

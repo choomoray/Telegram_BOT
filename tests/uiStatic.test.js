@@ -171,9 +171,15 @@ test('style.css：媒体详情左右两栏各自独立滚动（每栏一根滚�
     assert.ok(detailBody, '缺少 .dialog-body.has-detail-main 规则');
     assert.match(detailBody, /overflow:\s*hidden/, '媒体详情里正文不滚（滚动交给左右两栏）');
     // 窄屏单栏恢复整体滚动（两栏不再各自出滚动条）
-    const narrow = (css.match(/@media \(max-width:\s*980px\)\s*\{[\s\S]*?\n\}/) || [''])[0];
-    assert.ok(narrow, '缺少窄屏单栏媒体查询');
+    // 断点 1040px：980px 时 768~1024px 的平板仍会被挤成「左栏被压窄 + 360px 空右栏」
+    const narrow = (css.match(/@media \(max-width:\s*1040px\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+    assert.ok(narrow, '缺少窄屏单栏媒体查询（1040px）');
     assert.match(narrow, /\.detail-left,\s*\.detail-aside\s*\{[^}]*overflow-y:\s*visible/, '窄屏两栏不再各自滚动');
+    // 必须显式声明单栏轨道：只改 display 的话 minmax(360px,34%) 仍是硬下限，
+    // 360~440px 的手机上左栏会被压成 0 宽并被 .dialog 裁掉
+    assert.match(narrow, /\.detail-main\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/,
+        '窄屏必须显式声明单栏轨道（覆盖 minmax(360px,34%)）');
+    assert.match(narrow, /\.detail-left,\s*\.detail-aside\s*\{[^}]*width:\s*100%/, '窄屏两栏占满整宽');
 });
 
 test('style.css：统计报表「操作日志明细」可查看区域已加长', () => {
@@ -186,4 +192,78 @@ test('style.css：统计报表「操作日志明细」可查看区域已加长',
   assert.ok(wrap, '缺少日志表格区域规则');
   const wrapH = wrap.match(/min-height:\s*min\((\d+)px/);
   assert.ok(wrapH && Number(wrapH[1]) >= 500, `日志表格可滚动高度应 ≥500px，实际 ${wrapH ? wrapH[1] : '无'}`);
+});
+
+// ---------------- 平板 / 手机响应式（子界面排版） ----------------
+
+/**
+ * 取某个 max-width 媒体查询块的完整文本（到下一个顶层 @media 为止）。
+ * 同宽度可能有多个块（窄屏骨架 + 后续增补的子界面修正），
+ * 这里取**最后一个**（CSS 里靠后的规则才会生效，也是增补规则所在处）。
+ */
+function mediaBlock(css, maxWidth) {
+  const start = css.lastIndexOf(`@media (max-width: ${maxWidth}px)`);
+  if (start === -1) return '';
+  const next = css.indexOf('@media', start + 10);
+  return css.slice(start, next === -1 ? css.length : next);
+}
+
+test('style.css：对话框底部按钮允许换行（否则手机上「关闭」被裁掉、详情弹层关不掉）', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  const foot = (css.match(/^\.dialog-foot\s*\{[^}]*\}/m) || [''])[0];
+  assert.ok(foot, '缺少 .dialog-foot 规则');
+  assert.match(foot, /flex-wrap:\s*wrap/, '.dialog-foot 必须能换行（详情页底部按钮实测 ≈492px 宽）');
+});
+
+test('style.css：手机断点把底部按钮撑满并隐藏 spacer', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  const phone = mediaBlock(css, 640);
+  assert.ok(phone, '缺少 640px 手机断点');
+  assert.match(phone, /\.dialog-foot\s+\.spacer\s*\{[^}]*display:\s*none/, '手机端隐藏 spacer');
+  assert.match(phone, /\.dialog-foot\s+\.btn\s*\{[^}]*flex:\s*1 1 auto/, '手机端按钮平分整行');
+  assert.match(phone, /\.dialog\s*\{[^}]*width:\s*calc\(100vw - 16px\)/, '手机端对话框用满宽度');
+});
+
+test('style.css：窄屏不再挤出横向滚动条 / 触控目标与 iOS 缩放', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  const narrow = mediaBlock(css, 880);
+  assert.ok(narrow, '缺少 880px 窄屏断点');
+  // 表格 / 方格图改为可横扫，而不是把最右列裁掉
+  assert.match(narrow, /\.table-wrap\s*\{[^}]*overflow-x:\s*auto/, '窄屏表格可横向滚动');
+  assert.match(narrow, /\.cg-grid,\s*\.cg-months\s*\{[^}]*minmax\(13px/, '窄屏方格放大到 13px（触屏可点）');
+  // 触控目标
+  assert.match(narrow, /\.btn-sm\s*\{[^}]*min-height/, '窄屏按钮加大触控高度');
+  assert.match(narrow, /\.chip\s*\{[^}]*padding/, '窄屏 chip 加大内边距');
+  // iOS 聚焦缩放
+  assert.match(narrow, /input,\s*select,\s*textarea\s*\{[^}]*font-size:\s*16px/, '窄屏表单控件 16px（避免 iOS 聚焦缩放）');
+  // 安全区 / dvh
+  assert.match(narrow, /\.toast\s*\{[^}]*safe-area-inset-bottom/, 'toast 避开底部安全区');
+  assert.match(narrow, /\.login-view\s*\{[^}]*100dvh/, '登录页用 dvh 兜底移动端地址栏');
+});
+
+test('style.css：实时日志框高度在窄屏有上限（原内联 100vh-250px 会撑出屏幕）', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  const base = (css.match(/^#log-view-list\s*\{[^}]*\}/m) || [''])[0];
+  assert.ok(base, '日志框高度应移到 CSS（宽屏）');
+  assert.match(base, /height:\s*calc\(100vh - 250px\)/, '宽屏保持原来的视口高度算法');
+  const narrow = mediaBlock(css, 880);
+  const override = (narrow.match(/#log-view-list\s*\{[^}]*\}/) || [''])[0];
+  assert.ok(override, '窄屏需要单独覆盖日志框高度');
+  assert.match(override, /height:\s*min\(/, '窄屏日志框高度改用 min() 上限');
+  // 内联样式会覆盖 CSS，必须已从 app.js 移除
+  const js = fs.readFileSync(path.join(PUB, 'app.js'), 'utf8');
+  assert.ok(!/id="log-view-list"[^>]*height:/.test(js), 'app.js 里不应再有内联 height（会盖掉 CSS）');
+});
+
+test('app.js：多列表格（用户 / 搬运收录）带 table-scroll，窄屏操作列不被裁掉', () => {
+  const js = fs.readFileSync(path.join(PUB, 'app.js'), 'utf8');
+  // users 表格：6 列，最后一列是 ✏️/🗑
+  assert.match(js, /<div class="table-wrap table-scroll">\s*<table>\s*<thead><tr><th>用户<\/th>/,
+    'users 表格需要 table-scroll 包裹');
+  // transport 表格：7 列，最后一列是 🔄/✏️/🗑
+  assert.match(js, /<div class="table-wrap table-scroll">\s*<table>\s*<thead><tr><th>活性<\/th>/,
+    'transport 表格需要 table-scroll 包裹');
+  // 不应再有裸露的 .table-wrap（overflow:hidden）包多列表格
+  const bareWraps = [...js.matchAll(/<div class="table-wrap">/g)].length;
+  assert.equal(bareWraps, 0, '所有 .table-wrap 都应带 table-scroll（否则窄屏裁列且无滚动条）');
 });

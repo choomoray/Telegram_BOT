@@ -21,6 +21,7 @@ const { ObjectId } = require('mongodb');
 const config = require('../config');
 const logger = require('../logger');
 const { getCollection, COLLECTIONS } = require('../db/getCollection');
+const { getSettingPassword } = require('../db/settings');
 const { callDeepSeek } = require('./ai');
 const { logOperation, getCatalog, ACTION_BY_TYPE, actionLabel, categoryLabel, legacyTypeLabel, CATEGORIES } = require('../utils/opLog');
 const { addTag, tagUsed } = require('../db/tags');
@@ -42,8 +43,8 @@ const ALL_COLLECTIONS_LIMIT = 50;        // 全部模式下每个集合最多取
 
 // 登录会话：token -> { createdAt }
 const sessions = new Map();
-// 实际生效的密码（未配置时随机生成）
-let effectivePassword = config.WEBUI_PASSWORD || null;
+// 单元测试注入的固定密码（生产为 null，密码一律从数据库 settings 读取）
+let injectedPassword = null;
 // SSE 日志流客户端
 const sseClients = new Set();
 
@@ -75,11 +76,29 @@ const thumbInflight = new Map();
 
 // ---------------- 工具 ----------------
 
-function getPassword() {
-    if (effectivePassword) return effectivePassword;
-    effectivePassword = crypto.randomBytes(12).toString('hex');
-    logger.warn(`Web UI 未配置 WEBUI_PASSWORD，已生成随机密码: ${effectivePassword}（请用该密码登录，或配置 .env 固定密码）`);
-    return effectivePassword;
+/**
+ * 获取 Web UI 登录密码：**唯一来源是数据库 settings 集合的 `webui_password` 字段**
+ * （`db/settings.js` 内带短 TTL 缓存，可直接在此调用）。
+ * 单元测试可通过 createWebUI({ password }) 注入固定密码。
+ * @returns {Promise<string|null>} 未配置时返回 null（此时拒绝一切登录）
+ */
+async function getPassword() {
+    if (injectedPassword) return injectedPassword;
+    return await getSettingPassword();
+}
+
+/**
+ * 密码校验：使用定长比较，避免逐字符比较泄漏前缀信息。
+ * 未配置密码时一律不通过（fail closed）。
+ */
+async function verifyPassword(input) {
+    const expected = await getPassword();
+    if (!expected) return false;
+    if (typeof input !== 'string' || input.length === 0) return false;
+    const a = Buffer.from(String(input), 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
 }
 
 function createToken() {
@@ -248,7 +267,15 @@ async function safeCount(D, collectionName, filter, label) {
 
 async function handleLogin(D, url, body) {
     const { password } = body;
-    if (!password || password !== getPassword()) {
+    const configured = await getPassword();
+    if (!configured) {
+        logger.error('Web UI 登录失败：数据库 settings 未配置 webui_password，请先在 settings 集合写入该字段');
+        return {
+            status: 503,
+            data: { error: '未配置登录密码：请在数据库 settings 集合（_id = app_settings）中添加字段 webui_password' }
+        };
+    }
+    if (!await verifyPassword(password)) {
         logOperation({ action: 'webui_login_fail', source: 'webui', result: 'fail', error: '密码错误' }).catch(() => { });
         return { status: 401, data: { error: '密码错误' } };
     }
@@ -2799,7 +2826,8 @@ function serveStatic(res, pathname) {
  */
 function createWebUI(deps = {}) {
     const D = { ...defaultDeps, ...deps };
-    if (deps.password) effectivePassword = deps.password;
+    // 测试注入固定密码；未注入时置空，强制每次实例都从数据库 settings 读取
+    injectedPassword = deps.password || null;
     ensureLoggerSubscription();
 
     return http.createServer(async (req, res) => {
@@ -2840,6 +2868,12 @@ function startWebUI(port = config.WEBUI_PORT) {
     const server = createWebUI();
     server.listen(port, () => {
         logger.success(`Web UI 已启动: http://127.0.0.1:${port}`);
+        // 密码存放在数据库 settings.webui_password；未配置时无法登录，启动即告警
+        getPassword().then(pwd => {
+            if (!pwd) {
+                logger.warn('Web UI 未配置登录密码：请在数据库 settings 集合（_id = app_settings）添加字段 webui_password');
+            }
+        }).catch(() => { });
     });
     return server;
 }
@@ -2850,6 +2884,7 @@ module.exports = {
     closeAllSseClients,
     sessions,
     getPassword,
+    verifyPassword,
     telegramGetFile,
     ALLOWED_COLLECTIONS,
     ALL_COLLECTIONS_KEY

@@ -197,16 +197,6 @@ async function syncAllGroupTags() {
     }
 }
 
-/**
- * 启动时补齐历史数据：把 message.tags 汇总进 group_list.tags
- * 幂等：已同步的库再跑一次结果相同。
- */
-async function migrateGroupListTags() {
-    const { groups, tagged } = await syncAllGroupTags();
-    logger.info(`group_list.tags 迁移检查完成: 共 ${groups} 个媒体组，${tagged} 个带标签`);
-    return { groups, tagged };
-}
-
 // ---------------- 空媒体组清理（删除媒体后以 media 实际记录为准） ----------------
 
 /**
@@ -387,7 +377,6 @@ module.exports = {
     syncGroupTags,
     applyTagChangeToGroupTags,
     syncAllGroupTags,
-    migrateGroupListTags,
     // 空媒体组清理（删除媒体后以 media 实际记录为准）
     removeMediaGroupIfEmpty,
     cleanupOrphanGroupList

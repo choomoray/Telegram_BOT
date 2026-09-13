@@ -21,8 +21,15 @@ const DEFAULT_SETTINGS = {
     // 标签已迁移至独立 tags 集合（db/tags.js），不再存储在 settings
 };
 
-// 允许更新的 key 列表
+// 允许更新的 key 列表（不含密钥类字段，见 SECRET_KEYS）
 const ALLOWED_KEYS = Object.keys(DEFAULT_SETTINGS).filter(k => k !== '_id');
+
+/**
+ * 密钥类设置：可以存放在 settings 文档里，但**不通过 config / /setting 面板读写**，
+ * 只能由各自的功能模块用专用函数访问（避免密钥进入 config 对象被日志打印）。
+ *   - `webui_password`：Web UI 登录密码（唯一来源，见 webui/server.js）
+ */
+const SECRET_KEYS = ['webui_password'];
 
 let cachedSettings = null;
 let lastFetchTime = 0;
@@ -133,4 +140,61 @@ async function updateSettings(config, updates, retries = 2) {
     return updateSetting(config, keys[0], updates[keys[0]], retries); // 简化版，可扩展为逐个更新
 }
 
-module.exports = { getSettings, loadSettings, updateSetting, updateSettings, ALLOWED_KEYS, DEFAULT_SETTINGS };
+/**
+ * 清空设置缓存：下一次 getSettings() 重新读库。
+ * 测试里重置内存库后必须调用，否则会读到上一个用例缓存下来的文档。
+ */
+function clearSettingsCache() {
+    cachedSettings = null;
+    lastFetchTime = 0;
+}
+
+// ---------------- 密钥类设置（settings 文档字段，不进 config） ----------------
+
+/**
+ * 读取 Web UI 登录密码（settings.webui_password）
+ *
+ * 复用 getSettings 的 5 秒缓存：登录时才读取，密码一改最多 5 秒后生效。
+ * 未配置（字段不存在 / 空字符串 / 非字符串）返回 null，由调用方决定拒绝登录。
+ * @returns {Promise<string|null>}
+ */
+async function getSettingPassword() {
+    const settings = await getSettings();
+    const value = settings ? settings.webui_password : undefined;
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : null;
+}
+
+/**
+ * 写入 / 清除 Web UI 登录密码
+ * @param {string|null} password - 新密码；传空字符串或 null 表示清除该字段
+ * @returns {Promise<boolean>}
+ */
+async function setSettingPassword(password) {
+    try {
+        const col = getCollection(COLLECTIONS.SETTINGS);
+        const value = (typeof password === 'string') ? password.trim() : '';
+        const update = value ? { $set: { webui_password: value } } : { $unset: { webui_password: '' } };
+        await col.updateOne({ _id: SETTINGS_ID }, update, { upsert: true });
+        cachedSettings = null; // 立即失效缓存，改完马上生效
+        logger.info(value ? 'Web UI 登录密码已更新' : 'Web UI 登录密码已清除');
+        return true;
+    } catch (err) {
+        logger.error(`更新 Web UI 登录密码失败: ${err.message}`);
+        return false;
+    }
+}
+
+module.exports = {
+    getSettings,
+    loadSettings,
+    updateSetting,
+    updateSettings,
+    getSettingPassword,
+    setSettingPassword,
+    clearSettingsCache,
+    ALLOWED_KEYS,
+    SECRET_KEYS,
+    DEFAULT_SETTINGS
+};

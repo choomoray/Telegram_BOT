@@ -269,6 +269,46 @@ test('《✅ 完成》：队列为空时结束打标签，模式仍保留', asyn
     assert.ok((store.get('media') || []).some(m => m.file_unique_id === 'UW1'), '结束后仍能继续发送媒体');
 });
 
+// ---------------- 面板《🔁 回复该消息》：结束打标签并进入回复模式 ----------------
+
+test('面板《🔁 回复该消息》：结束打标签并真的进入回复模式（require 路径回归）', async () => {
+    resetAll();
+    startSendMode();
+    const { sent, edits, answers } = trackBot();
+
+    await handleSendMode(sendMsg(7601, {
+        caption: '要回复的描述', photo: [{ file_id: 'X0', file_unique_id: 'UX0' }]
+    }), getRawUserState(USER));
+    assert.ok(tagSession.isTagging(USER), '前置条件：已进入打标签会话');
+
+    await tagSession.handleTagCallback(callbackQuery('sendtag_reply', 1234));
+
+    // 曾经的 bug：utils/tagSession.js 里 require('../modes/messageReplyMode') 路径不存在，
+    // 回调抛 MODULE_NOT_FOUND 被上层吞掉，只留下"❌ 处理失败"，永远进不了回复模式。
+    assert.equal(answers.some(a => a.extra && a.extra.text === '❌ 处理失败'), false,
+        '不应出现"处理失败"（说明 autoEnterReplyFromTag 正常加载并执行）');
+    assert.equal(sent.some(s => String(s.text).includes('进入回复模式失败')), false,
+        '不应回落到"进入回复模式失败"提示');
+
+    assert.equal(tagSession.isTagging(USER), false, '打标签会话已结束');
+    const st = getRawUserState(USER);
+    assert.ok(st, '应建立回复模式状态');
+    assert.equal(st.mode, 'message_reply', '已进入消息回复模式');
+    assert.ok(['ready', 'waiting_reply_location'].includes(st.step), `回复模式就绪步骤，实际 step=${st.step}`);
+    assert.equal(st.targetGroupId, '-1004321_7601', '回复目标 = 刚打标签的那条 message 所在媒体组');
+    assert.ok(edits.some(e => String(e.text).includes('回复模式')), '面板消息已切换为回复模式界面');
+});
+
+test('面板《🔁 回复该消息》：打标签会话已结束时点按钮只提示，不报错', async () => {
+    resetAll();
+    trackBot();
+    const { answers } = trackBot();
+
+    await tagSession.handleTagCallback(callbackQuery('sendtag_reply', 1234));
+    assert.ok(answers.some(a => a.extra && a.extra.text === '❌ 打标签已结束'),
+        '无会话时应提示已结束');
+});
+
 // ---------------- 标签查询：先 group_list，再 message ----------------
 
 test('宽松标签 -标签：message 与 group_list 都查询（并集）', async () => {

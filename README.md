@@ -59,7 +59,7 @@
    npm run start:webui    # 或 node index.js webui
    ```
 
-   浏览器访问 `http://127.0.0.1:9700`，登录密码见启动日志（或在 `.env` 中配置 `WEBUI_PASSWORD`）。
+   浏览器访问 `http://127.0.0.1:9700`。登录密码存放在**数据库 `settings` 集合**（`_id = app_settings`）的 `webui_password` 字段，需自行写入（见下）。
 
 6. **（可选）test-log 模式（AI 可读临时日志）：**
 
@@ -694,7 +694,7 @@ module.exports = {
 | `deleteGroupList(groupId)` | 删除组记录 |
 | `syncGroupTags(groupId)` | **按组内所有 `message.tags` 重算 `group_list.tags`**（汇总，无标签则删字段） |
 | `applyTagChangeToGroupTags(groupId, tag, delta)` | 单个标签增量同步到 `group_list.tags`（$addToSet / $pull） |
-| `syncAllGroupTags()` / `migrateGroupListTags()` | 全库重算 / 启动时补齐 `group_list.tags`（标签改名、删除后同步） |
+| `syncAllGroupTags()` | 全库重算 `group_list.tags`（标签改名、删除后同步；需要时手动调用，**启动时不再自动跑**） |
 | `removeMediaGroupIfEmpty(groupId)` | **删除媒体后的组状态统一入口**：以 `media` 实际记录数为准——组内已无媒体 → 删 `group_list`（并清残留 `message`）；仍有媒体 → 把 `is_group` 重算为真实数量 |
 | `cleanupOrphanGroupList()` | 启动时清理历史遗留的"没有任何媒体的 `group_list` 项"（及其孤儿 `message`），幂等 |
 
@@ -1031,16 +1031,33 @@ const dynamicPrefixes = ['manage_', 'set_', 'pwd_'];
 node index.js webui       # 或 npm run start:webui
 ```
 
-浏览器访问 `http://127.0.0.1:9700`（端口可通过 `WEBUI_PORT` 配置）。登录密码：
+浏览器访问 `http://127.0.0.1:9700`（端口可通过 `WEBUI_PORT` 配置）。**登录密码唯一来源是数据库 `settings` 集合**：
 
-- 在 `.env` 中配置 `WEBUI_PASSWORD`，或
-- 未配置时启动日志会打印随机生成的密码
+```js
+// settings 集合，_id = 'app_settings'
+db.settings.updateOne(
+  { _id: 'app_settings' },
+  { $set: { webui_password: '你的面板密码' } },
+  { upsert: true }
+)
+```
+
+- `webui_password` 是**密钥类字段**：不会进入 `config` 对象、也不会出现在机器人 `/setting` 面板里（避免被日志带出）；
+- **未配置时无法登录**（登录接口返回 503 并提示字段名，启动日志也会告警）——不再随机生成密码，也不读 `.env`；
+- 改完最多 5 秒生效（`db/settings.js` 的短 TTL 缓存）；改用 `setSettingPassword()` / `clearSettingsCache()` 可立即生效；
+- 密码比较使用定长比较（`crypto.timingSafeEqual`）。
 
 **鉴权机制：**
 - 除 `/api/login` 外的所有 API 均需携带 `Authorization: Bearer <token>`
 - 登录成功返回 token，前端存储在 localStorage，会话有效期 12 小时
 
 **界面结构：左侧导航 + 主区 + 右侧实时日志坞（窄屏自动折叠为单列）**
+
+**响应式（平板 / 手机）：** 断点为 **1040px / 880px / 640px** 三档（另有随机推荐瀑布流的 560/720/1024/1400/1800 列数阶梯）：
+
+- **1040px**：媒体详情对话框由左右两栏切为**上下单栏**（显式声明单列轨道，否则 `minmax(360px, 34%)` 的硬下限会把左栏压成 0 宽并被对话框裁掉）；
+- **880px**：外壳塌成单栏（左侧导航变横向可滑、右侧日志坞隐藏，"实时日志"视图仍可看）；用户 / 搬运收录等多列表格改为**横向滚动**（`table-scroll`，此前 `overflow:hidden` 会把最右侧操作列直接裁掉）；实时日志框高度改由 CSS 控制并加 `min()` 上限（此前内联 `calc(100vh - 250px)` 在工具栏换行后会撑出屏幕）；统计「操作日志明细」不再强制半屏高；全年方格放大到 13px 并保留横向滚动；**触控目标**加大（`.btn-sm` / `.btn-xs` / `.chip` / `.pagination` / 导航项）；表单控件 16px（避免 iOS 聚焦自动缩放）；toast 避开底部安全区；登录页与 AI 操作台使用 `dvh` + `env(safe-area-inset-*)`；
+- **640px**：对话框底部按钮换行并平分整行（此前实测约 492px 宽，手机上「关闭」会被裁掉、详情弹层关不掉）；对话框占满 `100vw - 16px`；顶栏标题与搜索各占一行；工具栏按钮允许收缩。
 
 | 视图 | 内容 |
 |------|------|
@@ -1231,7 +1248,8 @@ handleGroupEditedMessage()
 | `TEST_MONGODB_URI` | 否 | 测试数据库连接串 |
 | `ADMIN_CHAT_ID` | 是 | 管理员 Telegram 用户 ID，多个用逗号分隔 |
 | `WEBUI_PORT` | 否 | Web UI 端口（默认 9700） |
-| `WEBUI_PASSWORD` | 否 | Web UI 登录密码（未设置时启动随机生成并打印） |
+
+> Web UI 登录密码**不在 `.env`**：见数据库 `settings` 集合的 `webui_password` 字段（本表只列环境变量）。
 
 ---
 
@@ -1462,7 +1480,7 @@ handleGroupEditedMessage()
   - **队列**：当前标签还没打完又来一个需要打标签的媒体 → 先入队（提示"已加入打标签队列（第 N 个）"），**用户点《完成》后才把面板切换到下一个**（当前行为默认；队列为空则结束本次打标签，模式保留）；
   - 标签作用对象 = **回复成功后新收录的那条 message**（`file_unique_id`），标签按 message 独立；
   - 面板按钮：上/下区标签切换、《✅ 完成》、《🔁 回复该消息》（结束打标签并自动进入消息回复模式）；`sendtag_*` 回调改由 `utils/tagSession.js` 处理。
-- **`group_list` 新增 `tags` 字段（媒体组标签汇总）**：内容 = 该媒体组内**所有 `message.tags` 的并集**（`message.tags` 仍是唯一权威来源，该字段只是便于"先查 group_list"的冗余汇总，无标签则不带该字段）。任何改变组内标签的写路径都会同步它：打标签会话、`/tag` 修改消息标签、编辑描述后的自动补标签、标签改名 / 删除（全库重算）、启动迁移（`db/groupList.js: syncGroupTags` / `applyTagChangeToGroupTags` / `syncAllGroupTags` / `migrateGroupListTags`，`index.js` 启动时执行一次）。
+- **`group_list` 新增 `tags` 字段（媒体组标签汇总）**：内容 = 该媒体组内**所有 `message.tags` 的并集**（`message.tags` 仍是唯一权威来源，该字段只是便于"先查 group_list"的冗余汇总，无标签则不带该字段）。任何改变组内标签的写路径都会同步它：打标签会话、`/tag` 修改消息标签、编辑描述后的自动补标签、标签改名 / 删除（全库重算）。同步入口：`db/groupList.js: syncGroupTags` / `applyTagChangeToGroupTags` / `syncAllGroupTags`。**注：早期的「启动时全库补齐 `migrateGroupListTags()`」迁移已完成并移除**（历史数据已补齐，启动不再每次全库扫描；确实需要重算时手动调用 `syncAllGroupTags()`）。
 - **标签查询改为「先查 `group_list` 再查 `message`」**（`handlers/queryHandler.js: buildQuery` / `rankResults`）：
   - 宽松标签 `-标签`：`message` 与 `group_list` **都查**，命中任一标签的媒体组（整组）与自身 `message.tags` 命中的单条**取并集**（兼容没有 `group_list.tags` 的老数据）；
   - 严格标签 `--标签`：**只查 `group_list`** 同时含全部标签的媒体组，取其组内的 message 数据（不再看单条 message 自己的标签）；

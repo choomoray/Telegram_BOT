@@ -97,10 +97,10 @@ async function start() {
         // 2.7 清理 media 里与 group / channel 位置重复的顶层 message_id（位置以子文档为唯一权威）
         const { cleanupDuplicateMediaMessageId } = require('./db/media');
         await cleanupDuplicateMediaMessageId().catch(err => logger.error(`清理 media 顶层 message_id 失败: ${err.message}`));
-        // 2.8 补齐 group_list.tags（组内所有 message 标签的并集，供"先查 group_list"的标签查询使用）
-        const { migrateGroupListTags, cleanupOrphanGroupList } = require('./db/groupList');
-        await migrateGroupListTags().catch(err => logger.error(`同步 group_list.tags 失败: ${err.message}`));
-        // 2.9 清理"已没有任何媒体"的 group_list 残留项（及其孤儿 message 记录）
+        // 2.8 清理"已没有任何媒体"的 group_list 残留项（及其孤儿 message 记录）
+        // 注：group_list.tags 的历史迁移已完成，不再在启动时全库重算（标签变更时由
+        //     syncGroupTags / applyTagChangeToGroupTags 增量同步；需要全库重算可用 syncAllGroupTags）
+        const { cleanupOrphanGroupList } = require('./db/groupList');
         await cleanupOrphanGroupList().catch(err => logger.error(`清理空媒体组 group_list 失败: ${err.message}`));
         // 3. 加载动态设置
         await loadSettings(config);

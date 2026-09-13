@@ -20,7 +20,7 @@
     </label>
     <button id="login-btn" class="btn btn-primary btn-block">进入控制台</button>
     <p id="login-error" class="login-error hidden"></p>
-    <p class="login-foot">密码在 <code>.env</code> 的 <code>WEBUI_PASSWORD</code>，未配置时见启动日志</p>
+    <p class="login-foot">密码在数据库 <code>settings</code> 集合（<code>_id = app_settings</code>）的 <code>webui_password</code> 字段</p>
   </div>
 </div>
 
