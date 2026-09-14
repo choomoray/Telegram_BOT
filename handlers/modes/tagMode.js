@@ -142,8 +142,12 @@ async function showGroupTagSelect(userId, messageId, groupId, asNew = false) {
 /** 添加/删除标签模式界面（标签按钮翻页 10 行/页，手动输入同样可用）
  *  作用对象 = 定位用的那条 message（标签按 message 独立）
  *  添加标签：两区版面——上区=已有标签（点击移除），下区=标签库正常显示（置顶在前，点击添加）
- *  删除标签：单区版面（列出的就是已有标签，点击移除） */
-async function showGroupTagAction(userId, messageId, groupId, mode, page = 1) {
+ *  删除标签：单区版面（列出的就是已有标签，点击移除）
+ *  刷新方式（用户要求）：
+ *    - 点按钮（默认）：`editMessageText` 就地刷新按钮与文本，不重发消息；
+ *    - 用户发消息改标签（`opts.resend = true`）：删掉旧面板 → 发一条新面板，
+ *      这样按钮与文本状态紧跟在用户消息之后（旧面板被顶在上面看不到刷新结果）。 */
+async function showGroupTagAction(userId, messageId, groupId, mode, page = 1, opts = {}) {
     const tags = sortTags(await getTags());
     const st = getRawUserState(userId);
     const fileUniqueId = resolveTagTarget(st);
@@ -180,15 +184,23 @@ async function showGroupTagAction(userId, messageId, groupId, mode, page = 1) {
         text = `${title}\n${tagText}\n${hint}`;
     }
 
-    await bot.editMessageText(text, {
-        chat_id: userId,
-        message_id: messageId,
-        reply_markup: result
-    }).catch(() => { });
+    let panelMsgId = messageId;
+    if (opts.resend) {
+        // 用户发消息改的标签：删旧面板 → 发新面板（落在用户消息之后）
+        if (messageId) await bot.deleteMessage(userId, messageId).catch(() => { });
+        const sent = await bot.sendMessage(userId, text, { reply_markup: result });
+        panelMsgId = sent.message_id;
+    } else {
+        await bot.editMessageText(text, {
+            chat_id: userId,
+            message_id: messageId,
+            reply_markup: result
+        }).catch(() => { });
+    }
 
     const stAfter = getRawUserState(userId);
     if (stAfter && stAfter.mode === 'tag') {
-        setUserState(userId, { ...stAfter, tagMsgId: messageId, lastActivity: Date.now() });
+        setUserState(userId, { ...stAfter, tagMsgId: panelMsgId, lastActivity: Date.now() });
     }
 }
 
@@ -490,9 +502,9 @@ async function handleTagMode(msg, state) {
             }
             // 同步 group_list.tags（组内所有 message 标签的并集）
             await syncGroupTags(state.groupId);
-            // 刷新当前模式界面
+            // 刷新当前模式界面：用户是"发消息"改的标签 → 删旧面板 + 发新面板（按钮 + 文本状态）
             if (state.tagMsgId) {
-                await showGroupTagAction(userId, state.tagMsgId, state.groupId, state.groupTagMode);
+                await showGroupTagAction(userId, state.tagMsgId, state.groupId, state.groupTagMode, 1, { resend: true });
             }
             // 用新消息列出当前该 message 的全部标签
             const currentTags = fileUniqueId ? await getMessageTags(fileUniqueId) : await getGroupTags(state.groupId);
@@ -656,7 +668,11 @@ async function handleTagMode(msg, state) {
                     type: m.media_type,
                     fileId: m.file_id,
                     caption: m.caption || undefined,
-                    has_spoiler: false
+                    has_spoiler: false,
+                    // 文本媒体（media_type='text'）没有 file_id：把文本内容与格式一起传下去，
+                    // sendMediaGroupAsReply 会把它当普通文本消息发出（否则相册接口会报错）
+                    text: m.media_type === 'text' ? m.media_name : undefined,
+                    entities: m.media_entities
                 }));
                 await sendMediaGroupAsReply(userId, null, previewItems, 10).catch(err => {
                     logger.warn(`预览媒体组失败: ${err.message}`);

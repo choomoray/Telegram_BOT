@@ -748,7 +748,7 @@ test('GET /api/overview 返回计数/媒体类型/最近日志/最新媒体组',
             users: 3, banned: 1, whitelist: 1, tags: 4, chats: 4, channels: 1,
             groups: 3, bound: 2, logs: 3
         });
-        assert.deepStrictEqual(r.body.mediaByType, { photo: 3, video: 2, audio: 0, document: 1 });
+        assert.deepStrictEqual(r.body.mediaByType, { photo: 3, video: 2, audio: 0, document: 1, text: 0 });
 
         assert.ok(Array.isArray(r.body.recent));
         assert.strictEqual(r.body.recent.length, 3);
@@ -887,6 +887,51 @@ test('GET /api/media scope=cleanable 支持无媒体组（preview 为 null、med
     });
 });
 
+test('GET /api/media：q 也匹配 media.media_name（只有文件 / 只有文本也能搜到）', async () => {
+    const data = makeDomainData();
+    // 新增两组：一组只有文件（带文件名），一组只有文本媒体，都没有任何 message
+    data.group_list.push(
+        { _id: '0020', group_id: '-100_9', is_group: 1, is_delete: NOW - DAY, mark: 0, last_mark_time: null },
+        { _id: '0021', group_id: '-100_8', is_group: 1, is_delete: NOW - DAY, mark: 0, last_mark_time: null }
+    );
+    data.media.push(
+        { _id: 'm9', group_id: '-100_9', subgroup: 1, media_type: 'document', file_id: 'AgAC9', file_unique_id: 'AQAD9', media_name: '季度报告2026.pdf', group: { chat_id: -100, message_id: 91 }, channel: null },
+        { _id: 'm10', group_id: '-100_8', subgroup: 1, media_type: 'text', file_id: null, file_unique_id: 'text:-100:92', media_name: '这是一条纯文本', group: { chat_id: -100, message_id: 92 }, channel: null }
+    );
+    const deps = makeMemoryDeps(data);
+    await withDomain(deps, async (b, auth) => {
+        const hit = await domainReq(b, auth, '/api/media?q=报告');
+        assert.strictEqual(hit.body.total, 1, '按文件名也能命中（以前只搜 message.text）');
+        assert.strictEqual(hit.body.items[0].group_id, '-100_9');
+        assert.strictEqual(hit.body.items[0].text, '季度报告2026.pdf', '没有描述时用文件名兜底展示');
+        assert.deepStrictEqual(hit.body.items[0].types, ['document']);
+        assert.strictEqual(hit.body.items[0].preview.file_unique_id, 'AQAD9');
+
+        const textHit = await domainReq(b, auth, '/api/media?q=纯文本');
+        assert.strictEqual(textHit.body.total, 1, '文本媒体的内容也能被搜到');
+        assert.strictEqual(textHit.body.items[0].group_id, '-100_8');
+        assert.strictEqual(textHit.body.items[0].text, '这是一条纯文本', '用文本媒体的内容兜底展示');
+        assert.deepStrictEqual(textHit.body.items[0].types, ['text']);
+    });
+});
+
+test('GET /api/media 封面：组里有真正的媒体时，不拿文本媒体当封面', async () => {
+    const data = makeDomainData();
+    data.group_list.push({ _id: '0022', group_id: '-100_7', is_group: 2, is_delete: 0, mark: 0, last_mark_time: null });
+    data.media.push(
+        // 文本媒体的位置更靠前（消息 ID 更小）：单纯按位置排序会先选中它
+        { _id: 'm7a', group_id: '-100_7', subgroup: 1, media_type: 'text', file_id: null, file_unique_id: 'text:-100:70', media_name: '组长说明', group: { chat_id: -100, message_id: 70 }, channel: null },
+        { _id: 'm7b', group_id: '-100_7', subgroup: 1, media_type: 'photo', file_id: 'AgAC7', file_unique_id: 'AQAD7', group: { chat_id: -100, message_id: 71 }, channel: null }
+    );
+    const deps = makeMemoryDeps(data);
+    await withDomain(deps, async (b, auth) => {
+        const r = await domainReq(b, auth, '/api/media?scope=all&pageSize=200');
+        const item = r.body.items.find(i => i.group_id === '-100_7');
+        assert.strictEqual(item.preview.file_unique_id, 'AQAD7', '封面应是那张图片而不是文本媒体');
+        assert.strictEqual(item.preview.thumbable, true);
+    });
+});
+
 test('GET /api/media scope=all 与 q 关键词搜索（含正则转义）', async () => {
     const deps = makeMemoryDeps(makeDomainData());
     await withDomain(deps, async (b, auth) => {
@@ -919,7 +964,12 @@ test('GET /api/media 分页参数生效，未知 scope 返回 400', async () => 
         assert.deepStrictEqual(page2.body.items.map(i => i.group_id), ['-100_2', '-100_1']);
 
         const capped = await domainReq(b, auth, '/api/media?pageSize=9999');
-        assert.strictEqual(capped.body.pageSize, 100);
+        assert.strictEqual(capped.body.pageSize, 200, '媒体库最大档 200，超过按 200 截断');
+
+        // 200 组这一档要能真的取到 200 组（大页时媒体/文本的取数上限会跟着放大）
+        const maxPage = await domainReq(b, auth, '/api/media?pageSize=200');
+        assert.strictEqual(maxPage.body.pageSize, 200);
+        assert.strictEqual(maxPage.body.items.length, 4, '不足一页时返回全部组');
 
         const bad = await domainReq(b, auth, '/api/media?scope=nope');
         assert.strictEqual(bad.status, 400);
@@ -956,7 +1006,7 @@ test('GET /api/media/detail 返回 group / media / messages', async () => {
         assert.strictEqual(r.body.media.length, 3);
         assert.deepStrictEqual(Object.keys(r.body.media[0]).sort(), [
             '_id', 'channel', 'file_id', 'file_unique_id', 'group', 'media_type',
-            'message_id', 'subgroup', 'thumbable', 'video_time'
+            'message_id', 'name', 'subgroup', 'thumbable', 'video_time'
         ].sort());
         assert.deepStrictEqual(r.body.media.map(m => [m.subgroup, m.message_id]), [[1, 11], [1, 12], [2, 9]]);
         assert.strictEqual(r.body.media[0]._id, 'm1');

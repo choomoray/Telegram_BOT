@@ -676,7 +676,9 @@ async function flushPackOnExit(userId) {
  * 与 /send 的文本转发行为一致：
  *   - 保留 Telegram 文本格式（带原消息的 entities，不用 parse_mode）；
  *   - 回复到 `targetChatId` / `targetMessageId`（消息回复模式定位到的那条消息）；
- *   - 不写 message 集合、不进入打标签（打标签只针对媒体描述）。
+ *   - **收录到 media**（media_type='text'，内容存 media_name、entities 存 media_entities），
+ *     这样搜索能查到这条文本、查看媒体组时也会把它一起发出来；
+ *     仍不写 message 集合、不进入打标签（打标签只针对媒体描述）。
  *
  * @param {number} userId
  * @param {Object} state - message_reply 状态（含 targetChatId / targetMessageId）
@@ -698,7 +700,22 @@ async function replyTextToTarget(userId, state, msg, userMsgId) {
 
     try {
         const sent = await bot.sendMessage(targetChatId, text, options);
-        logger.info(`用户 ${userId} 回复文本到 ${targetChatId}/${targetMessageId}: msg=${sent.message_id}`);
+        // 收录文本：与媒体回复同样按 subgroup 递增落到本组（media_type='text'）
+        const { recordTextMedia } = require('../../media');
+        const chatType = await resolveChatType(targetChatId);
+        const newSubgroup = (await getMaxSubgroup(targetGroupId)) + 1;
+        await recordTextMedia({
+            sentMsg: sent,
+            chatId: targetChatId,
+            targetType: chatType,
+            groupId: targetGroupId,
+            subgroup: newSubgroup,
+            text,
+            entities: msg.entities
+        });
+        await upsertGroupList(targetGroupId);
+        await syncGroupDeleteByText(targetGroupId);
+        logger.info(`用户 ${userId} 回复文本到 ${targetChatId}/${targetMessageId}: msg=${sent.message_id}, subgroup=${newSubgroup}`);
         logOperation({
             action: 'reply_text',
             source: 'private',
@@ -709,7 +726,8 @@ async function replyTextToTarget(userId, state, msg, userMsgId) {
             counts: { texts: 1, textLength: text.length },
             detail: {
                 replyToMessageId: targetMessageId,
-                entityCount: countEntities(msg)
+                entityCount: countEntities(msg),
+                subgroup: newSubgroup
             }
         }).catch(() => { });
         await bot.sendMessage(userId, '✅ 已回复文本', {
@@ -794,6 +812,7 @@ async function processSingleMediaReply(userId, targetChatId, targetMessageId, ta
         media_type: type,
         video_time: videoTime,
         thumb_file_id: mediaInfo.thumbFileId,
+        media_name: mediaInfo.mediaName,   // 文件/音乐的名称（图片、视频为 null，不会写入）
         ...location
     });
 
@@ -945,6 +964,7 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
             media_type: originalItem.type,
             video_time: originalItem.videoTime,
             thumb_file_id: originalItem.thumbFileId,
+            media_name: originalItem.mediaName,   // 文件/音乐的名称（图片、视频为 null，不会写入）
             ...location
         });
 

@@ -5,6 +5,8 @@ const logger = require('../logger');
 /**
  * 新增 media 记录
  * @param {Object} data - { group_id, subgroup, file_id, file_unique_id, media_type,
+ *                          media_name (可选，文件/音乐的名称；text 类型存文本内容),
+ *                          media_entities (可选，text 类型的 Telegram 富文本 entities),
  *                          video_time (可选), thumb_file_id (可选，视频/文档/音频封面),
  *                          group (可选): { chat_id, message_id }, channel (可选): { chat_id, message_id } }
  *
@@ -33,6 +35,15 @@ async function insertMedia(data) {
         }
         if (data.media_type === 'video' && data.video_time !== undefined && data.video_time !== null) {
             doc.video_time = data.video_time;
+        }
+        // 文件 / 音乐的名称（图片、视频不记录）；text 类型用它存放文本内容。
+        // 搜索（+d / +a / 关键字）会拿它跟 message.text 一起匹配，因此这是"按文件名找得到"的关键。
+        if (data.media_name !== undefined && data.media_name !== null && String(data.media_name).trim() !== '') {
+            doc.media_name = String(data.media_name);
+        }
+        // text 类型：Telegram 富文本是「纯文本 + entities」，带上 entities 才算保留格式
+        if (Array.isArray(data.media_entities) && data.media_entities.length) {
+            doc.media_entities = data.media_entities;
         }
         // 视频/文档/音频的封面 file_id（Web 控制台缩略图用；图片不需要，直接用自身 file_id）
         if (data.thumb_file_id) {

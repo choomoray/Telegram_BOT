@@ -213,12 +213,13 @@ async function start() {
 
         logger.success('系统就绪，Telegram Bot 已启动并等待消息...');
 
-        // 若本次是被看门狗从崩溃中拉起来的，向管理员播报「已自动重启 + 崩溃原因」
-        // （读取 watchdog/crash-marker.json，读完即删；见 utils/crashNotify.js）
-        setTimeout(() => {
-            const { reportRestartFromWatchdog } = require('./utils/crashNotify');
-            reportRestartFromWatchdog().catch(err => logger.warn(`重启播报失败: ${err.message}`));
-        }, 3000).unref?.();
+        // 若本次是被看门狗从崩溃中拉起来的，**第一时间**向管理员播报「已自动重启 + 崩溃原因」：
+        //   - 时机：此处数据库已连接、bot 已开始 polling（见上面的 connectDB / startBotPolling）；
+        //   - 发送者：主 bot 自己（不 await，别拖慢启动；失败只记日志）；
+        //   - 报告不再由看门狗等健康确认后补发（那要几十秒到几分钟才到，用户已反馈太慢）。
+        require('./utils/crashNotify')
+            .reportRestartFromWatchdog()
+            .catch(err => logger.warn(`重启播报失败: ${err.message}`));
 
         // 父进程（看门狗）看护：看门狗被硬杀时自行退出，避免变成孤儿实例抢轮询
         // （只有经 watchdog.js 启动时才有 BOT_PARENT_PID，直接 node index.js 不受影响）

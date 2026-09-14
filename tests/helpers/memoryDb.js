@@ -230,6 +230,24 @@ function fakeCollection(name) {
                 return { deletedCount };
             },
             async countDocuments(filter) { return store.get(name).filter(d => matchFilter(d, filter)).length; },
+            /**
+             * 极简聚合：只实现本项目查询路径用到的阶段（$match / $sample）。
+             * $sample 不做真随机 —— 截取前 size 条，保证测试结果稳定可断言。
+             * 其它阶段直接抛错，避免"悄悄返回空/全量"造成假通过。
+             */
+            aggregate(pipeline) {
+                let list = [...store.get(name)];
+                for (const stage of pipeline || []) {
+                    if (stage.$match) { list = list.filter(d => matchFilter(d, stage.$match)); continue; }
+                    if (stage.$sample) {
+                        const size = Math.max(0, Number(stage.$sample.size) || 0);
+                        list = list.slice(0, size);
+                        continue;
+                    }
+                    throw new Error(`memoryDb 不支持聚合阶段: ${Object.keys(stage).join(',')}`);
+                }
+                return makeCursor(list);
+            },
             async distinct(key, filter) {
                 const set = new Set();
                 for (const d of store.get(name)) if (matchFilter(d, filter)) set.add(getPath(d, key));

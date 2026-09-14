@@ -12,7 +12,13 @@
  *   2. 进程退出（真崩溃 / 被 OOM / 未捕获致命错误）→ 记录原因，等 WATCHDOG_RESTART_DELAY
  *      毫秒后用**同样的启动参数**重新拉起；
  *   3. 健康轮询 /health，连续多次无响应 → 判定软卡死（进程活着但已不工作），走软重启；
- *   4. 崩溃 / 重启失败时用独立通道通知管理员（见 watchdog/notify.js）。
+ *   4. 崩溃时用独立通道通知管理员（见 watchdog/notify.js）。
+ *
+ * 分工（重要）：
+ *   - 「崩溃」报告由看门狗发（崩溃瞬间 bot 已经死了，只能由外部发）；
+ *   - 「重启成功」报告由**重启后连上数据库的主 bot 自己**在启动就绪的第一时间发
+ *     （看门狗把崩溃现场写进 watchdog/crash-marker.json，bot 读完即删，见 utils/crashNotify.js）。
+ *     旧实现是看门狗等健康确认几十秒后才补发，太慢，已移除。
  *
  * 本文件只依赖 Node 内置模块，不 require 项目代码：bot 侧的语法错误、依赖问题、
  * 循环引用都不应该把看门狗一起带走。
@@ -102,9 +108,6 @@ let lastUptime = null;
 let exited = false;               // 看门狗自身是否正在退出
 let restartCount = 0;             // 当前窗口内重启次数
 let restartWindowStart = null;    // 当前统计窗口起始（null = 尚未开始）
-let lastCrash = null;             // 最近一次崩溃现场
-let restartReportSent = true;     // 是否已就本次重启发过"重启成功"（首次启动无需报告）
-let healthySince = 0;             // 子进程健康计时起点（用于确认"重启真的成功"）
 
 const recentOutput = [];          // 环形缓冲：最近 N 行输出（崩溃现场）
 function pushOutput(chunk) {
@@ -137,7 +140,7 @@ function uptimeText(ms) {
     return h > 0 ? `${h} 小时 ${m} 分` : (m > 0 ? `${m} 分 ${s} 秒` : `${s} 秒`);
 }
 
-/** 把崩溃现场写到 marker 文件：重启后的 bot 会读取它并向管理员播报 */
+/** 把崩溃现场写到 marker 文件：重启后的 bot 会读取它，并由**主 bot 自己**向管理员播报「已重启」 */
 function writeCrashMarker(crash) {
     try {
         ensureLogDir();
@@ -146,7 +149,11 @@ function writeCrashMarker(crash) {
             mode: cfg.mode,
             botArgs: cfg.botArgs,
             consecutive: restartCount,
-            maxRestarts: cfg.maxRestarts
+            maxRestarts: cfg.maxRestarts,
+            // 报告里列几条 warn/erro：bot 侧发「重启成功」时沿用同一份上限
+            reportLimit: cfg.reportTailLimit,
+            // 通知模式：off 时 bot 侧也不发「重启成功」（保持"彻底不发通知"的语义）
+            notifyMode: cfg.notifyMode
         }, null, 2));
     } catch (err) {
         wlog('WARN', `写崩溃标记失败: ${err.message}`);
@@ -286,11 +293,8 @@ async function checkHealthTick() {
             }
             healthFailStreak = 0;
 
-            // 健康持续够久 → 确认"重启成功"，补发重启报告
-            if (!healthySince) healthySince = Date.now();
-            if (Date.now() - healthySince >= cfg.restartReportAfterMs) {
-                maybeSendRestartReport();
-            }
+            // 注：「重启成功」报告已改由**主 bot 自己**在连上数据库后第一时间发出
+            // （见 utils/crashNotify.js）——看门狗等健康确认要几十秒到几分钟，太慢。
             return;
         }
 
@@ -308,6 +312,13 @@ async function checkHealthTick() {
 }
 
 // ---------------- 崩溃处理 + 重启 ----------------
+//
+// 注：「重启成功」报告不再由看门狗发。
+// 旧实现要等健康轮询连续正常 WATCHDOG_RESTART_REPORT_AFTER（默认 30 秒）才敢报成功，
+// 加上启动宽限期，用户往往在崩溃几分钟后才收到「♻️ BOT重启成功」。
+// 现在这条报告交给**成功重启并连上数据库的主 bot** 在启动就绪的第一时间自己发
+// （看门狗把崩溃现场写进 watchdog/crash-marker.json，bot 读完即删；
+// 见 utils/crashNotify.js: reportRestartFromWatchdog + watchdog/notify.js: formatRestartReport）。
 
 /**
  * 重启风暴计数的真实规则（抽成纯函数，watchdog.js 与测试共用同一份实现）
@@ -379,37 +390,11 @@ function sendCrashReport(info) {
     if (!child) wlog('WARN', '崩溃播报未发出（缺少 token / 管理员，或启动失败）');
 }
 
-/**
- * 确认重启成功 → 发「♻️ BOT重启成功」报告（同样走短命通知进程）
- * 只在真正健康稳定后发，避免"起来又立刻崩"时误报成功。
- */
-function maybeSendRestartReport() {
-    if (restartReportSent || !lastCrash) return;
-    restartReportSent = true;
-    if (cfg.notifyMode === 'off') return;
-
-    const text = notify.formatRestartReport({
-        ok: true,
-        tail: lastCrash.tail || [],
-        limit: cfg.reportTailLimit
-    });
-    const child = notify.spawnNotifier({
-        text,
-        ttlMs: cfg.notifyTtlMs,
-        root: cfg.root,
-        token: cfg.telegramToken,
-        adminChatIds: cfg.adminChatIds,
-        onExit: (code) => wlog('INFO', `重启播报进程结束（exit=${code}）`)
-    });
-    if (child) wlog('INFO', '已发送重启成功报告');
-}
-
 async function recordAndRestart(crash) {
     // 旧进程必须彻底消失再播报 / 重启：崩溃后残留的进程可能还占着
     // 健康端口或 polling 连接，不杀干净会让新实例起不来（或 Telegram 409）
     await stopChildGracefully(`崩溃清理（${crash.kind}）`);
 
-    lastCrash = crash;
     const n = registerRestart();
     const info = {
         ...crash,
@@ -420,7 +405,6 @@ async function recordAndRestart(crash) {
         restartDelayMs: cfg.restartDelayMs,
         tail: tailLines()
     };
-    lastCrash = info;
 
     wlog('ERROR', `崩溃 #${n}/${cfg.maxRestarts}：${crash.reason}`);
     writeCrashMarker(info);
@@ -443,7 +427,6 @@ async function recordAndRestart(crash) {
     if (cfg.notifyMode !== 'after_restart') {
         sendCrashReport(info);
     }
-    restartReportSent = false;
 
     wlog('INFO', `等待 ${cfg.restartDelayMs}ms 后重启（按原启动方式：node index.js${cfg.botArgs.length ? ' ' + cfg.botArgs.join(' ') : ''}）`);
     restartTimer = setTimeout(() => {
@@ -470,8 +453,6 @@ function onChildExit(code, signal) {
         // /restart：用户主动要求重启，不当作崩溃、不发崩溃报告、不等 30 秒
         wlog('INFO', `收到重启请求（exitCode=${code}），立即按原启动方式重启`);
         if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
-        restartReportSent = true; // 手动重启不需要"重启成功"报告
-        lastCrash = null;
         startChild();
         return;
     }
@@ -517,7 +498,6 @@ function startChild() {
     healthFailStreak = 0;
     healthFirstOk = false;
     lastUptime = null;
-    healthySince = 0;
 
     child.stdout.on('data', (c) => { process.stdout.write(c); pushOutput(c); });
     child.stderr.on('data', (c) => { process.stderr.write(c); pushOutput(c); });

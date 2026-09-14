@@ -34,6 +34,7 @@ function makeElement(sel = '') {
     const el = {
         sel,
         tagName: 'DIV',
+        nodeType: 1,
         id: sel.replace(/^#/, ''),
         dataset: {},
         style: {},
@@ -136,13 +137,15 @@ function makeElement(sel = '') {
         close() { el.open = false; },
         querySelectorAll: (s) => queryAll(el, s),
         querySelector: (s) => queryAll(el, s)[0] || null,
-        // 只支持类选择器（够用即可）；祖先查找交给测试助手包装
+        // 只支持类选择器（够用即可，含逗号分组：瀑布流容器选择器就是 '.a, .b, …'）；祖先查找交给测试助手包装
         closest: (sel) => {
-            const cls = String(sel || '').replace(/^[a-zA-Z]+/, '').replace(/^\./, '');
-            if (!cls) return null;
+            const groups = String(sel || '').split(',')
+                .map(s => s.trim().replace(/^[a-zA-Z]+/, '').replace(/^\./, ''))
+                .filter(Boolean);
+            if (!groups.length) return null;
             let node = el;
             while (node) {
-                if ((node.classList && node.classList.contains(cls)) || node.className === cls) return node;
+                if (node.classList && groups.some(cls => node.classList.contains(cls))) return node;
                 node = node.parentElement;
             }
             return null;
@@ -205,9 +208,17 @@ function parseTree(html, owner) {
     return out;
 }
 
-/** 在元素子树里按选择器查找（支持 .cls / tag / tag.cls / #id，以及 `祖先 后代` 两级形式） */
+/** 在元素子树里按选择器查找（支持 .cls / tag / tag.cls / #id、逗号分组，以及 `祖先 后代` 两级形式） */
 function queryAll(root, selector) {
     const raw = String(selector).trim();
+    // 逗号分组（如瀑布流容器的 '.a, .b, .c'）：逐组查询后合并去重
+    if (raw.includes(',')) {
+        const out = [];
+        for (const one of raw.split(',').map(s => s.trim()).filter(Boolean)) {
+            for (const hit of queryAll(root, one)) if (!out.includes(hit)) out.push(hit);
+        }
+        return out;
+    }
     // 两级后代选择器（如 '.detail-thumb .thumb-img'）：先找祖先，再在祖先子树里找后代
     const parts = raw.split(/\s+/).filter(Boolean);
     if (parts.length === 2) {
@@ -307,6 +318,8 @@ function makeSandbox(fixtures) {
         },
         localStorage,
         fetch: fetchStub,
+        // 瀑布流排布要读容器的 row-gap（style.css 里媒体库是 14px）
+        getComputedStyle: () => ({ rowGap: '14px' }),
         EventSource: EventSourceStub,
         location: { reload() { } },
         setTimeout,
@@ -655,8 +668,9 @@ test('随机推荐：卡片是瀑布流变体（封面完整显示不裁切，�
     // 文字仍在图片下方：media-body 紧跟在封面之后，且不在封面内部
     assert.match(html, /<div class="media-thumb media-thumb--flow"[\s\S]*?<\/div>\s*<div class="media-body">/,
         '描述 / 标签仍在封面下方');
-    // 媒体库（另一视图）保持原来的裁切封面：不带 flow 变体
-    assert.ok(!html.includes('media-card--flow" data-action="tag-media-open"'), '标签详情卡片不受影响');
+    // 随机推荐用的是视口阶梯（media-grid--flow）；媒体库 / 标签详情改用按容器宽度自适应的
+    // media-grid--fit，两者互不干扰
+    assert.ok(!html.includes('media-grid--fit'), '随机推荐不用媒体库那套按容器自适应的列数');
 });
 
 test('随机推荐：展开筛选后重抽 / 重置条件都保持展开，收起后回到只有类型一行', async () => {
@@ -809,9 +823,12 @@ test('媒体库：点媒体卡片能进入详情（data-action 必须是 open-me
 
     // 卡片必须是 open-media：一旦写成 mediaCard(item, index) 这种裸函数引用，
     // Array.map 会把索引当第二参传进去 → data-action="0" → 点了没反应
-    assert.match(view.innerHTML, /class="media-card" data-action="open-media" data-group="-100_1"/);
+    assert.match(view.innerHTML, /class="media-card media-card--flow" data-action="open-media" data-group="-100_1"/);
     assert.ok(!/data-action="\d+"/.test(view.innerHTML), '不能出现数字 action');
     assert.match(view.innerHTML, /有标签的描述/);
+    // 瀑布流：列数按容器宽度自适应（弹窗里 / 主区域里卡片一样大），不是视口阶梯
+    assert.match(view.innerHTML, /class="media-grid media-grid--fit"/);
+    assert.ok(!view.innerHTML.includes('media-grid--flow"'), '媒体库不用视口阶梯那套（否则弹窗里卡片会变小）');
 
     const card = view.querySelectorAll('.media-card').find(c => c.dataset.group === '-100_1');
     assert.ok(card, '媒体卡片已渲染');
@@ -872,7 +889,7 @@ test('媒体库缩略图悬停：先出加载转圈，稍后从该角弹出放�
     assert.ok(!spin.classList.contains('is-on'));
 });
 
-test('媒体库「每组显示」档位：20 / 40（默认）/ 80 / 120，并立即按该数量重新拉取', async () => {
+test('媒体库「每组显示」档位：40 / 80（默认）/ 120 / 200，并立即按该数量重新拉取', async () => {
     const env = await boot();
     const view = await goto(env, 'media');
     const html = view.innerHTML;
@@ -880,41 +897,175 @@ test('媒体库「每组显示」档位：20 / 40（默认）/ 80 / 120，并立
     const select = (html.match(/<select id="media-pagesize"[\s\S]*?<\/select>/) || [''])[0];
     assert.ok(select, '媒体库应有「每组显示」下拉');
     assert.deepStrictEqual([...select.matchAll(/<option value="(\d+)"( selected)?/g)].map(m => [m[1], !!m[2]]),
-        [['20', false], ['40', true], ['80', false], ['120', false]],
-        '档位为 20 / 40 / 80 / 120，默认 40');
-    // 默认请求就带 pageSize=40（用内存默认数据，不带后端返回值）
-    assert.ok(env.requests.some(r => r.url.includes('/api/media?') && r.url.includes('pageSize=40')),
-        '默认按每组 40 组拉取');
+        [['40', false], ['80', true], ['120', false], ['200', false]],
+        '档位为 40 / 80 / 120 / 200，默认 80');
+    // 默认请求就带 pageSize=80（用内存默认数据，不带后端返回值）
+    assert.ok(env.requests.some(r => r.url.includes('/api/media?') && r.url.includes('pageSize=80')),
+        '默认按每组 80 组拉取');
 
-    // 切到 120 → 立即按 120 重新拉取
-    await view.fire('change', { target: { id: 'media-pagesize', value: '120' } });
+    // 切到 200 → 立即按 200 重新拉取（后端上限已提到 200，不能再被截成 100）
+    await view.fire('change', { target: { id: 'media-pagesize', value: '200' } });
     await tick();
-    assert.ok(env.requests.some(r => r.url.includes('/api/media?') && r.url.includes('pageSize=120')),
+    assert.ok(env.requests.some(r => r.url.includes('/api/media?') && r.url.includes('pageSize=200')),
         '切档位后按新数量重新拉取');
 });
 
-test('媒体库缩略图：固定尺寸 cover 裁切，状态徽标已移到描述下方', async () => {
+test('媒体库缩略图：瀑布流封面（图片完整显示不裁切），状态徽标已移到描述下方', async () => {
     const env = await boot();
     const view = await goto(env, 'media');
     const html = view.innerHTML;
 
-    // 封面就是一层背景图（固定尺寸 cover 裁切），不再有「缩放到全貌」的模糊底装饰层
-    assert.match(html, /<span class="thumb-img" data-src="\/api\/thumb\?fileUniqueId=AQAD1[^"]*" style="background-image:url\('\/api\/thumb\?fileUniqueId=AQAD1[^)]*'\)"><img class="thumb-src"/, '封面是固定尺寸的背景图层');
+    // 封面是瀑布流变体：背景层 + 里面那张"真图"（按图片真实比例撑开封面，完整显示不裁切）
+    assert.match(html, /<span class="thumb-img thumb-img--flow" data-src="\/api\/thumb\?fileUniqueId=AQAD1[^"]*" style="background-image:url\('\/api\/thumb\?fileUniqueId=AQAD1[^)]*'\)"><img class="thumb-src"/, '封面是瀑布流封面层（真图完整显示）');
+    assert.match(html, /class="media-thumb media-thumb--flow" data-zoom="1"/, '封面容器带瀑布流变体类');
     assert.ok(!html.includes('thumb-fill'), '已移除「整图可见」用的模糊底装饰层');
     // 「保留 / 可清理 / 图片 / 视频」不再压在封面上，改到描述下方（模板里有换行缩进）
     assert.match(html, /class="media-badges">\s*<span class="tag ok">保留<\/span>/, '状态徽标在文字区');
     assert.match(html, /class="media-badges">[\s\S]*?<span class="tag">🖼 图片<\/span>\s*<span class="tag">🎬 视频<\/span>/, '类型徽标也跟着挪到文字区');
     // 封面里只留下角落的文件类型角标（.thumb-type），不再有覆盖封面的徽标行
-    const thumbHtml = (html.match(/<div class="media-thumb"[\s\S]*?<\/div>\s*<div class="media-body"/) || [''])[0];
+    const thumbHtml = (html.match(/<div class="media-thumb media-thumb--flow"[\s\S]*?<\/div>\s*<div class="media-body"/) || [''])[0];
     assert.ok(thumbHtml, '应能截出封面容器');
     assert.ok(!thumbHtml.includes('media-badges'), '封面里不再有徽标行');
     assert.ok(!thumbHtml.includes('保留'), '封面里不再有「保留」徽标');
     assert.ok(!thumbHtml.includes('class="badges"'), '封面里不再有旧的 .badges 覆盖层');
-    assert.ok(thumbHtml.includes('class="thumb-type"'), '封面右下角仍保留类型角标');
+    assert.ok(thumbHtml.includes('class="thumb-type"'), '封面仍保留类型角标');
     // 卡片不再用原生 title 提示（会飘在图片上挡住画面）
-    assert.ok(!/<article class="media-card"[^>]*\stitle="/.test(html), '媒体库卡片不再有原生 title 提示');
+    assert.ok(!/<article class="media-card[^"]*"[^>]*\stitle="/.test(html), '媒体库卡片不再有原生 title 提示');
     // 底部信息横向一行（不换行）：媒体数 / 组数 / 位置 / group_id 依次排开
     assert.match(html, /class="media-meta">[\s\S]*?<span>2 个媒体<\/span>\s*<span>·<\/span>\s*<span>1 组<\/span>[\s\S]*?<\/div>/, '媒体数 / 组数横排');
+});
+
+test('瀑布流封面：图片加载后按真实比例定高，并放开 min-height 占位下限（横图下面不会露一截背景）', async () => {
+    const env = await boot();
+    const view = await goto(env, 'media');
+    const thumb = view.querySelector('.media-thumb--flow');
+    assert.ok(thumb, '媒体库卡片应有瀑布流封面容器');
+    const cover = thumb.querySelector('.thumb-img');
+    const img = cover.querySelector('.thumb-src');
+    assert.ok(img, '封面里应有那张用于读尺寸的真图');
+
+    // 模拟图片加载完成（浏览器触发内联 onload → window.__thumbLoad）
+    img.naturalWidth = 1600;
+    img.naturalHeight = 900;
+    env.sandbox.window.__thumbLoad(img);
+
+    assert.strictEqual(thumb.style.aspectRatio, String(1600 / 900), '容器按图片真实比例定高');
+    // 16:9 的横图在 132px 一列时只有 74px 高，会被 CSS 的 min-height 撑高 →
+    // 真图只占顶部、下面露出一截被裁切的背景图。加载完必须把下限放开。
+    assert.strictEqual(thumb.style.minHeight, '0', '放开 min-height 占位下限');
+    assert.strictEqual(cover.dataset.ratio, String(1600 / 900), '封面层记下真实比例（悬停放大浮层用）');
+});
+
+test('瀑布流：按每张卡的内容高度算 grid 行跨度（"先第一行从左到右"排布的基础）', async () => {
+    const card = (groupId, text) => ({
+        group_id: groupId, is_group: 1, is_delete: 0, cleanable: false,
+        mediaCount: 1, subgroups: 1, types: ['photo'],
+        preview: { file_unique_id: `AQAD${groupId}`, media_type: 'photo', thumbable: true },
+        text, tags: [], group: { chat_id: -100, message_id: 11 }, channel: null
+    });
+    const fx = fixtures();
+    fx['/api/media'] = { total: 2, page: 1, pageSize: 24, totalPages: 1, items: [card('1', '卡片一'), card('2', '卡片二')] };
+    const env = await boot(fx);
+    const view = await goto(env, 'media');
+    const grid = view.querySelector('.media-grid--fit');
+    assert.ok(grid, '媒体库卡片外层是瀑布流容器');
+    const cards = [...grid.children];
+    assert.ok(cards.length >= 2, '至少两张卡才能比较');
+    assert.match(cards[0].className, /media-card--flow/, '卡片是瀑布流变体');
+
+    // 给两张卡不同高度：跨度必须各自按 ceil((H+gap)/(rowH+gap)) 算出（rowH=8、gap=14）
+    cards[0].getBoundingClientRect = () => ({ height: 500, width: 200, top: 0, left: 0 });
+    cards[1].getBoundingClientRect = () => ({ height: 100, width: 200, top: 0, left: 0 });
+    env.sandbox.window.__layoutFlowGrid(view);
+
+    assert.strictEqual(cards[0].style.gridRowEnd, `span ${Math.ceil((500 + 14) / (8 + 14))}`, '高卡片跨更多行');
+    assert.strictEqual(cards[1].style.gridRowEnd, `span ${Math.ceil((100 + 14) / (8 + 14))}`, '矮卡片跨更少行');
+    assert.notStrictEqual(cards[0].style.gridRowEnd, cards[1].style.gridRowEnd, '高度不同 → 跨度不同（错落）');
+
+    // 缩略图按真实比例定高后要自动重排（否则卡片会和下一行重叠/留白）
+    const cover = cards[0].querySelector('.thumb-img');
+    const img = cover && cover.querySelector('.thumb-src');
+    assert.ok(img, '封面里应有读尺寸的真图');
+    img.naturalWidth = 1600;
+    img.naturalHeight = 400;   // 4:1 的扁图 → 高度变矮
+    cards[0].getBoundingClientRect = () => ({ height: 60, width: 200, top: 0, left: 0 });
+    env.sandbox.window.__thumbLoad(img);
+    assert.strictEqual(cards[0].style.gridRowEnd, `span ${Math.ceil((60 + 14) / (8 + 14))}`,
+        '图片加载完按新高度重排该容器');
+});
+
+test('媒体库：卡片瀑布流按容器宽度自适应（列宽固定 228px，与原来的网格同尺度）', () => {    const css = fs.readFileSync(path.join(__dirname, '..', 'webui', 'public', 'style.css'), 'utf8');
+    const fit = (css.match(/\.media-grid--fit\s*\{[^}]*\}/) || [''])[0];
+    assert.ok(fit, '缺少 .media-grid--fit 规则');
+    // 用 auto-fill 的 minmax（每列至少多宽）而不是写死列数：列数由容器自己算
+    assert.match(fit, /repeat\(auto-fill,\s*minmax\(228px,\s*1fr\)\)/, '列宽固定 228px（与原来的 minmax(228px,1fr) 同尺度）');
+    assert.match(fit, /display:\s*grid/, '网格容器（行标尺 + 卡片跨行 = 瀑布流）');
+    // 卡片是 grid 子项：高度=内容高度（JS 量高度算跨度依赖这一点）
+    assert.match(css, /\.media-card--flow\s*\{[^}]*align-self:\s*start/, '卡片高度由内容决定');
+    assert.match(css, /\.media-card--flow\s*\{[^}]*grid-row-end:\s*span var\(--flow-span/, '卡片按 JS 写入的跨度跨行');
+    // 窄屏收窄列宽，保证手机上也排得下 2 列
+    assert.match(css, /@media \(max-width: 640px\) \{[\s\S]*?\.media-grid--fit \{ grid-template-columns: repeat\(auto-fill, minmax\(150px, 1fr\)\)/);
+    assert.match(css, /@media \(max-width: 420px\) \{[\s\S]*?\.media-grid--fit \{ grid-template-columns: repeat\(auto-fill, minmax\(120px, 1fr\)\)/);
+});
+
+test('媒体详情：左栏媒体条是瀑布流变体（封面完整显示不裁切，列数按容器宽度自适应）', async () => {
+    const env = await boot();
+    await goto(env, 'media');
+    await act(env, { action: 'open-media', group: '-100_1' });
+
+    const body = env.document.querySelector('#detail-body');
+    const html = body.innerHTML;
+    assert.match(html, /class="detail-strip detail-strip--flow"/, '媒体条容器带瀑布流变体类');
+    assert.match(html, /class="detail-item detail-item--flow"[\s\S]{0,40}data-action="detail-pick"/, '媒体条卡片带瀑布流变体类');
+    assert.match(html, /class="detail-thumb detail-thumb--flow"/, '封面容器带瀑布流变体类');
+    assert.match(html, /class="thumb-img thumb-img--flow"/, '封面层也是完整显示变体（不锁 1:1 裁切）');
+    // 封面容器高度交给图片真实比例（JS onload 写 aspect-ratio），不再写死 1:1
+    assert.match(html, /class="detail-thumb detail-thumb--flow"[\s\S]*?class="thumb-type"/, '角标仍在封面容器里');
+
+    // 点选仍然有效（瀑布流只改排版，不改交互）：选中的媒体条要高亮
+    await actDialog(env, { action: 'detail-pick', file: 'AQAD1' }, { tagName: 'DIV' });
+    const picked = [...env.document.querySelector('#detail-body').querySelectorAll('.detail-item')]
+        .find(el => el.dataset.file === 'AQAD1');
+    assert.ok(picked && picked.classList.contains('is-active'), '点选后该媒体条高亮');
+    assert.ok(picked.classList.contains('detail-item--flow'), '高亮态不影响瀑布流变体类');
+});
+
+test('媒体详情：无文本记录的媒体条同样走瀑布流（no-msg 修饰类不被顶掉）', async () => {
+    const env = await boot();
+    await goto(env, 'media');
+    await act(env, { action: 'open-media', group: '-100_3' });
+
+    const html = env.document.querySelector('#detail-body').innerHTML;
+    assert.match(html, /class="detail-item detail-item--flow no-msg"/, 'no-msg 与瀑布流变体共存');
+    // 不可缩略的媒体走占位图标，仍然在瀑布流容器里
+    assert.match(html, /class="detail-thumb detail-thumb--flow">\s*<div class="ph">/, '不可缩略媒体用占位图标');
+});
+
+test('style.css：媒体详情左栏的媒体条瀑布流（列宽自适应 + 完整显示 + 卡片跨行）', () => {
+    const css = fs.readFileSync(path.join(__dirname, '..', 'webui', 'public', 'style.css'), 'utf8');
+    const strip = (css.match(/\.detail-strip--flow\s*\{[^}]*\}/) || [''])[0];
+    assert.ok(strip, '缺少 .detail-strip--flow 规则');
+    assert.match(strip, /repeat\(auto-fill,\s*minmax\(132px,\s*1fr\)\)/, '按容器宽度自适应列数（不写死列数）');
+    assert.match(strip, /grid-auto-rows:/, '行标尺：卡片按内容高度跨行');
+    const item = (css.match(/\.detail-item--flow\s*\{[^}]*\}/) || [''])[0];
+    assert.ok(item, '缺少 .detail-item--flow 规则');
+    assert.match(item, /align-self:\s*start/, '卡片高度=内容高度（JS 量高度算跨度）');
+    assert.match(item, /grid-row-end:\s*span var\(--flow-span/, '卡片按 JS 写入的跨度跨行');
+    // 封面完整显示（contain），且必须排在 `.detail-thumb .thumb-img` 之后才覆盖得住
+    const cover = (css.match(/\.detail-thumb--flow \.thumb-img--flow\s*\{[^}]*\}/) || [''])[0];
+    assert.ok(cover, '缺少 .detail-thumb--flow .thumb-img--flow 规则');
+    assert.match(cover, /background-size:\s*contain/, '封面完整显示、不裁切');
+    assert.ok(!/background-size:\s*cover/.test(cover), '不能用 cover 裁切');
+    assert.match(cover, /position:\s*absolute/, '封面层绝对定位铺满容器（沿用媒体库那套）');
+    assert.ok(css.indexOf('.detail-thumb--flow .thumb-img--flow {') > css.indexOf('.detail-thumb .thumb-img {'),
+        '必须写在基础封面规则之后（两者权重相同，靠顺序覆盖 position / 背景尺寸）');
+    const probe = (css.match(/\.detail-thumb--flow \.thumb-img--flow \.thumb-src\s*\{[^}]*\}/) || [''])[0];
+    assert.ok(probe, '缺少瀑布流里真图的显示规则');
+    assert.match(probe, /opacity:\s*1/, '真图要真正可见（它才是显示出来的那张图）');
+    assert.match(probe, /width:\s*100%/, '真图按容器宽度铺满');
+    // 封面按图片真实比例定高（JS 写 aspect-ratio），占位图标不再叠加 1:1
+    assert.match((css.match(/\.detail-thumb--flow\s*\{[^}]*\}/) || [''])[0], /aspect-ratio:/);
+    assert.match((css.match(/\.detail-thumb--flow \.ph\s*\{[^}]*\}/) || [''])[0], /aspect-ratio:\s*auto/);
 });
 
 test('媒体详情条悬停：放大预览挂进对话框（顶层，否则会被遮住）', async () => {
@@ -1162,12 +1313,23 @@ test('标签详情：直接列出该标签下的媒体组并可点开（无需�
     const body = env.document.querySelector('#detail-body');
     assert.ok(env.requests.some(r => r.url.includes('/api/media?') && r.url.includes('tag=AAA')), '详情里直接查询该标签下的媒体');
     assert.match(body.innerHTML, /该标签下的媒体组/);
-    // 与「媒体库」一致的方块卡片（不再是 mini-row 列表）
-    assert.match(body.innerHTML, /class="media-grid"/);
-    assert.match(body.innerHTML, /class="media-card" data-action="tag-media-open" data-group="-100_1"/);
-    assert.match(body.innerHTML, /media-thumb/);
+    // 与「媒体详情」左栏缩略图同尺度的紧凑瀑布流（media-grid--mini 的列宽与 .detail-strip--flow 一致）
+    assert.match(body.innerHTML, /class="media-grid media-grid--mini"/);
+    assert.match(body.innerHTML, /class="media-card media-card--flow media-card--compact" data-action="tag-media-open" data-group="-100_1"/);
+    assert.match(body.innerHTML, /class="media-thumb media-thumb--flow"/);
+    assert.match(body.innerHTML, /class="thumb-img thumb-img--flow"/, '封面也是完整显示变体');
     assert.match(body.innerHTML, /有标签的描述/);
     assert.ok(!body.innerHTML.includes('mini-row'), '不再用小行列表');
+
+    // 紧凑卡片：132px 一列放不下徽标 / 标签 / 定位信息 / group_id，这些都不再渲染
+    const cardHtml = (body.innerHTML.match(/<article class="media-card media-card--flow media-card--compact"[\s\S]*?<\/article>/) || [''])[0];
+    assert.ok(cardHtml, '应能截出紧凑卡片');
+    const cardInner = cardHtml.replace(/^<article[^>]*>/, '');
+    assert.ok(!cardInner.includes('media-badges'), '不再渲染「保留 / 可清理 + 类型」徽标行');
+    assert.ok(!cardInner.includes('tags-line'), '不再渲染标签胶囊行');
+    assert.ok(!/>点击进详情</.test(cardInner), '不再渲染「点击进详情」提示');
+    assert.ok(!/-100_1/.test(cardInner), '不再渲染 group_id');
+    assert.match(cardInner, /class="media-meta">\s*<span>🖼 🎬<\/span>\s*<span>2 个媒体<\/span>/, '紧凑信息行 = 类型图标 + 媒体数');
 
     // 页脚保留「在媒体库中筛选」（点开卡片后会被媒体详情的页脚替换）
     assert.match(env.document.querySelector('#detail-foot').innerHTML, /在媒体库中筛选/);

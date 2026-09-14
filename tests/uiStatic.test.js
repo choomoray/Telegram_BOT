@@ -82,13 +82,15 @@ test('style.css：方格图必须声明 7 行，否则 grid-auto-flow: column �
 test('style.css：随机推荐瀑布流（列数随屏幕宽度阶梯变化 + 图片完整显示不裁切 + 文字在图片下方）', () => {
   const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
 
-  // 瀑布流容器：多列（columns = masonry），不再是一行行等高的 grid
+  // 瀑布流容器：CSS Grid + 8px 行标尺（卡片按内容高度跨行 → 错落），不再是"先填满第一列"的 columns
   const flowGrid = (css.match(/\.media-grid--flow\s*\{[^}]*\}/) || [''])[0];
   assert.ok(flowGrid, '缺少 .media-grid--flow 规则');
-  assert.match(flowGrid, /columns:\s*\d+/, '瀑布流用多列布局（按内容高度堆叠）');
+  assert.match(flowGrid, /display:\s*grid/, '瀑布流用 grid（自动放置=先第一行从左到右）');
+  assert.match(flowGrid, /grid-auto-rows:\s*\d+px/, '要有行标尺（JS 按卡片高度换算成跨多少行）');
+  assert.ok(!/columns:\s*\d/.test(flowGrid), '不再用 CSS 多列（columns 是"先填满第一列"，顺序会跳列）');
 
   // 列数阶梯：按窗口宽度自动选列数，手机 2 列、桌面 5~6 列，且从窄到宽排列
-  const steps = [...css.matchAll(/@media \(min-width:\s*(\d+)px\)\s*\{\s*\.media-grid--flow\s*\{\s*columns:\s*(\d+)/g)]
+  const steps = [...css.matchAll(/@media \(min-width:\s*(\d+)px\)\s*\{\s*\.media-grid--flow\s*\{\s*--flow-cols:\s*(\d+)/g)]
     .map(m => ({ width: Number(m[1]), cols: Number(m[2]) }));
   assert.ok(steps.length >= 4, `列数阶梯至少要有 4 档，实际 ${steps.length} 档`);
   for (let i = 1; i < steps.length; i++) {
@@ -112,9 +114,76 @@ test('style.css：随机推荐瀑布流（列数随屏幕宽度阶梯变化 + �
   assert.match(flowProbe, /position:\s*relative/, '真图要参与文档流（用它的高度撑开封面）');
   assert.match(flowProbe, /opacity:\s*1/, '真图在瀑布流里要真正可见');
 
+  // 卡片必须是 grid 子项且 align-self:start（高度=内容高度），否则 JS 量不到真实高度、跨度算错
+  const card = (css.match(/\.media-card--flow\s*\{[^}]*\}/) || [''])[0];
+  assert.match(card, /align-self:\s*start/, '卡片高度由内容决定（不被 8px 轨道拉伸）');
+  assert.match(card, /grid-row-end:\s*span var\(--flow-span/, '卡片按 JS 写入的跨度跨行');
+
   // 文字仍在图片下方：body 是纵向块（沿用 .media-body）
-  const body = (css.match(/\.media-body\s*\{[^}]*\}/) || [''])[0];
+  // 锚定行首：否则会先匹配到 `.media-card--compact .media-body` 这类组合选择器
+  const body = (css.match(/^\.media-body\s*\{[^}]*\}/m) || [''])[0];
   assert.match(body, /flex-direction:\s*column/, '卡片文字区仍在图片下方（纵向）');
+});
+
+test('app.js：瀑布流按「先第一行从左到右」排布（grid 行跨度，图片加载完 / 缩放后重算）', () => {
+  // 顺序观看的核心：卡片高度换算成 grid-row-end: span N，
+  // grid 的自动放置永远先铺满第一行再往下 —— 与列表顺序一致（columns 会先填满第一列）
+  assert.match(js, /function layoutFlowBox\(box\)/, '缺少瀑布流行跨度计算');
+  assert.match(js, /gridRowEnd = `span \$\{span\}`/, '要把内容高度换算成 grid-row-end 跨度');
+  assert.match(js, /Math\.ceil\(\(heights\[i\] \+ gap\) \/ \(FLOW_ROW_HEIGHT \+ gap\)\)/, '跨度公式：ceil((H+gap)/(rowH+gap))');
+  assert.match(js, /const FLOW_SELECTOR = '\.media-grid--flow, \.media-grid--fit, \.media-grid--mini, \.detail-strip--flow'/,
+    '四处瀑布流共用同一套排布');
+  // 重排时机：视图渲染后 / 详情渲染后 / 缩略图加载完（高度变了）/ 窗口缩放
+  assert.match(js, /layoutFlowGrid\(\$\('#view'\)\)/, '视图渲染后要重排');
+  assert.match(js, /relayoutFlowOf\(wrap\)/, '缩略图按真实比例定高后要重排该容器');
+  assert.match(js, /window\.addEventListener\('resize', \(\) => \{/, '窗口缩放要重排（列宽变了）');
+});
+
+test('style.css：媒体库 / 标签详情的卡片瀑布流按容器宽度自适应（两处卡片一样大）', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  // 视口阶梯那套（.media-grid--flow）只服务随机推荐：媒体库 / 标签详情在弹窗里容器更窄，
+  // 若共用会变成列数一样、列宽更小 → 卡片明显变小。这里改用 auto-fill 按容器算列数。
+  const fit = (css.match(/\.media-grid--fit\s*\{[^}]*\}/) || [''])[0];
+  assert.ok(fit, '缺少 .media-grid--fit 规则');
+  assert.match(fit, /display:\s*grid/, '列数由 auto-fill 自适应（不写死列数）');
+  assert.match(fit, /repeat\(auto-fill,\s*minmax\(228px,\s*1fr\)\)/, '列宽与原来的 minmax(228px, 1fr) 同尺度');
+  assert.match(fit, /grid-auto-rows:/, '同样是行标尺瀑布流');
+  // 窄屏收窄列宽（弹窗正文更窄，所以比 640px 档更小），保证手机上也排得下 2 列
+  const narrow = [...css.matchAll(/@media \(max-width:\s*(\d+)px\)\s*\{\s*\.media-grid--fit\s*\{\s*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\((\d+)px,\s*1fr\)\)/g)]
+    .map(m => ({ width: Number(m[1]), colWidth: Number(m[2]) }));
+  assert.ok(narrow.length >= 2, `窄屏至少要两档收窄，实际 ${narrow.length} 档`);
+  for (let i = 1; i < narrow.length; i++) {
+    assert.ok(narrow[i].width < narrow[i - 1].width, '窄屏断点必须从宽到窄排列');
+    assert.ok(narrow[i].colWidth <= narrow[i - 1].colWidth, '越窄的屏幕列宽不能变大');
+  }
+  assert.ok(narrow[narrow.length - 1].colWidth <= 120, '最窄档 120px：手机上（含弹窗）要排得下 2 列');
+  // 卡片 / 封面变体与随机推荐共用同一套（视觉一致）
+  assert.match(css, /\.media-card--flow\s*\{[^}]*align-self:\s*start/, '卡片高度由内容决定（JS 量高度依赖）');
+  assert.match(css, /\.media-thumb--flow\s*\{[^}]*min-height:/, '封面容器要有占位高度');
+});
+
+test('style.css：标签详情的媒体尺寸与「媒体详情」左栏完全一致（列宽 / 列间距 / 断点逐一相同）', () => {
+  const css = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  // 两处的所有「列宽 + 列间距」声明（含窄屏那档）都必须一模一样，
+  // 否则同一个窗口下标签详情里的媒体会比媒体详情左栏大 / 小
+  const pairsOf = (sel) => [...css.matchAll(
+    new RegExp(`\\.${sel}\\s*\\{[^}]*grid-template-columns:\\s*([^;]+);[^}]*column-gap:\\s*([^;]+);`, 'g')
+  )].map(m => `${m[1].trim()}|${m[2].trim()}`);
+  const mini = pairsOf('media-grid--mini');
+  const strip = pairsOf('detail-strip--flow');
+  assert.ok(mini.length >= 1, '缺少 .media-grid--mini 规则');
+  assert.ok(strip.length >= 1, '缺少 .detail-strip--flow 规则');
+  assert.deepStrictEqual(mini, strip, '标签详情与媒体详情左栏的列宽必须在每一档都相同');
+  assert.ok(mini.length >= 2, '窄屏那档也要一起收窄（否则手机上两处又会不一样大）');
+  assert.match(mini[0], /^repeat\(auto-fill, minmax\(132px, 1fr\)\)\|10px$/, '桌面档：132px 一列（与媒体详情左栏同尺度）');
+  // 紧凑卡片（132px 放不下徽标 / 标签）必须精简内容，并隐藏过大的类型角标
+  assert.match(css, /\.media-card--compact \.media-body\s*\{[^}]*padding:/, '紧凑卡片正文要收紧内边距');
+  assert.match(css, /\.media-card--compact \.thumb-type\s*\{\s*display:\s*none/, '紧凑卡片里隐藏类型角标');
+});
+
+test('app.js：前端认识文本媒体类型（/send、/reply 的纯文本会收录成 media_type=text）', () => {
+  assert.match(js, /text: \{ icon: '📝', label: '文本' \}/, 'TYPE_META 要有 text');
+  assert.match(js, /const typeOrder = \['photo', 'video', 'audio', 'document', 'text'\]/, '概览类型分布也要含文本');
 });
 
 test('style.css：选中的标签区必须重新打开 pointer-events（否则加减标签点不动）', () => {

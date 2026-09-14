@@ -7,7 +7,8 @@ const MEDIA_ICON = {
     video: '🎬',
     photo: '🏞',
     audio: '🎵',
-    document: '📄'
+    document: '📄',
+    text: '📝'   // /send、/reply 发出的纯文本（收录为 media_type='text'）
 };
 
 function formatResultLine(item, index, total) {

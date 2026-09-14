@@ -29,6 +29,7 @@ const { executeCommand } = require('./commands');
 const { getUserState } = require('../states');
 const handleModeMessage = require('./modes');
 const { extractMediaFromMessage } = require('../media'); // 统一媒体提取
+const { isInFlight } = require('../utils/inflight');     // /send 正在发送该文件（防自动转发抢跑）
 
 const SUPPORTED_MEDIA_TYPES = ['photo', 'video', 'audio', 'document'];
 
@@ -207,11 +208,24 @@ async function isChannelAutoForward(msg, existingMessage) {
 async function transferRecordToGroup(msg, mediaInfo, channelForwardInfo) {
     try {
         const { fileUniqueId, caption, type, fileId, videoTime } = mediaInfo;
+        const mediaName = mediaInfo.mediaName || null;
         const messageCol = getCollection(COLLECTIONS.MESSAGE);
         const mediaCol = getCollection(COLLECTIONS.MEDIA);
 
         const existingMessage = await messageCol.findOne({ file_unique_id: fileUniqueId });
-        const existingMedia = await mediaCol.findOne({ file_unique_id: fileUniqueId });
+        let existingMedia = await mediaCol.findOne({ file_unique_id: fileUniqueId });
+
+        // 抢跑等待：`/send` 把媒体组发到「频道 + 关联讨论群」时，Telegram 会立刻自动转发，
+        // 此刻机器人自己那一轮发送/落库还没结束 —— 库里查不到这条媒体，照常收录就会另建一个
+        // **无描述、可清理** 的影子媒体组（用户看到"发送时带描述，发到频道后描述没了"）。
+        // 这里如果发现该文件正在被 /send 发送（utils/inflight.js），就短暂等它落库完成再查，
+        // 于是只补一个群组位置、不另建组（描述也就还在原来那条 media 上）。
+        if (!existingMedia) {
+            for (let i = 0; i < 8 && !existingMedia && isInFlight(fileUniqueId); i++) {
+                await new Promise(resolve => setTimeout(resolve, 400));
+                existingMedia = await mediaCol.findOne({ file_unique_id: fileUniqueId });
+            }
+        }
 
         // 频道源位置：优先取识别信息/已有 message 记录，均无则 null
         const channelChatId = (channelForwardInfo && channelForwardInfo.channelChatId) ||
@@ -248,6 +262,8 @@ async function transferRecordToGroup(msg, mediaInfo, channelForwardInfo) {
             if (type === 'video' && videoTime !== undefined && videoTime !== null) {
                 doc.video_time = videoTime;
             }
+            // 文件 / 音乐的名称（图片、视频不记录）——按文件名搜索靠它
+            if (mediaName) doc.media_name = mediaName;
             if (mediaInfo.thumbFileId) doc.thumb_file_id = mediaInfo.thumbFileId;
             // 频道位置仅在已知频道消息 ID 时写入（否则无法据此回复频道）
             if (channelChatId && channelMessageId) {
@@ -474,6 +490,7 @@ async function handleNewMediaMessage(msg) {
             media_type: type,
             video_time: videoTime,
             thumb_file_id: thumbFileId,
+            media_name: mediaInfo.mediaName,   // 文件/音乐的名称（图片、视频为 null，不会写入）
             ...location
         });
         logger.info(`media 插入: file_unique_id=${fileUniqueId}, type=${type}, message_id=${messageId}, group_id=${groupId}, subgroup=1${videoTime ? `, video_time=${videoTime}` : ''}${location.group ? `, group=${location.group.chat_id}/${location.group.message_id}` : ''}${location.channel ? `, channel=${location.channel.chat_id}/${location.channel.message_id}` : ''}`);

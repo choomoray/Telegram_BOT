@@ -108,10 +108,8 @@ function buildConfig(argv = [], { platform = process.platform } = {}) {
         restartGraceMs: envInt('NODE_RESTART_GRACE_MS', 90000),
         // 短命通知进程存活上限（发完即退；到点强制结束）
         notifyTtlMs: envInt('WATCHDOG_NOTIFY_TTL', 5000),
-        // 崩溃 / 重启报告里最多列几条 warn/erro
-        reportTailLimit: envInt('WATCHDOG_REPORT_LINES', 10),
-        // 重启后健康持续多久才发「重启成功」报告
-        restartReportAfterMs: envInt('WATCHDOG_RESTART_REPORT_AFTER', 30000),
+        // 崩溃 / 重启报告里最多列几条 warn/erro（用户要求：只展示最近 3 条）
+        reportTailLimit: envInt('WATCHDOG_REPORT_LINES', 3),
 
         // 日志
         logFile: path.join(ROOT, 'watchdog', 'watchdog.log'),

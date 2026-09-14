@@ -135,7 +135,7 @@ test('超出时间窗口后重新计数（避免"很久崩一次"累积到上限
 const outLine = (level, text) =>
     `\u001b[90m[2026-09-13 21:29:59]\u001b[39m \u001b[33m[${level}]\u001b[39m ${text} `;
 
-test('崩溃通知：固定标题 + 只列 warn/erro，且去掉时间戳与颜色', () => {
+test('崩溃通知：固定标题（首尾各一次）+ 只列 warn/erro，且去掉时间戳与颜色', () => {
     const text = notify.formatCrashReport({
         tail: [
             outLine('INFO', '正在连接数据库'),
@@ -157,6 +157,13 @@ test('崩溃通知：固定标题 + 只列 warn/erro，且去掉时间戳与颜�
     // 不保留日志时间戳（用户要求的格式是 [warn] XXX）
     assert.ok(!/2026-09-13 21:29:59/.test(text), '不应带原始时间戳');
     assert.ok(!/\u001b\[/.test(text), '不应残留 ANSI 颜色码');
+    // 用户指定的格式：标题在开头和结尾各出现一次
+    const lines = text.split('\n');
+    assert.strictEqual(lines[0], '⚠️ BOT出现意外崩溃，稍后尝试重启', '第一行是标题');
+    assert.strictEqual(lines[1], '', '标题后空一行');
+    assert.strictEqual(lines[2], '崩溃信息：');
+    assert.strictEqual(lines[lines.length - 1], '⚠️ BOT出现意外崩溃，稍后尝试重启', '最后一行还是标题');
+    assert.strictEqual(lines[lines.length - 2], '', '结尾标题前空一行');
 });
 
 test('崩溃通知：没有 warn/erro 时给出明确说明而不是空白', () => {
@@ -172,19 +179,28 @@ test('崩溃通知：同一错误连续刷屏只保留一条', () => {
     assert.strictEqual((text.match(/\[erro\] boom/g) || []).length, 1);
 });
 
-test('崩溃通知：最多列 reportTailLimit 条（默认 10），取最近的', () => {
+test('崩溃 / 重启通知：默认最多 3 条（取最近的），也可用 limit 覆盖', () => {
     const tail = [];
     for (let i = 1; i <= 15; i++) tail.push(outLine('WARN', `warn-${i}`));
-    const text = notify.formatCrashReport({ tail, limit: 10 });
-    assert.ok(!/warn-1\b/.test(text), '应丢弃较早的条目');
-    assert.match(text, /warn-15/, '应保留最新的条目');
-    assert.strictEqual((text.match(/\[warn\]/g) || []).length, 10);
+    // 不传 limit → 用共享默认值 3
+    const dflt = notify.formatCrashReport({ tail });
+    assert.strictEqual((dflt.match(/\[warn\]/g) || []).length, 3, '崩溃报告默认只列最近 3 条');
+    assert.ok(!/warn-12\b/.test(dflt), '应丢弃较早的条目');
+    assert.match(dflt, /warn-15/, '应保留最新的条目');
+    assert.strictEqual(notify.DEFAULT_REPORT_LIMIT, 3, '默认条数是 3');
+    // 显式 limit 覆盖
+    const ten = notify.formatCrashReport({ tail, limit: 10 });
+    assert.strictEqual((ten.match(/\[warn\]/g) || []).length, 10);
+    assert.ok(!/warn-1\b/.test(ten), '仍取最近的');
 });
 
-test('重启通知：成功 / 未就绪两种标题，带同样的 warn/erro 明细', () => {
+test('重启通知：成功 / 未就绪两种标题，带同样的 warn/erro 明细（标题首尾各一次）', () => {
     const ok = notify.formatRestartReport({ ok: true, tail: [outLine('WARN', '小警告')] });
     assert.match(ok, /♻️ BOT重启成功/);
     assert.match(ok, /\[warn\] 小警告/);
+    const okLines = ok.split('\n');
+    assert.strictEqual(okLines[0], '♻️ BOT重启成功');
+    assert.strictEqual(okLines[okLines.length - 1], '♻️ BOT重启成功', '结尾再重复一次标题');
 
     const failed = notify.formatRestartReport({ ok: false, tail: [outLine('ERRO', '又崩了')] });
     assert.match(failed, /🚨 BOT重启后仍未就绪/);
@@ -262,13 +278,95 @@ test('崩溃标记：内容损坏时不抛错，返回 null', () => {
     }
 });
 
-test('重启播报已移交看门狗：bot 侧只留痕，不再自行发送通知', () => {
+test('重启播报已移交给主 bot：bot 侧自己发「重启成功」，看门狗不再补发', () => {
     const crashNotify = require('../utils/crashNotify');
-    // bot 侧不再有 formatRestartReport（避免与看门狗重复发送）
-    assert.strictEqual(typeof crashNotify.formatRestartReport, 'undefined', 'bot 侧不应再组装重启通知');
-    const src = require('fs').readFileSync(path.join(__dirname, '..', 'utils', 'crashNotify.js'), 'utf8');
-    assert.match(src, /logOperation/, '仍要写一条 opLog 留痕');
-    assert.ok(!/notifyAdmins/.test(src), '不应再调用 notifyAdmins（通知统一由看门狗发）');
+    const crashSrc = require('fs').readFileSync(path.join(__dirname, '..', 'utils', 'crashNotify.js'), 'utf8');
+    assert.match(crashSrc, /logOperation/, '要写一条 opLog 留痕');
+    assert.match(crashSrc, /formatRestartReport/, '重启成功报告由 bot 侧组装（与看门狗崩溃报告同一套格式）');
+    assert.match(crashSrc, /sendRestartReport/, '要有「发给所有管理员」的实现');
+    assert.strictEqual(typeof crashNotify.sendRestartReport, 'function');
+    assert.strictEqual(typeof crashNotify.reportRestartFromWatchdog, 'function');
+
+    // 看门狗侧：不能再有"等健康确认后补发重启报告"的逻辑
+    const wdSrc = require('fs').readFileSync(path.join(__dirname, '..', 'watchdog.js'), 'utf8');
+    assert.ok(!/maybeSendRestartReport/.test(wdSrc), '看门狗不再补发重启报告');
+    assert.ok(!/healthySince/.test(wdSrc), '不再等健康持续时长');
+    assert.match(wdSrc, /reportLimit/, '崩溃标记里要带上报告条数（bot 侧沿用）');
+    // 配置里也要去掉重启报告等待时长
+    const cfgSrc = require('fs').readFileSync(path.join(__dirname, '..', 'watchdog', 'config.js'), 'utf8');
+    assert.ok(!/restartReportAfterMs/.test(cfgSrc), '不再有 RESTART_REPORT_AFTER 配置');
+
+    // index.js：数据库连上、bot 就绪后立刻播报（不再延迟几秒）
+    const idxSrc = require('fs').readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    assert.match(idxSrc, /reportRestartFromWatchdog\(\)/, '启动就绪后立刻播报');
+    assert.ok(!/setTimeout\(\(\) => \{[\s\S]{0,200}reportRestartFromWatchdog/.test(idxSrc),
+        '不应再包在 setTimeout 里延迟发送');
+});
+
+test('bot 侧重启播报：用主 bot 把「♻️ BOT重启成功」发给所有管理员（崩溃信息沿用看门狗格式）', async () => {
+    const { stubModule } = require('./helpers/memoryDb');
+    const root = path.join(__dirname, '..');
+    const botPath = path.join(root, 'bot.js');
+    const cfgPath = path.join(root, 'config.js');
+    const sent = [];
+    const savedBot = require.cache[botPath];
+    const savedCfg = require.cache[cfgPath];
+    stubModule(botPath, {
+        async sendMessage(chatId, text, opts) { sent.push({ chatId, text, opts }); return { message_id: 1 }; }
+    });
+    stubModule(cfgPath, { ADMIN_CHAT_IDS: [111, 222] });
+    try {
+        const crashNotify = require('../utils/crashNotify');
+        const n = await crashNotify.sendRestartReport({
+            tail: [outLine('WARN', '小警告'), outLine('ERRO', 'boom')],
+            reportLimit: 3
+        });
+        assert.strictEqual(n, 2, '两位管理员都收到');
+        assert.strictEqual(sent.length, 2);
+        assert.deepStrictEqual(sent.map(s => s.chatId), [111, 222]);
+        assert.match(sent[0].text, /^♻️ BOT重启成功/, '标题在最前（第一时间能看清是重启成功）');
+        assert.match(sent[0].text, /崩溃信息：/);
+        assert.match(sent[0].text, /\[warn\] 小警告/);
+        assert.match(sent[0].text, /\[erro\] boom/);
+        assert.match(sent[0].text, /♻️ BOT重启成功$/, '结尾再重复一次标题');
+    } finally {
+        if (savedBot) require.cache[botPath] = savedBot; else delete require.cache[botPath];
+        if (savedCfg) require.cache[cfgPath] = savedCfg; else delete require.cache[cfgPath];
+    }
+});
+
+test('bot 侧重启播报：通知模式为 off 时不发（与看门狗一致）', async () => {
+    const { stubModule } = require('./helpers/memoryDb');
+    const root = path.join(__dirname, '..');
+    const botPath = path.join(root, 'bot.js');
+    const cfgPath = path.join(root, 'config.js');
+    const sent = [];
+    const savedBot = require.cache[botPath];
+    const savedCfg = require.cache[cfgPath];
+    stubModule(botPath, { async sendMessage(chatId, text) { sent.push({ chatId, text }); return {}; } });
+    stubModule(cfgPath, { ADMIN_CHAT_IDS: [111] });
+    try {
+        const crashNotify = require('../utils/crashNotify');
+        assert.strictEqual(await crashNotify.sendRestartReport({ tail: [], notifyMode: 'off' }), 0);
+        assert.strictEqual(sent.length, 0, 'off 模式不应发送');
+    } finally {
+        if (savedBot) require.cache[botPath] = savedBot; else delete require.cache[botPath];
+        if (savedCfg) require.cache[cfgPath] = savedCfg; else delete require.cache[cfgPath];
+    }
+});
+
+test('bot 侧重启播报：没配置 ADMIN_CHAT_ID 时不发也不抛错', async () => {
+    const { stubModule } = require('./helpers/memoryDb');
+    const root = path.join(__dirname, '..');
+    const cfgPath = path.join(root, 'config.js');
+    const savedCfg = require.cache[cfgPath];
+    stubModule(cfgPath, { ADMIN_CHAT_IDS: [] });
+    try {
+        const crashNotify = require('../utils/crashNotify');
+        assert.strictEqual(await crashNotify.sendRestartReport({ tail: [] }), 0);
+    } finally {
+        if (savedCfg) require.cache[cfgPath] = savedCfg; else delete require.cache[cfgPath];
+    }
 });
 
 // ---------------- 孤儿进程防护（看门狗被硬杀时 bot 要自己退出） ----------------

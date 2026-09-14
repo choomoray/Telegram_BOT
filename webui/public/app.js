@@ -33,7 +33,9 @@
     photo: { icon: '🖼', label: '图片' },
     video: { icon: '🎬', label: '视频' },
     audio: { icon: '🎵', label: '音频' },
-    document: { icon: '📄', label: '文件' }
+    document: { icon: '📄', label: '文件' },
+    // /send、/reply 发出的纯文本也会收录成一条 media（media_type='text'）
+    text: { icon: '📝', label: '文本' }
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -45,7 +47,7 @@
     timer: null,
     collections: [],
     overview: null,
-    media: { scope: 'all', q: '', tag: '', page: 1, pageSize: 40, total: 0, totalPages: 1, items: [] },
+    media: { scope: 'all', q: '', tag: '', page: 1, pageSize: 80, total: 0, totalPages: 1, items: [] },
     users: { scope: 'all', q: '', page: 1, pageSize: 20, total: 0, totalPages: 1, items: [] },
     raw: { collection: ALL_KEY, sort: -1, page: 1, pageSize: 20, total: 0, totalPages: 1, items: [] },
     clean: { previews: null, items: [] },
@@ -140,9 +142,14 @@
     return r > 0 ? r : 0;
   }
 
-  /** 缩略图加载失败 / 不可缩略：清掉图片层，退回类型图标占位 */
-  function thumbFallback(wrap) {
-    if (!wrap || !wrap.classList) return;
+  /**
+   * 缩略图加载失败 / 不可缩略：清掉图片层，退回类型图标占位。
+   * 入参既可能是封面容器（.media-thumb / .detail-thumb），也可能是封面层自身（.thumb-img）——
+   * 统一归一到容器上，否则 `is-fallback` 落错元素、占位图标也会被塞进封面层里。
+   */
+  function thumbFallback(node) {
+    if (!node || !node.classList) return;
+    const wrap = (node.classList.contains('thumb-img') && node.parentElement) ? node.parentElement : node;
     wrap.classList.add('is-fallback');
     const box = wrap.querySelector('.thumb-img');
     if (box) box.remove();
@@ -152,6 +159,65 @@
       span.textContent = '🖼';
       wrap.prepend(span);
     }
+  }
+
+  /* ---------------- 瀑布流排布（CSS Grid + 行跨度） ----------------
+     四个地方共用：随机推荐 / 媒体库（.media-grid--flow / --fit）、标签详情（--mini）、
+     媒体详情左栏的媒体条（.detail-strip--flow）。样式见 style.css 同名段落。
+
+     为什么不用 CSS 多列（columns）：columns 的填充顺序是"先把第一列填满再填第二列"，
+     视觉顺序变成先上下、再左右 —— 想按顺序看会跳列。这里改成 grid：
+     容器是一把 8px 的"行标尺"（grid-auto-rows），卡片是跨 N 行的子项，
+     grid 的自动放置（sparse）永远"先第一行从左到右、再往下"，与列表顺序一致。
+     N 由每张卡的内容高度换算：N = ceil((H + gap) / (rowH + gap))。
+     卡片必须 align-self:start（style.css），高度才等于内容高度、量得准。 */
+  const FLOW_ROW_HEIGHT = 8;   // 必须与 style.css 的 grid-auto-rows 一致
+  const FLOW_SELECTOR = '.media-grid--flow, .media-grid--fit, .media-grid--mini, .detail-strip--flow';
+
+  /** 量一个瀑布流容器里的卡片高度，写回各自的 grid-row-end 跨度 */
+  function layoutFlowBox(box) {
+    if (!box || !box.children) return;
+    const cards = [...box.children].filter(el => el.nodeType === 1 && el.style);
+    if (!cards.length) return;
+    const gap = parseFloat(getComputedStyle(box).rowGap) || 0;
+    // 先全部复位成 1 行，再统一量高度：只触发两次布局（读写分离），避免逐张卡量高度时反复回流
+    for (const card of cards) card.style.gridRowEnd = 'span 1';
+    const heights = cards.map(card => card.getBoundingClientRect().height);
+    for (let i = 0; i < cards.length; i++) {
+      const span = Math.max(1, Math.ceil((heights[i] + gap) / (FLOW_ROW_HEIGHT + gap)));
+      cards[i].style.gridRowEnd = `span ${span}`;
+    }
+  }
+
+  /**
+   * 排布 root 内（含 root 自身）的所有瀑布流容器。
+   * 任何一处重渲染 / 缩略图加载完（封面按真实比例定高）/ 窗口缩放后都要调一次。
+   */
+  function layoutFlowGrid(root) {
+    if (!root) return;
+    if (root.matches && root.matches(FLOW_SELECTOR)) layoutFlowBox(root);
+    if (root.querySelectorAll) root.querySelectorAll(FLOW_SELECTOR).forEach(layoutFlowBox);
+  }
+
+  /**
+   * 缩略图加载完 → 封面高度变了 → 重排它所在的那个瀑布流容器。
+   * 图片是逐张加载完的：同一帧内的多次触发合并成一次重排（否则 N 张图 = N 次重排）。
+   * 不支持 requestAnimationFrame 时（老浏览器 / 测试桩）直接同步重排。
+   */
+  const flowPendingBoxes = new Set();
+  let flowRafId = 0;
+  function relayoutFlowOf(node) {
+    const box = node && node.closest ? node.closest(FLOW_SELECTOR) : null;
+    if (!box) return;
+    if (typeof requestAnimationFrame !== 'function') { layoutFlowBox(box); return; }
+    flowPendingBoxes.add(box);
+    if (flowRafId) return;
+    flowRafId = requestAnimationFrame(() => {
+      flowRafId = 0;
+      const boxes = [...flowPendingBoxes];
+      flowPendingBoxes.clear();
+      for (const b of boxes) layoutFlowBox(b);
+    });
   }
 
 
@@ -863,7 +929,7 @@
     const c = o.counts || {};
     const byType = o.mediaByType || {};
     const typeTotal = Object.values(byType).reduce((a, b) => a + b, 0) || 1;
-    const typeOrder = ['photo', 'video', 'audio', 'document'];
+    const typeOrder = ['photo', 'video', 'audio', 'document', 'text'];
 
     const db = state.dbstats.data;
     const dbCard = (db && db.available && db.totals)
@@ -950,14 +1016,22 @@
   /* ============================ 视图：媒体库 ============================ */
 
   /**
-   * 媒体组卡片（媒体库 / 标签详情共用同一套方块界面）
+   * 媒体组卡片（媒体库 / 标签详情共用同一套瀑布流界面）
    * @param {Object} item - /api/media 返回的媒体组
    * @param {string} action - data-action 名（媒体库用 open-media；详情对话框内用 tag-media-open）
+   * @param {Object} [opts]
+   *   - flow: true    瀑布流变体：封面按图片真实比例完整显示（不裁切），
+   *                   卡片交给多列容器排列（见 randomCardHtml / style.css）
+   *   - compact: true 紧凑变体（标签详情用）：列宽只有 ~132px（与「媒体详情」左栏缩略图同尺度），
+   *                   徽标 / 标签 / 定位信息 / group_id 在这个宽度下会挤成一团，
+   *                   因此只保留「封面 + 描述 + 一行类型与媒体数」。
    */
-  function mediaCard(item, action = 'open-media') {
+  function mediaCard(item, action = 'open-media', opts = {}) {
+    const flow = !!opts.flow;
+    const compact = !!opts.compact;
     const p = item.preview;
     const thumb = p && p.thumbable
-      ? thumbCover(p)
+      ? thumbCover(p, { flow })
       : `<span class="ph">${typeIcon(p ? p.media_type : null)}</span>`;
     const typeTags = (item.types || []).map(t => `<span class="tag">${typeIcon(t)} ${typeLabel(t)}</span>`).join('');
     const loc = [
@@ -969,15 +1043,24 @@
       : '空描述（可清理）';
     const tags = (item.tags || []).slice(0, 4).map(t => `<span class="tag-pill">${esc(t)}</span>`).join('');
     const moreTags = (item.tags || []).length > 4 ? `<span class="tag-pill">+${item.tags.length - 4}</span>` : '';
+    // 紧凑卡片：只留类型图标 + 媒体数（「保留 / 可清理」是媒体库的清理语义，
+    // 与「随机推荐」的处理一致，标签详情里不显示；同样不再有「点击进详情」提示，上方说明已写明）
+    const typeIcons = (item.types || []).slice(0, 3).map(t => typeIcon(t)).join(' ');
+    const cardCls = `media-card${flow ? ' media-card--flow' : ''}${compact ? ' media-card--compact' : ''}`;
 
-    return `<article class="media-card" data-action="${esc(action)}" data-group="${esc(item.group_id)}">
-      <div class="media-thumb" data-zoom="1">
+    return `<article class="${cardCls}" data-action="${esc(action)}" data-group="${esc(item.group_id)}">
+      <div class="media-thumb${flow ? ' media-thumb--flow' : ''}" data-zoom="1">
         ${thumb}
         ${typeBadgeHtml(p ? p.media_type : null)}
       </div>
       <div class="media-body">
         <div class="media-text ${item.text ? '' : 'is-empty'}">${text}</div>
-        <div class="media-badges">
+        ${compact
+          ? `<div class="media-meta">
+          <span>${typeIcons}</span>
+          <span>${fmtNum(item.mediaCount)} 个媒体</span>
+        </div>`
+          : `<div class="media-badges">
           <span class="tag ${item.cleanable ? 'warn' : 'ok'}">${item.cleanable ? '可清理' : '保留'}</span>
           ${typeTags}
         </div>
@@ -991,7 +1074,7 @@
           <span class="spacer"></span>
           <span class="dim">点击进详情</span>
           <span class="mono">${esc(shortId(item.group_id, 14))}</span>
-        </div>
+        </div>`}
       </div>
     </article>`;
   }
@@ -1009,7 +1092,7 @@
       : '';
 
     const body = m.items.length
-      ? `<div class="media-grid">${m.items.map(it => mediaCard(it)).join('')}</div>`
+      ? `<div class="media-grid media-grid--fit">${m.items.map(it => mediaCard(it, 'open-media', { flow: true })).join('')}</div>`
       : `<div class="empty"><div class="empty-ico">🗂</div><div>没有符合条件的媒体组${m.q ? `（搜索：${esc(m.q)}）` : ''}${m.tag ? `（标签：${esc(m.tag)}）` : ''}</div></div>`;
 
     $('#view').innerHTML = `
@@ -1019,13 +1102,15 @@
         <span class="grow"></span>
         <label class="switch">每组显示
           <select id="media-pagesize" style="width:auto">
-            ${[20, 40, 80, 120].map(n => `<option value="${n}" ${m.pageSize === n ? 'selected' : ''}>${n}</option>`).join('')}
+            ${[40, 80, 120, 200].map(n => `<option value="${n}" ${m.pageSize === n ? 'selected' : ''}>${n}</option>`).join('')}
           </select>
         </label>
       </div>
       ${body}
       ${paginationHtml(m, 'media-page')}`;
     updatePageSub(`共 ${fmtNum(m.total)} 个媒体组${m.q ? ` · 搜索“${m.q}”` : ''}${m.tag ? ` · 标签 ${m.tag}` : ''}`);
+    // 媒体库卡片是瀑布流（渲染可能被直接调用，不只走 runShow）：算好行跨度
+    layoutFlowGrid($('#view'));
   }
 
   /* ============================ 视图：清理中心 ============================ */
@@ -1186,15 +1271,21 @@
       <div class="callout" style="margin-top:14px"><span>🏷</span><div>标签名统一大写；删除会同步从所有消息的 <code>tags</code> 中移除。</div></div>`;
   }
 
-  /** 标签详情里的媒体组列表：与「媒体库」一致的方块卡片，点击直接打开媒体详情 */
-  async function loadTagMediaInto(name, limit = 12) {
+  /**
+   * 标签详情里的媒体组列表：与「媒体详情」左栏缩略图**同尺度**的紧凑瀑布流卡片
+   * （用 media-grid--mini：列宽 132px、断点也与 .detail-strip--flow 一致，
+   * 因此同一个窗口下两处的媒体大小完全相同；弹窗更宽只是列数更多），
+   * 卡片内容相应精简（封面 + 描述 + 一行类型 / 媒体数），点击直接打开媒体详情。
+   * limit 默认 24：卡片变小后 12 个在宽屏弹窗里只铺一行半，看着太空
+   */
+  async function loadTagMediaInto(name, limit = 24) {
     let section;
     try {
       const d = await apiGet(`/media?scope=all&tag=${encodeURIComponent(name)}&page=1&pageSize=${limit}`);
       const items = d.items || [];
       section = items.length
         ? `<div class="dim" style="font-size:11.5px;margin-bottom:10px">共 <b>${fmtNum(d.total)}</b> 个媒体组带该标签，此处显示最近 ${items.length} 个 · 点卡片直接打开媒体详情</div>
-           <div class="media-grid">${items.map(it => mediaCard(it, 'tag-media-open')).join('')}</div>
+           <div class="media-grid media-grid--mini">${items.map(it => mediaCard(it, 'tag-media-open', { flow: true, compact: true })).join('')}</div>
            ${d.total > items.length ? `<div class="dim" style="margin-top:10px;font-size:11.5px">还有 ${fmtNum(d.total - items.length)} 个未显示，可点下方「🖼 在媒体库中筛选」查看全部</div>` : ''}`
         : '<div class="empty">还没有任何媒体组使用该标签</div>';
     } catch (err) {
@@ -1205,6 +1296,8 @@
     const tag = state.tags.find(t => t.name === name);
     if (!tag) return;
     $('#detail-body').innerHTML = tagDetailHtml(tag, tag.pin > 0, section);
+    // 标签详情的媒体组是紧凑瀑布流：算好行跨度
+    layoutFlowGrid($('#detail-body'));
   }
 
   /** 切换标签置顶：置顶时取下一个空位（1..40），已置顶则取消 */
@@ -1904,6 +1997,8 @@
       </div>
       <div class="media-grid media-grid--flow">${cards}</div>`;
     updatePageSub(`随机推荐 · 候选 ${fmtNum(r.total)} 个 · 本次 ${fmtNum(items.length)} 个`);
+    // 随机推荐是瀑布流（换一批 / 改筛选会直接重渲染）：算好行跨度
+    layoutFlowGrid($('#view'));
   }
 
   /* ============================ 视图：实时日志 ============================ */
@@ -2156,23 +2251,29 @@
 
     // 媒体缩略图条：点击即选中该媒体，随后即可补描述 / 改标签
     // 没有文本记录的媒体同样可点选（选中后会在「描述与标签」区自动补出编辑块）
+    // 瀑布流：封面按图片真实比例完整显示（不裁切），多列错落，与媒体库 / 随机推荐同一套观感
     const msgFiles = new Set(messages.map(m => m.file_unique_id));
     const strip = media.map(m => {
       const hasMsg = msgFiles.has(m.file_unique_id);
+      // 文本媒体（media_type='text'）没有封面：把文本内容显示在提示行里，能看见这条文本是什么
+      const isText = m.media_type === 'text';
+      const tip = isText && m.name
+        ? esc(m.name.length > 80 ? `${m.name.slice(0, 80)}…` : m.name)
+        : (hasMsg ? '点击可补描述 / 改标签' : '无文本记录，点选后可补描述并打标签');
       return `
-      <div class="detail-item${hasMsg ? '' : ' no-msg'}"
+      <div class="detail-item detail-item--flow${hasMsg ? '' : ' no-msg'}"
            data-action="detail-pick" data-file="${esc(m.file_unique_id)}"
            data-zoom="1"
            aria-label="${hasMsg ? '点击选中该媒体，随后可补描述 / 修改它的标签' : '该媒体还没有文本记录，点选后可补描述并打标签'}">
-        <div class="detail-thumb">
-          ${m.thumbable ? thumbCover(m) : `<div class="ph">${typeIcon(m.media_type)}</div>`}
+        <div class="detail-thumb detail-thumb--flow">
+          ${m.thumbable ? thumbCover(m, { flow: true }) : `<div class="ph">${typeIcon(m.media_type)}</div>`}
           ${typeBadgeHtml(m.media_type)}
         </div>
         <div class="cap">
           <span>#${m.subgroup} · ${typeLabel(m.media_type)}</span>
           <span class="mono">${m.video_time ? fmtDuration(m.video_time) : 'msg ' + m.message_id}</span>
         </div>
-        <div class="thumb-tip">${hasMsg ? '点击可补描述 / 改标签' : '无文本记录，点选后可补描述并打标签'}</div>
+        <div class="thumb-tip"${isText ? ` title="${esc(m.name || '')}"` : ''}>${tip}</div>
       </div>`;
     }).join('') || '<div class="empty">该组没有媒体记录</div>';
 
@@ -2199,7 +2300,7 @@
       <div class="detail-main">
         <div class="detail-left">
           <h4>媒体（${media.length}）</h4>
-          <div class="detail-strip">${strip}</div>
+          <div class="detail-strip detail-strip--flow">${strip}</div>
           <div class="dim" style="font-size:11.5px;margin-top:8px">👆 点左侧任一媒体把它置顶到右栏；无论有没有描述，都再点「✏️ 编辑描述 / 🏷 编辑标签」才开始改</div>
         </div>
         <aside class="detail-aside">
@@ -2223,6 +2324,8 @@
 
     // 恢复上一次的媒体选中态（改完标签会整块重渲染）
     applyDetailSelection();
+    // 左栏媒体条是瀑布流：算好每张缩略图的行跨度（图片加载完还会再排一次，见 __thumbLoad）
+    layoutFlowGrid($('#detail-body'));
   }
 
   /**
@@ -2883,6 +2986,8 @@
     try {
       await VIEW_META[view].load();
       VIEW_META[view].render();
+      // 视图里可能有瀑布流（随机推荐 / 媒体库 / 媒体详情条）：渲染完立刻算好各卡的行跨度
+      layoutFlowGrid($('#view'));
     } catch (err) {
       $('#view').innerHTML = `<div class="empty"><div class="empty-ico">⚠️</div><div>${esc(err.message)}</div>
         <button class="btn btn-sm" data-action="retry">重试</button></div>`;
@@ -3162,7 +3267,7 @@
     view.addEventListener('change', async (e) => {
       const el = e.target;
       if (el.id === 'media-pagesize') {
-        state.media.pageSize = parseInt(el.value, 10) || 40;
+        state.media.pageSize = parseInt(el.value, 10) || 80;
         state.media.page = 1;
         await show('media');
       } else if (el.id === 'users-pagesize') {
@@ -3813,6 +3918,8 @@
 
   function init() {
     applyTheme(themeMode());
+    // 瀑布流排布函数挂到 window：内联钩子/测试可调用（与下面的 __thumbLoad 同理）
+    window.__layoutFlowGrid = layoutFlowGrid;
     // 封面里那张隐形 <img> 的钩子（内联 onload/onerror 拿不到页面闭包里的函数）
     // 加载成功：记下图片真实比例，供放大浮层按图片比例展示
     window.__thumbLoad = (img) => {
@@ -3822,10 +3929,21 @@
         const ratio = img.naturalWidth / img.naturalHeight;
         cover.dataset.ratio = String(ratio);
         cacheRatio(coverSrc(cover), img.naturalWidth, img.naturalHeight);
-        // 瀑布流封面（.media-thumb--flow）按图片真实比例定高：
+        // 瀑布流封面按图片真实比例定高（媒体库 / 标签详情 / 随机推荐的 .media-thumb--flow，
+        // 以及媒体详情条自己的 .detail-thumb--flow）：
         // 图片没加载出来前先用一个中性高度，加载完再把高度锁到真实比例 → 不裁切、不变形
-        const wrap = cover.closest ? cover.closest('.media-thumb--flow') : null;
-        if (wrap && wrap.style) wrap.style.aspectRatio = String(ratio);
+        const wrap = cover.closest
+          ? (cover.closest('.media-thumb--flow') || cover.closest('.detail-thumb--flow'))
+          : null;
+        if (wrap && wrap.style) {
+          wrap.style.aspectRatio = String(ratio);
+          // 真实比例已知后要放开 CSS 里那个 min-height 占位下限：
+          // 横图（尤其是 132px 的紧凑卡片）按比例算出来的高度会低于下限，
+          // 容器被撑高而真图只占顶部 → 下面会露出一截被裁切的背景图，看着像重影。
+          wrap.style.minHeight = '0';
+          // 封面高度变了 → 重新算这张卡的行跨度（否则会和下一行重叠/留白）
+          relayoutFlowOf(wrap);
+        }
       }
     };
     // 加载失败：清掉封面层，退回类型图标占位
@@ -3844,6 +3962,16 @@
     if (window.addEventListener) {
       window.addEventListener('scroll', hideThumbZoom, true);
       window.addEventListener('resize', hideThumbZoom);
+      // 窗口尺寸变了 → 列宽/列数变了 → 瀑布流各行跨度要重算（防抖，避免拖动窗口时狂算）
+      let flowTimer = null;
+      window.addEventListener('resize', () => {
+        if (flowTimer) clearTimeout(flowTimer);
+        flowTimer = setTimeout(() => {
+          flowTimer = null;
+          layoutFlowGrid($('#view'));
+          layoutFlowGrid($('#detail-body'));
+        }, 120);
+      });
       // 鼠标直接移到窗口外（不经过封面的 mouseout）也要收起浮层与等待中的转圈
       window.addEventListener('blur', hideThumbZoom);
       document.addEventListener('mouseleave', hideThumbZoom);

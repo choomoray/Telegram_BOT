@@ -61,7 +61,8 @@ const defaultDeps = {
 };
 
 // 领域接口常量
-const MEDIA_TYPE_ORDER = ['photo', 'video', 'audio', 'document']; // 媒体类型稳定顺序
+// 媒体类型稳定顺序（text = /send、/reply 发出的纯文本，见 media.recordTextMedia）
+const MEDIA_TYPE_ORDER = ['photo', 'video', 'audio', 'document', 'text'];
 const RECENT_LOG_LIMIT = 15;          // 概览页最近日志条数
 const LATEST_GROUP_LIMIT = 5;         // 概览页最近媒体组条数
 const THUMB_CACHE_MAX = 120;          // 缩略图缓存最大条数（超出按最旧淘汰）
@@ -227,12 +228,17 @@ function sortTags(tags) {
  * 用它当封面会出现"卡片封面与卡片文字不是同一条媒体"的错位。
  * 组内没有任何带文本的媒体时，回退为 media 里最早的一条（否则会没有封面）。
  *
+ * 文本媒体（media_type='text'，/send、/reply 发的纯文本）没有封面可言：
+ * 组里只要有真正的媒体，就不要拿它当封面（否则卡片会变成一个 📝 占位图）。
+ *
  * @param {Array} mediaDocs - 该组 media 文档
  * @param {Iterable<string>} [messageFileIds] - 该组有文本记录的 file_unique_id 集合
  */
 function pickPreviewMedia(mediaDocs, messageFileIds) {
   // 位置在 group / channel 子文档里（旧数据才是顶层 message_id），统一按解析出的位置比较
-  const sorted = sortMediaDocsByPosition(mediaDocs);
+  const all = sortMediaDocsByPosition(mediaDocs);
+  const visual = all.filter(doc => doc.media_type !== 'text');
+  const sorted = visual.length ? visual : all;
   if (messageFileIds) {
     const set = messageFileIds instanceof Set ? messageFileIds : new Set(messageFileIds);
     const withText = sorted.find(doc => set.has(doc.file_unique_id));
@@ -485,7 +491,7 @@ async function handleOverview(D) {
     const [
         media, message, groupList, cleanable, kept, pending,
         users, banned, whitelist, tags, chats, channels, groups, bound, logs,
-        photo, video, audio, documentMedia
+        photo, video, audio, documentMedia, textMedia
     ] = await Promise.all([
         safeCount(D, C.MEDIA, {}, 'media'),
         safeCount(D, C.MESSAGE, {}, 'message'),
@@ -505,7 +511,8 @@ async function handleOverview(D) {
         safeCount(D, C.MEDIA, { media_type: 'photo' }, 'photo'),
         safeCount(D, C.MEDIA, { media_type: 'video' }, 'video'),
         safeCount(D, C.MEDIA, { media_type: 'audio' }, 'audio'),
-        safeCount(D, C.MEDIA, { media_type: 'document' }, 'document')
+        safeCount(D, C.MEDIA, { media_type: 'document' }, 'document'),
+        safeCount(D, C.MEDIA, { media_type: 'text' }, 'text')
     ]);
 
     // 最近日志（仅取少量字段；新版含 action/category/result，便于控制台直接展示语义）
@@ -549,7 +556,7 @@ async function handleOverview(D) {
                 media, message, groupList, cleanable, kept, pending,
                 users, banned, whitelist, tags, chats, channels, groups, bound, logs
             },
-            mediaByType: { photo, video, audio, document: documentMedia },
+            mediaByType: { photo, video, audio, document: documentMedia, text: textMedia },
             recent,
             latestGroupList,
             serverTime: Date.now()
@@ -560,13 +567,14 @@ async function handleOverview(D) {
 /**
  * 媒体组列表：GET /api/media?scope=all|cleanable|kept&q=&page=1&pageSize=24
  * 说明：不使用 aggregate（测试注入的假集合不支持），改为分批 find 后在 JS 中归组
+ * pageSize 上限 200（媒体库「每组显示」最大档就是 200）
  */
 async function handleMediaList(D, url) {
     const scope = url.searchParams.get('scope') || 'all';
     const q = (url.searchParams.get('q') || '').trim();
     const tag = normalizeTagName(url.searchParams.get('tag') || '');
     const page = Math.max(1, parseInt(url.searchParams.get('page'), 10) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(url.searchParams.get('pageSize'), 10) || 24));
+    const pageSize = Math.min(200, Math.max(1, parseInt(url.searchParams.get('pageSize'), 10) || 24));
 
     let groupFilter;
     if (scope === 'cleanable') groupFilter = { is_delete: { $gt: 0 } };
@@ -574,13 +582,23 @@ async function handleMediaList(D, url) {
     else if (scope === 'all') groupFilter = {};
     else return { status: 400, data: { error: `不支持的 scope: ${scope}` } };
 
-    // 关键词搜索：先在 message 中匹配文本，得到候选 group_id 集合
+    // 关键词搜索：先在 message 中匹配文本，再在 media 中匹配文件/音乐名称（media_name），
+    // 两边命中的 group_id 取并集 —— 只按描述搜会漏掉"只发了文件、没写描述"的媒体
     if (q) {
-        const docs = await D.getCollection(COLLECTIONS.MESSAGE)
-            .find({ text: { $regex: escapeRegex(q), $options: 'i' } })
-            .limit(5000)
-            .toArray();
-        const ids = [...new Set(docs.map(doc => doc.group_id).filter(id => id !== undefined && id !== null))];
+        const [msgDocs, nameDocs] = await Promise.all([
+            D.getCollection(COLLECTIONS.MESSAGE)
+                .find({ text: { $regex: escapeRegex(q), $options: 'i' } })
+                .limit(5000)
+                .toArray(),
+            D.getCollection(COLLECTIONS.MEDIA)
+                .find({ media_name: { $regex: escapeRegex(q), $options: 'i' } })
+                .limit(5000)
+                .toArray()
+        ]);
+        const ids = [...new Set([
+            ...msgDocs.map(doc => doc.group_id),
+            ...nameDocs.map(doc => doc.group_id)
+        ].filter(id => id !== undefined && id !== null))];
         if (ids.length === 0) {
             return { status: 200, data: { total: 0, page, pageSize, items: [] } };
         }
@@ -611,11 +629,14 @@ async function handleMediaList(D, url) {
     let mediaDocs = [];
     let messageDocs = [];
     if (groupIds.length > 0) {
+        // 每页最多 200 组：取数上限跟着页大小放大，否则大页时靠后的组拿不到媒体 / 文本，
+        // 封面与「N 个媒体 / N 组」会失真（小页仍用原来的 3000，行为不变）
+        const detailLimit = Math.min(12000, Math.max(3000, pageSize * 20));
         [mediaDocs, messageDocs] = await Promise.all([
-            D.getCollection(COLLECTIONS.MEDIA).find({ group_id: { $in: groupIds } }).limit(3000).toArray(),
+            D.getCollection(COLLECTIONS.MEDIA).find({ group_id: { $in: groupIds } }).limit(detailLimit).toArray(),
             D.getCollection(COLLECTIONS.MESSAGE)
                 .find({ group_id: { $in: groupIds }, text: { $exists: true, $ne: '' } })
-                .limit(3000)
+                .limit(detailLimit)
                 .toArray()
         ]);
     }
@@ -638,6 +659,12 @@ async function handleMediaList(D, url) {
         const msg = pickLatestMessage(msgs);
         // 封面 = 该组第一条带文本 message 对应的媒体（没有带文本的媒体时回退 media 第一条）
         const preview = pickPreviewMedia(list, new Set(msgs.map(m => m.file_unique_id)));
+        // 卡片描述：优先 message.text；组里没有 message 时用 media_name 兜底 ——
+        // 文本媒体（media_type='text'）用它的内容，文件/音频用它的文件名，
+        // 否则按文件名搜索命中后卡片却显示"空描述"，看不出命中原因
+        const textMediaDoc = list.find(m => m.media_type === 'text' && m.media_name);
+        const namedDoc = list.find(m => m.media_name && (m.media_type === 'document' || m.media_type === 'audio'));
+        const nameFallback = textMediaDoc ? textMediaDoc.media_name : (namedDoc ? namedDoc.media_name : '');
         const updatedAt = msg && (msg.updated_at || 0) > 0 ? msg.updated_at : null;
         return {
             group_id: group.group_id,
@@ -653,7 +680,7 @@ async function handleMediaList(D, url) {
                 media_type: preview.media_type ?? null,
                 thumbable: !!(preview.media_type === 'photo' || preview.thumb_file_id)
             } : null,
-            text: msg ? (msg.text || '') : '',
+            text: msg ? (msg.text || '') : nameFallback,
             tags: msg && Array.isArray(msg.tags) ? msg.tags : [],
             group: preview ? (preview.group ?? null) : null,
             channel: preview ? (preview.channel ?? null) : null,
@@ -715,6 +742,8 @@ async function handleMediaDetail(D, url) {
                 media_type: doc.media_type ?? null,
                 file_unique_id: doc.file_unique_id ?? null,
                 file_id: doc.file_id ?? null,
+                // 文件 / 音乐的名称；文本类型（media_type='text'）里存的是文本内容
+                name: doc.media_name ?? null,
                 // 位置消息 ID：解析 group / channel 子文档（旧数据兜底顶层 message_id）
                 message_id: mediaPositionMessageId(doc) || null,
                 video_time: doc.video_time ?? null,
@@ -781,7 +810,9 @@ function randomItem(mediaDoc, msg, group) {
         subgroup: mediaDoc ? (mediaDoc.subgroup ?? null) : null,
         video_time: mediaDoc ? (mediaDoc.video_time ?? null) : null,
         thumbable: !!(mediaDoc && (mediaDoc.media_type === 'photo' || mediaDoc.thumb_file_id)),
-        text: msg ? (msg.text || '') : '',
+        // 描述优先取 message；没有 message 时用 media.media_name 兜底
+        // （文本媒体的内容就存在这里：source=media 抽到它时卡片不该显示"空描述"）
+        text: msg ? (msg.text || '') : ((mediaDoc && mediaDoc.media_name) || ''),
         tags: msg && Array.isArray(msg.tags) ? msg.tags : [],
         chat_id: pos ? pos.chatId : null,
         message_id: pos ? pos.messageId : null,

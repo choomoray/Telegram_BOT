@@ -172,14 +172,35 @@ test('/log 取数改为按时间倒序，避免截断时丢掉最新记录', () 
 
 // ---------------- 打标签面板 ----------------
 
-test('打标签面板：删旧发新，只保留一个按钮界面', () => {
+test('打标签面板：按钮操作只就地刷新，用户发消息改标签才删旧发新', () => {
     const src = read('utils/tagSession.js');
-    assert.match(src, /deleteMessage/, '刷新时应删除旧面板');
-    assert.match(src, /async function refreshPanel\(userId, statusLine = ''\)/);
+    assert.match(src, /deleteMessage/, '删旧发新仍要能删掉旧面板');
+    assert.match(src, /async function refreshPanel\(userId, statusLine = '', opts = \{\}\)/);
     assert.match(src, /const oldPanelId = session\.panelMsgId;/, '先记住旧面板 id');
-    // 不再用 editMessageText 原地刷新面板（会把媒体顶上去、按钮留在下面）
+    // 默认（按钮点击）走 editMessageText 原地刷新；只有 opts.resend（用户发消息）才删旧发新
     const refreshBody = src.slice(src.indexOf('async function refreshPanel'), src.indexOf('async function sendPanel'));
-    assert.ok(!/editMessageText/.test(refreshBody), 'refreshPanel 不应再原地编辑');
+    assert.match(refreshBody, /if \(!opts\.resend && oldPanelId\)/, '按钮操作走原地刷新分支');
+    assert.match(refreshBody, /await bot\.editMessageText\(/, '按钮操作应就地编辑消息');
+    assert.match(refreshBody, /if \(opts\.resend\)|opts\.resend/, '用户发消息时才走删旧发新');
+    assert.match(refreshBody, /await deletePanelMessage\(userId, oldPanelId\)/, 'resend 分支删旧面板');
+    // 文本输入（用户发消息）→ 明确要求 resend
+    assert.match(src, /await refreshPanel\(userId, `✅ \$\{parts\.join\('；'\)\}`, \{ resend: true \}\)/,
+        '文本输入改标签要删旧发新');
+    // 按钮回调（sendtag:）→ 就地刷新，不带 resend
+    const cbBody = src.slice(src.indexOf("if (data.startsWith('sendtag:'))"));
+    assert.match(cbBody, /await refreshPanel\(userId, `✅ 标签「\$\{tag\}」已\$\{applied \? '移除' : '添加'\}`\);/,
+        '标签按钮点击只刷新按钮/文本，不重发消息');
+});
+
+test('/tag 模式：按钮就地刷新，用户发消息改标签才删旧发新', () => {
+    const src = read('handlers/modes/tagMode.js');
+    // showGroupTagAction 支持 resend，并且默认仍走 editMessageText
+    assert.match(src, /async function showGroupTagAction\(userId, messageId, groupId, mode, page = 1, opts = \{\}\)/);
+    assert.match(src, /if \(opts\.resend\) \{/, '要有删旧发新分支');
+    assert.match(src, /await bot\.editMessageText\(text, \{/, '按钮操作仍就地刷新');
+    // 手动输入标签后用 resend
+    assert.match(src, /showGroupTagAction\(userId, state\.tagMsgId, state\.groupId, state\.groupTagMode, 1, \{ resend: true \}\)/,
+        '发消息改标签要删旧发新');
 });
 
 test('打标签面板：按钮只留已选与置顶标签', () => {
@@ -191,9 +212,9 @@ test('打标签面板：按钮只留已选与置顶标签', () => {
         '不应再把整个标签库铺进按钮');
 });
 
-test('手动输入标签后：结果并入面板，不再单独发确认消息', () => {
+test('手动输入标签后：结果并入面板（删旧发新），不再单独发确认消息', () => {
     const src = read('utils/tagSession.js');
-    assert.match(src, /await refreshPanel\(userId, `✅ \$\{parts\.join\('；'\)\}`\)/, '结果应写进面板');
+    assert.match(src, /await refreshPanel\(userId, `✅ \$\{parts\.join\('；'\)\}`, \{ resend: true \}\)/, '结果应写进面板并重发');
     // handleTagText 里不应再有"另外发一条确认"
     const fn = src.slice(src.indexOf('async function handleTagText'), src.indexOf('// ---------------- 回调处理'));
     assert.ok(!/bot\.sendMessage\(userId, `✅ \$\{parts/.test(fn), '不应再单独发确认消息');

@@ -62,7 +62,9 @@ async function setGroupDelete(groupId, deleteTimestamp) {
 /**
  * 按「组内是否还有文本消息」重算 is_delete（全项目唯一判定入口）：
  *   - 组内还有 message 记录（= 仍有文本媒体） → 0，表示无需清理
- *   - 组内已无 message 记录（= 空描述媒体组） → 当前时间戳，表示可被 /clean 清理
+ *   - 组内还有**文本媒体**（media_type='text'，/send、/reply 发的纯文本，见 media.recordTextMedia）
+ *     → 0：它的"描述"就是它自己，不能算空描述组，否则 /clean 会把这条文本一起清掉
+ *   - 组内两者都没有（= 空描述媒体组） → 当前时间戳，表示可被 /clean 清理
  *
  * 任何会改变「组内文本」的写路径（收录 / 发送 / 回复 / 编辑 / 清空描述 / 删除）
  * 都应调用本函数，而不是各自判断后写死 0 或时间戳：这样后续补文本、改文本会变 0，
@@ -75,7 +77,13 @@ async function syncGroupDeleteByText(groupId) {
     try {
         const messageCol = getCollection(COLLECTIONS.MESSAGE);
         const textCount = await messageCol.countDocuments({ group_id: groupId });
-        const deleteTimestamp = textCount > 0 ? 0 : Date.now();
+        let hasText = textCount > 0;
+        if (!hasText) {
+            const mediaCol = getCollection(COLLECTIONS.MEDIA);
+            const textMediaCount = await mediaCol.countDocuments({ group_id: groupId, media_type: 'text' });
+            hasText = textMediaCount > 0;
+        }
+        const deleteTimestamp = hasText ? 0 : Date.now();
         await setGroupDelete(groupId, deleteTimestamp);
         return deleteTimestamp;
     } catch (err) {

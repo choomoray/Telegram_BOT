@@ -216,6 +216,53 @@ test('纯文本视为打标签：作用于当前 message，并同步 group_list.
     assert.ok(tagSession.isTagging(USER), '打标签继续，直到点《完成》');
 });
 
+// ---------------- 刷新方式：按钮就地刷新；发消息才删旧发新 ----------------
+
+test('打标签刷新：点按钮只就地刷新（不重发消息），发消息改标签才删旧发新', async () => {
+    resetAll();
+    store.set('tags', [{ _id: 't1', name: 'JK', pin: 0, count: 0 }]);
+    startSendMode();
+
+    const sent = [];
+    const edits = [];
+    const deleted = [];
+    bot.sendMessage = async (chatId, text, opts) => {
+        sent.push({ chatId, text, opts });
+        return { message_id: 10000 + sent.length, chat: { id: chatId } };
+    };
+    bot.editMessageText = async (text, opts) => { edits.push({ text, opts }); return true; };
+    bot.deleteMessage = async (chatId, messageId) => { deleted.push({ chatId, messageId }); return true; };
+    bot.answerCallbackQuery = async () => true;
+
+    await handleSendMode(sendMsg(7351, {
+        caption: '刷新方式', photo: [{ file_id: 'R0', file_unique_id: 'UR0' }]
+    }), getRawUserState(USER));
+    const panelId = tagSession.getTagSession(USER).panelMsgId;
+    assert.ok(panelId, '进入打标签后有面板消息');
+
+    // 1) 点标签按钮：就地刷新按钮 + 文本，不删消息、不重发
+    const sentBefore = sent.length;
+    const deletedBefore = deleted.length;
+    const editsBefore = edits.length;
+    await tagSession.handleTagCallback(callbackQuery('sendtag:JK', panelId));
+    assert.ok(edits.length > editsBefore, '按钮操作应 edit 原面板');
+    assert.strictEqual(edits[edits.length - 1].opts.message_id, panelId, '编辑的是同一个面板消息');
+    assert.ok(edits[edits.length - 1].opts.reply_markup, '编辑时一并刷新按钮');
+    assert.strictEqual(deleted.length, deletedBefore, '按钮操作不应删除面板消息');
+    assert.strictEqual(sent.length, sentBefore, '按钮操作不应重发消息');
+    assert.strictEqual(tagSession.getTagSession(USER).panelMsgId, panelId, '面板消息 ID 不变');
+
+    // 2) 发消息改标签：删旧面板 + 发新面板（落在用户消息下方）
+    await tagSession.handleTagText(sendMsg(7352, { text: '高清' }), tagSession.getTagSession(USER));
+    assert.ok(deleted.length > deletedBefore, '发消息改标签要删掉旧面板');
+    assert.strictEqual(deleted[deleted.length - 1].messageId, panelId, '删的正是旧面板');
+    assert.ok(sent.length > sentBefore, '发消息改标签要重发面板');
+    const newPanelId = tagSession.getTagSession(USER).panelMsgId;
+    assert.notStrictEqual(newPanelId, panelId, '面板消息已换成新的');
+    assert.ok(sent[sent.length - 1].text.includes('已添加：高清') || sent[sent.length - 1].text.includes('高清'),
+        '新面板文本带本次结果');
+});
+
 test('《✅ 完成》：队列还有目标时切换到下一个（不结束模式）', async () => {
     resetAll();
     startSendMode();

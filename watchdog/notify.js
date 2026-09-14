@@ -24,6 +24,12 @@ function stripAnsi(text) {
 }
 
 /**
+ * 崩溃 / 重启报告里最多列几条 warn/erro（用户要求：只展示**最近 3 条**）
+ * 看门狗侧可用 WATCHDOG_REPORT_LINES 覆盖；bot 侧读崩溃标记里的 reportLimit。
+ */
+const DEFAULT_REPORT_LIMIT = 3;
+
+/**
  * 从 bot 输出里筛选"最近的 warn / erro"行，转成通知用的简洁格式
  *
  * 输入是子进程原始输出（带时间戳与级别），输出形如：
@@ -31,10 +37,10 @@ function stripAnsi(text) {
  * 只保留 warn 与 erro；其他级别（info/succ）不进报告——只报问题。
  *
  * @param {string[]} lines - 原始输出行（环形缓冲）
- * @param {number} limit - 最多保留多少条（取最近的）
+ * @param {number} limit - 最多保留多少条（取最近的，默认 3）
  * @returns {string[]}
  */
-function pickWarnErrorLines(lines, limit = 10) {
+function pickWarnErrorLines(lines, limit = DEFAULT_REPORT_LIMIT) {
     const out = [];
     for (const raw of lines || []) {
         const line = stripAnsi(raw).trim();
@@ -53,8 +59,17 @@ function pickWarnErrorLines(lines, limit = 10) {
     return out.slice(-limit);
 }
 
-/** 报告正文：崩溃 / 重启共用的部分（标题 + 最近 warn/erro） */
-function buildReport({ title, tail, limit = 10 }) {
+/**
+ * 报告正文（用户指定的格式：**标题首尾各一次**，中间是崩溃信息）
+ *
+ *   ⚠️ BOT出现意外崩溃，稍后尝试重启
+ *
+ *   崩溃信息：
+ *   [erro] xxx
+ *
+ *   ⚠️ BOT出现意外崩溃，稍后尝试重启
+ */
+function buildReport({ title, tail, limit = DEFAULT_REPORT_LIMIT }) {
     const lines = [title, ''];
     const picked = pickWarnErrorLines(tail, limit);
     if (picked.length) {
@@ -62,6 +77,7 @@ function buildReport({ title, tail, limit = 10 }) {
     } else {
         lines.push('崩溃信息：（崩溃前没有 warn / erro 日志）');
     }
+    lines.push('', title);
     return lines.join('\n');
 }
 
@@ -76,6 +92,9 @@ function formatCrashReport(info) {
 
 /**
  * 重启结果通知文案
+ *
+ * 现在由**主 bot 自己**在重启成功、连上数据库后第一时间发出
+ * （见 utils/crashNotify.js: reportRestartFromWatchdog），看门狗不再等健康确认后补发。
  * @param {Object} info
  *   - ok: true = 重启成功；false = 重启后仍未就绪 / 反复崩溃
  *   - tail: 崩溃前的原始输出行
@@ -225,5 +244,6 @@ module.exports = {
     stripAnsi,
     formatCrashReport,
     formatRestartReport,
-    formatGiveUpReport
+    formatGiveUpReport,
+    DEFAULT_REPORT_LIMIT
 };

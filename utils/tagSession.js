@@ -9,7 +9,9 @@
  *      只有点击《✅ 完成》才结束本次打标签；
  *   3. 队列：当前标签还没打完又来一个需要打标签的媒体 → 先入队，
  *      用户点《完成》后才把面板切到队列中的下一个（默认行为）；
- *   4. 标签按 message 独立（file_unique_id），group_list.tags 记录整组标签（见 db/groupList）。
+ *   4. 标签按 message 独立（file_unique_id），group_list.tags 记录整组标签（见 db/groupList）；
+ *   5. 面板刷新方式按触发来源区分（用户要求）：**点按钮 → 就地 edit 刷新**（不重发消息）；
+ *      **用户发消息改标签 → 删旧面板 + 发新面板**（面板落到用户消息下方，按钮与文本状态可见）。
  *
  * 会话只存在于内存（与其它模式状态一致），不随模式状态清理而消失。
  */
@@ -126,32 +128,10 @@ async function deletePanelMessage(userId, messageId) {
     });
 }
 
-/**
- * 刷新打标签面板：**只保留一个按钮界面**
- *
- * 之所以不再用 editMessageText 原地刷新：面板刷新后总是排在会话列表底部（新消息下方），
- * 而用户要对照的媒体在很上面，编辑原地消息会让"媒体被顶上去、按钮留在下面"，
- * 不利于边看边确认。因此改为：**删掉旧面板 → 发一条新面板**，
- * 新面板落在最新位置，且始终只有一个。
- *
- * @param {number} userId
- * @param {string} [statusLine] - 本次操作结果（就地展示在面板里）
- */
-async function refreshPanel(userId, statusLine = '') {
-    const session = getSession(userId);
-    if (!session || !session.active) return;
-    const oldPanelId = session.panelMsgId;
-    session.panelMsgId = null;
-    if (oldPanelId) await deletePanelMessage(userId, oldPanelId);
-    await sendPanel(userId, statusLine);
-}
-
-/** 发送一条新的打标签面板（并把面板消息 ID 记入会话） */
-async function sendPanel(userId, statusLine = '') {
+/** 直接发一条面板消息并把消息 ID 记进会话（内容由调用方算好，避免重复查询） */
+async function postPanel(userId, text, keyboard) {
     const session = getSession(userId);
     if (!session || !session.active) return null;
-    const text = await buildPanelText(session, statusLine);
-    const keyboard = await renderTagKeyboard(session.active);
     try {
         const sent = await bot.sendMessage(userId, text, { reply_markup: keyboard });
         session.panelMsgId = sent.message_id;
@@ -164,7 +144,63 @@ async function sendPanel(userId, statusLine = '') {
 }
 
 /**
- * 用新的提示语刷新面板（发送/回复成功时调用；无活动目标时退化为普通提示消息）
+ * 刷新打标签面板
+ *
+ * 两种方式（用户要求）：
+ *   1. **按钮点击**（默认）：`editMessageText` 就地刷新按钮与文本状态 ——
+ *      面板位置不动、不重发消息，聊天记录不会被"删一条发一条"刷屏；
+ *   2. **用户发消息改的标签**（`opts.resend = true`）：删掉旧面板 → 发一条新面板。
+ *      此时用户的消息在下面，旧面板被顶在上面看不到刷新结果，
+ *      删旧发新才能让按钮与文本状态紧跟在用户消息之后。
+ *
+ * @param {number} userId
+ * @param {string} [statusLine] - 本次操作结果（就地展示在面板里）
+ * @param {Object} [opts] - { resend: true } 删旧发新（用户发消息触发时用）
+ */
+async function refreshPanel(userId, statusLine = '', opts = {}) {
+    const session = getSession(userId);
+    if (!session || !session.active) return;
+    const text = await buildPanelText(session, statusLine);
+    const keyboard = await renderTagKeyboard(session.active);
+    const oldPanelId = session.panelMsgId;
+
+    if (!opts.resend && oldPanelId) {
+        try {
+            await bot.editMessageText(text, {
+                chat_id: userId,
+                message_id: oldPanelId,
+                reply_markup: keyboard
+            });
+            session.updatedAt = Date.now();
+            return;
+        } catch (err) {
+            // 内容与上一条完全一致时 Telegram 会报 "message is not modified"：这不算失败，不用重发
+            if (/not modified/i.test(String(err && err.message))) {
+                session.updatedAt = Date.now();
+                return;
+            }
+            logger.warn(`原地刷新打标签面板失败，改为删旧发新: ${err.message}`);
+        }
+    }
+
+    session.panelMsgId = null;
+    if (oldPanelId) await deletePanelMessage(userId, oldPanelId);
+    await postPanel(userId, text, keyboard);
+}
+
+/** 发送一条新的打标签面板（并把面板消息 ID 记入会话） */
+async function sendPanel(userId, statusLine = '') {
+    const session = getSession(userId);
+    if (!session || !session.active) return null;
+    const text = await buildPanelText(session, statusLine);
+    const keyboard = await renderTagKeyboard(session.active);
+    return await postPanel(userId, text, keyboard);
+}
+
+/**
+ * 用新的提示语刷新面板（用户发送/回复媒体成功时调用；无活动目标时退化为普通提示消息）
+ *
+ * 这里是"用户发消息"触发 → 走删旧发新（面板要落在最新位置）
  * @returns {Promise<{shownAsPanel: boolean}>}
  */
 async function showActivePanel(userId, text) {
@@ -174,7 +210,7 @@ async function showActivePanel(userId, text) {
         return { shownAsPanel: false };
     }
     session.active.baseText = text;
-    await refreshPanel(userId);
+    await refreshPanel(userId, '', { resend: true });
     return { shownAsPanel: true };
 }
 
@@ -228,6 +264,7 @@ async function advanceToNext(userId) {
 
     session.active = session.queue.shift();
     session.updatedAt = Date.now();
+    // 点《✅ 完成》是按钮操作 → 就地刷新（面板不重发）
     await refreshPanel(userId);
 
     const next = session.active;
@@ -401,9 +438,9 @@ async function handleTagText(msg, session) {
     }).catch(() => { });
 
     updateUserActivity(userId);
-    // 就地反馈：把本次结果写进面板文本并刷新（删旧发新），
+    // 用户是"发消息"改的标签 → 删旧面板、把新面板发到最下面（按钮 + 文本状态立刻可见），
     // 不再单独发一条确认消息 —— 避免"标签成功消息 + 按钮界面"两条并存
-    await refreshPanel(userId, `✅ ${parts.join('；')}`);
+    await refreshPanel(userId, `✅ ${parts.join('；')}`, { resend: true });
     logger.info(`用户 ${userId} 打标签（文本输入）: ${parts.join('；')} -> group=${target.groupId}`);
     return true;
 }
@@ -505,6 +542,7 @@ async function handleTagCallback(query) {
             counts: { tags: 1, messages: target.fileUniqueId ? 1 : undefined },
             detail: { tags: [tag], mode: 'button', via: 'send_reply_session' }
         }).catch(() => { });
+        // 按钮点击 → 只就地刷新按钮与文本状态，不重发消息（面板位置不动）
         await refreshPanel(userId, `✅ 标签「${tag}」已${applied ? '移除' : '添加'}`);
         logger.info(`用户 ${userId} 打标签（按钮）: ${applied ? '移除' : '添加'} ${tag} -> group=${target.groupId}${target.fileUniqueId ? `, file=${target.fileUniqueId}` : ''}`);
         return;

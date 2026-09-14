@@ -357,26 +357,34 @@ select { appearance: none; padding-right: 26px;
 }
 .media-thumb .ph { font-size: 30px; opacity: .55; }
 
-/* ---------- 随机推荐：瀑布流（图片完整显示、不裁切，文字仍在图片下方） ----------
-   用 CSS 多列（columns）实现瀑布流：卡片按内容高度自然堆叠，
-   不需要 JS 计算位置，也不会把整张卡"拉满一行"。
-   封面高度由图片真实比例决定（JS 在缩略图 onload 后写 aspect-ratio），
-   因此图片是完整展示而不是 16:10 裁切；卡片内容高度不一 → 自然形成瀑布流错落。
-   列数按屏幕宽度自动变化（手机 2 列 → 桌面 5~6 列）：见下方的列数阶梯。 */
+/* ---------- 瀑布流（图片完整显示、不裁切，文字仍在图片下方） ----------
+   用 **CSS Grid + 行跨度** 实现瀑布流：容器是一把 8px 的"行标尺"（grid-auto-rows），
+   JS（app.js: layoutFlowGrid）量出每张卡的内容高度后写 `grid-row-end: span N`，
+   卡片各按自己高度占位 → 列与列之间自然错落（封面完整显示、不裁切）。
+   封面高度由图片真实比例决定（JS 在缩略图 onload 后写 aspect-ratio）。
+   ★ 为什么不用 CSS 多列（columns）：columns 是"先把第一列填满再填第二列"，
+     视觉顺序变成**先上下、再左右**，想按顺序看会跳列；
+     grid 的自动放置永远是"先第一行从左到右、再往下" → 与列表顺序一致。
+   ★ 卡片必须 align-self: start：高度只由内容决定（不被 8px 轨道拉伸），
+     JS 才能量到真实高度；否则量到的是轨道高度。
+   ★ 四个地方共用这一套卡片/封面变体（.media-card--flow / .media-thumb--flow / .thumb-img--flow）：
+     随机推荐 / 媒体库 / 标签详情 / 媒体组详情左栏的媒体条。
+     区别只在"多大、几列"：随机推荐按视口阶梯（.media-grid--flow），
+     媒体库按容器宽度自适应（.media-grid--fit，~228px 一列），
+     标签详情的媒体与「媒体详情」左栏**完全同尺度**（.media-grid--mini + .detail-strip--flow，132px/104px）。
+     标签详情那一档因为只有 132px 宽，卡片内容由 .media-card--compact 精简。 */
 .media-grid--flow {
-  display: block;
-  columns: 2;                 /* 兜底：窄屏 2 列 */
+  display: grid;
+  grid-template-columns: repeat(var(--flow-cols, 2), minmax(0, 1fr));  /* 兜底：窄屏 2 列 */
   column-gap: 14px;
+  row-gap: 14px;
+  grid-auto-rows: 8px;        /* 行标尺：JS 按卡片内容高度换算成 span 数 */
 }
-/* 列容器里的卡片：inline-block + 100% 宽（grid/flex 子项跨列时可能被拆开，不能直接用） */
+/* 瀑布流卡片 = 一个跨多行的 grid 子项（跨度由 JS 写在行内 grid-row-end 上） */
 .media-card--flow {
-  display: inline-block;
+  align-self: start;          /* 高度=内容高度，不被轨道拉伸（JS 量高度依赖这一点） */
   width: 100%;
-  margin: 0 0 14px;
-  break-inside: avoid;
-  -webkit-column-break-inside: avoid;
-  page-break-inside: avoid;
-  vertical-align: top;
+  grid-row-end: span var(--flow-span, 24);   /* JS 未跑完时的兜底跨度 */
 }
 .media-thumb--flow {
   aspect-ratio: 4 / 3;      /* 图片加载出来前的占位比例，onload 后由 JS 换成真实比例 */
@@ -402,12 +410,54 @@ select { appearance: none; padding-right: 26px;
 /* ---------- 瀑布流列数阶梯（按窗口宽度自动选列数） ----------
    手机 2 列 → 平板 3 列 → 小笔记本 4 列 → 桌面 5 列 → 大屏 6 列（封顶）。
    注意用 min-width 从小到大排列，后面的规则覆盖前面的，最终列数就是"命中的最大一档"。 */
-@media (min-width: 560px)  { .media-grid--flow { columns: 2; } }  /* 大手机仍是 2 列 */
-@media (min-width: 720px)  { .media-grid--flow { columns: 3; } }
-@media (min-width: 1024px) { .media-grid--flow { columns: 4; } }
-@media (min-width: 1400px) { .media-grid--flow { columns: 5; } }
-@media (min-width: 1800px) { .media-grid--flow { columns: 6; } }  /* 更宽的屏幕不再加列，避免封面太小 */
-@media (max-width: 420px)  { .media-grid--flow { column-gap: 10px; } .media-card--flow { margin-bottom: 10px; } }
+@media (min-width: 560px)  { .media-grid--flow { --flow-cols: 2; } }  /* 大手机仍是 2 列 */
+@media (min-width: 720px)  { .media-grid--flow { --flow-cols: 3; } }
+@media (min-width: 1024px) { .media-grid--flow { --flow-cols: 4; } }
+@media (min-width: 1400px) { .media-grid--flow { --flow-cols: 5; } }
+@media (min-width: 1800px) { .media-grid--flow { --flow-cols: 6; } }  /* 更宽的屏幕不再加列，避免封面太小 */
+@media (max-width: 420px)  { .media-grid--flow { column-gap: 10px; row-gap: 10px; } }
+
+/* ---------- 媒体库卡片的瀑布流：列数按**容器**宽度自适应（列宽固定 ~228px） ----------
+   媒体库在右侧主区域里、容器宽度随窗口和日志坞变化：
+   若照上面的视口阶梯取列数，窗口一变卡片就忽大忽小。
+   这里用 auto-fill（"每列至少多宽"），列数由容器自己算 →
+   卡片宽度落在 228~300px 这一档（原来是 repeat(auto-fill, minmax(228px, 1fr))，同尺度）。
+   窄屏再收窄列宽，保证手机上也排得下 2 列（弹窗正文更窄，所以用 120px 兜底）。
+   （标签详情不用这一套：那里的媒体要与「媒体详情」左栏同尺度，见下面的 --mini） */
+.media-grid--fit {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
+  column-gap: 14px;
+  row-gap: 14px;
+  grid-auto-rows: 8px;
+}
+@media (max-width: 640px) {
+  .media-grid--fit { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); column-gap: 10px; row-gap: 10px; }
+}
+@media (max-width: 420px) {
+  .media-grid--fit { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); column-gap: 10px; row-gap: 10px; }
+}
+
+/* ---------- 标签详情的紧凑瀑布流：与「媒体详情」左栏缩略图同尺度（列宽 132px） ----------
+   列宽、列间距、断点都必须与 .detail-strip--flow 一致，这样同一个窗口下两处的媒体大小完全相同
+   （弹窗更宽只是列数更多：1180px 的弹窗里是 8 列，1040px 以下的详情左栏全宽时同样是这个尺度）。
+   卡片在这个宽度下放不下徽标 / 标签 / 定位信息，由 .media-card--compact 精简内容。 */
+.media-grid--mini {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  column-gap: 10px;
+  row-gap: 10px;
+  grid-auto-rows: 8px;
+}
+/* 紧凑卡片：封面 + 描述（2 行小字）+ 一行「类型 / 媒体数」 */
+.media-card--compact .media-body { padding: 7px 8px 8px; gap: 5px; }
+.media-card--compact .media-text { font-size: 11px; min-height: 0; }
+.media-card--compact .media-meta { font-size: 10.5px; gap: 4px; }
+/* 紧凑卡片里类型角标会占掉卡片近 4 成宽度，而类型已经在下方一行用图标表示 */
+.media-card--compact .thumb-type { display: none; }
+@media (max-width: 880px) {
+  .media-grid--mini { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); column-gap: 8px; row-gap: 8px; }
+}
 
 /* ---------- 媒体封面 ----------
    预览框固定尺寸，封面是一层 background-image（.thumb-img），cover 裁切填满。
@@ -427,7 +477,8 @@ select { appearance: none; padding-right: 26px;
 .media-thumb.is-blur .thumb-img,
 .detail-item.is-blur .detail-thumb .thumb-img { filter: blur(7px) brightness(.72) saturate(.9); }
 /* 缩略图加载失败：清掉封面层，只留类型图标占位 */
-.media-thumb.is-fallback .thumb-img { display: none; }
+.media-thumb.is-fallback .thumb-img,
+.detail-thumb.is-fallback .thumb-img { display: none; }
 /* 卡片状态徽标（保留 / 可清理 / 类型）：不再压在封面上，改到描述下方的文字区 */
 .media-badges { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
 /* 预览图右下角的文件类型角标（图片 / 视频 / 音频 / 文件） */
@@ -601,6 +652,40 @@ td.right, th.right { text-align: right; }
 .detail-item .ph { aspect-ratio: 1; display: grid; place-items: center; font-size: 26px; opacity: .6; }
 /* 详情条封面同样是 .thumb-img 背景层（悬停整图可见，见上面「媒体封面」段） */
 .detail-thumb { aspect-ratio: 1; }
+/* ---------- 媒体组详情：媒体条也是瀑布流（与媒体库 / 随机推荐同一套观感） ----------
+   左栏本来就窄，这里用 auto-fill（按**容器**宽度自适应列数，约 132px 一列，
+   与原来的 repeat(auto-fill, minmax(132px, 1fr)) 网格列数一致）：窄栏 2 列、宽栏 4~6 列，
+   不用写死视口断点。封面改成按图片真实比例完整显示（JS 在 onload 后写 aspect-ratio），
+   卡片高度随图片比例高低不一 → 自然错落（顺序仍是"先第一行从左到右"，见 layoutFlowGrid）。 */
+.detail-strip--flow {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  column-gap: 10px;
+  row-gap: 10px;
+  grid-auto-rows: 8px;
+}
+.detail-item--flow {
+  align-self: start;          /* 高度=内容高度，不被 8px 轨道拉伸（JS 量高度依赖这一点） */
+  grid-row-end: span var(--flow-span, 16);   /* JS 未跑完时的兜底跨度 */
+}
+/* 图片加载出来前的中性占位比例；onload 后由 JS 换成图片真实比例 */
+.detail-thumb--flow { aspect-ratio: 4 / 3; min-height: 88px; }
+/* 封面层：绝对定位铺满容器（沿用媒体库 / 随机推荐的做法），
+   容器高度由 aspect-ratio 决定 → 真图永远完整显示、不裁切、不变形。
+   背景层这里用 contain 完整显示：图片比例还没由 JS 写进容器时（加载中）也不会被裁掉一角。 */
+.detail-thumb--flow .thumb-img--flow {
+  position: absolute; inset: 0; z-index: 2;
+  background-size: contain; background-position: center;
+}
+/* 瀑布流里那张"隐形真图"要真正显示出来（它就是可见图片本身，高度撑满封面容器） */
+.detail-thumb--flow .thumb-img--flow .thumb-src {
+  position: relative; width: 100%; height: auto;
+  opacity: 1; pointer-events: none;
+}
+/* 占位图标（不可缩略）：高度交给容器比例，不要再叠加 1:1 把图标撑出封面 */
+.detail-thumb--flow .ph { aspect-ratio: auto; height: 100%; }
+/* 瀑布流里类型角标挪到右上角：右下角与图片下沿齐平，容易被误当成按钮 */
+.detail-thumb--flow .thumb-type { right: 6px; top: 6px; bottom: auto; }
 /* ---------- 媒体详情：左右两栏各自独立滚动 ----------
    左栏 = 媒体条，右栏 = 描述与标签 + 定位信息，两栏**各有一根滚动条**：
    每栏高度只由自己的内容决定（内容少就短、不跟着对面拉长），超高时才出滚动条、内部滚动。
@@ -981,8 +1066,14 @@ html[data-theme="light"] {
   /* 媒体详情的正文在单栏下要能整体滚（双栏时是 overflow:hidden 交给两栏各自滚） */
   .dialog-body.has-detail-main { overflow-y: auto; }
 
-  /* 详情条 / 媒体条：手机上保证一屏能看到 2 列缩略图，而不是被硬塞成 1 列 */
+  /* 详情条 / 媒体条：手机上保证一屏能看到 2 列缩略图，而不是被硬塞成 1 列
+     （瀑布流同样按容器宽度收窄到 104px 才能在两三百像素宽里排下 2 列） */
   .detail-strip { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+  .detail-strip--flow {
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    column-gap: 8px;
+    row-gap: 8px;
+  }
 
   /* 表格：users / transport 这种多列表格在窄屏改为横向滚动
      （.table-wrap 本身是 overflow:hidden，会把最右侧的「操作」列直接裁掉且没有滚动条） */
