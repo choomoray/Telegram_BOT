@@ -56,7 +56,9 @@ async function enterMessageReplyMode(userId, msg, replyTarget) {
         ? '\n回复位置：👥 群组'
         : (replyTarget === 'channel' ? '\n回复位置：📢 频道' : '');
     const packHint = packSize && packSize >= 2 ? `\n📦 媒体将以 ${packSize} 个为一组打包回复` : '';
-    const welcomeMsg = `✅ 已进入消息回复模式${targetHint}${packHint}\n\n请发送需要回复的媒体消息：`;
+    const welcomeMsg = `✅ 已进入消息回复模式${targetHint}${packHint}\n\n` +
+        '请发送需要回复的媒体消息（用于定位目标）\n' +
+        '定位完成后，可直接发送文字（保留 Telegram 文本格式）或媒体进行回复';
     await bot.sendMessage(userId, welcomeMsg, {
         reply_to_message_id: msg.message_id,
         allow_sending_without_reply: true

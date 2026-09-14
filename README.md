@@ -957,7 +957,7 @@ for (const file of commandFiles) {
 | `/media_group [N]` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group；N=每组个数（1~10，退出时按 N 个一组打包发送） |
 | `/media_hide [N]` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide；N=每组个数（1~10） |
 | `/media_unhide [N]` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide；N=每组个数（1~10） |
-| `/message_reply [N]` | messageReply.js | 消息回复 | 进入 messageReply 模式，定位到频道转发媒体时**必须选择回复在群组还是频道**（就绪消息上带「🔄 更改为发送至…」一键切换按钮），**未指定时默认回复在群组**；回复位置取自 `message.channel_forward` **与 `media.group`/`media.channel` 两处**，空描述媒体（没有 message 记录）同样可定位回复；N>=2 时媒体按 N 个为一组打包为媒体组回复（满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出）。单条/整组回复成功后**自动进入打标签（不退出回复模式）**，可继续发媒体继续回复 |
+| `/message_reply [N]` | messageReply.js | 消息回复 | 进入 messageReply 模式，定位到频道转发媒体时**必须选择回复在群组还是频道**（就绪消息上带「🔄 更改为发送至…」一键切换按钮），**未指定时默认回复在群组**；回复位置取自 `message.channel_forward` **与 `media.group`/`media.channel` 两处**，空描述媒体（没有 message 记录）同样可定位回复；N>=2 时媒体按 N 个为一组打包为媒体组回复（满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出）。单条/整组回复成功后**自动进入打标签（不退出回复模式）**，可继续发媒体继续回复。**就绪后也可直接发文字回复**（保留 Telegram 文本格式，见下） |
 | `/message_reply_group` | messageReplyGroup.js | 消息回复（群组） | 直接回复在群组中（频道转发消息用群组位置，非转发消息用消息自身位置） |
 | `/message_reply_channel` | messageReplyChannel.js | 消息回复（频道） | 直接回复在频道中（无频道位置时回退消息自身位置） |
 | `/password` | password.js | 媒体密码 | 进入 password 模式，设置/更新媒体访问密码 |
@@ -1294,7 +1294,7 @@ handleGroupEditedMessage()
 | `/media_group [N]` | 媒体合并模式（N=每组个数 1~10，退出时按 N 个一组打包发送） | modes/mediaCollectMode.js |
 | `/media_hide [N]` | 媒体遮罩模式（Spoiler，N=每组个数 1~10） | modes/mediaCollectMode.js |
 | `/media_unhide [N]` | 媒体去遮罩模式（N=每组个数 1~10） | modes/mediaCollectMode.js |
-| `/message_reply [N]` | 在群组/频道中回复指定消息（频道转发消息可先选择回复位置；N>=2 时媒体按 N 个一组打包为媒体组回复——满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出） | modes/messageReplyMode.js |
+| `/message_reply [N]` | 在群组/频道中回复指定消息（频道转发消息可先选择回复位置；N>=2 时媒体按 N 个一组打包为媒体组回复——满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出）；就绪后也可直接发文字回复 | modes/messageReplyMode.js |
 | `/message_reply_group [N]` | 在群组中回复指定消息（支持 N 打包） | modes/messageReplyMode.js |
 | `/message_reply_channel [N]` | 在频道中回复指定消息（支持 N 打包） | modes/messageReplyMode.js |
 | `/search` | 进入搜索模式 | modes/searchMode.js |

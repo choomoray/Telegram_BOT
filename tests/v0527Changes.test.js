@@ -260,21 +260,66 @@ test('搬运巡检：只写 opLog、不发通知（linkHealth 的 notifyAdmins �
 });
 
 
-// ---------------- /send 文字保留格式 ----------------
+// ---------------- 回复模式：也能直接回复文本（保留格式） ----------------
+
+test('回复模式：就绪状态收到文本 → 直接回复文本（不再被忽略）', () => {
+    const src = read('handlers/modes/messageReplyMode.js');
+    assert.match(src, /if \(!mediaInfo && msg\.text\)\s*\{[\s\S]*?replyTextToTarget\(/,
+        '就绪状态的文本应走 replyTextToTarget');
+    // 旧行为是直接 return（静默忽略），必须已改掉
+    assert.ok(!/在就绪状态发送非媒体消息，已忽略/.test(src), '旧的"忽略文本"分支应已移除');
+});
+
+test('回复文本：带上 entities 保留格式，回复到定位到的那条消息', () => {
+    const src = read('handlers/modes/messageReplyMode.js');
+    const fn = src.slice(src.indexOf('async function replyTextToTarget'), src.indexOf('async function processSingleMediaReply'));
+    assert.ok(fn.length > 0, '应找到 replyTextToTarget');
+    assert.match(fn, /buildForwardTextOptions\(msg\)/, '要复用共享的文本转发选项');
+    assert.match(fn, /reply_to_message_id: targetMessageId/, '要回复到定位到的那条消息');
+    assert.match(fn, /allow_sending_without_reply: true/, '原消息被删也要能发出去');
+    assert.ok(!/parse_mode/.test(fn), '不应使用 parse_mode');
+    assert.match(fn, /action: 'reply_text'/, '要记 reply_text 操作日志');
+    // 不写 message 集合、不进打标签
+    assert.ok(!/upsertMessage|recordAndTag/.test(fn), '文本回复不应写 message / 进打标签');
+});
+
+test('回复文本失败时有明确提示（群组/频道权限）', () => {
+    const src = read('handlers/modes/messageReplyMode.js');
+    const fn = src.slice(src.indexOf('async function replyTextToTarget'), src.indexOf('async function processSingleMediaReply'));
+    assert.match(fn, /回复文本失败/);
+    assert.match(fn, /action: 'reply_fail'/);
+});
+
+test('forwardText：无 entities 时不下发该字段，有则原样带上', () => {
+    const { buildForwardTextOptions, countEntities } = require('../utils/forwardText');
+    assert.deepStrictEqual(buildForwardTextOptions({ text: '纯文本' }), {}, '无格式时不应塞 entities');
+    assert.deepStrictEqual(buildForwardTextOptions(null), {});
+    assert.deepStrictEqual(buildForwardTextOptions({ entities: [] }), {});
+
+    const entities = [{ type: 'bold', offset: 0, length: 4 }];
+    assert.deepStrictEqual(buildForwardTextOptions({ entities }), { entities });
+    assert.strictEqual(countEntities({ entities }), 1);
+    assert.strictEqual(countEntities({}), 0);
+    assert.strictEqual(countEntities(null), 0);
+});
+
+test('/send 与回复共用同一套文本转发逻辑（不再各写一份）', () => {
+    const send = read('handlers/modes/sendMode.js');
+    assert.match(send, /require\('\.\.\/\.\.\/utils\/forwardText'\)/, '/send 应复用共享实现');
+    assert.match(send, /buildForwardTextOptions\(msg\)/);
+    // 不应再有自己拼 entities 的重复实现
+    assert.ok(!/sendOpts\.entities = msg\.entities/.test(send), '不应重复实现 entities 逻辑');
+});
 
 test('/send 转发文本时带上 entities 以保留 Telegram 格式', () => {
     const src = read('handlers/modes/sendMode.js');
-    assert.match(src, /if \(Array\.isArray\(msg\.entities\) && msg\.entities\.length\)/, '要带上 entities');
-    assert.match(src, /sendOpts\.entities = msg\.entities/);
+    assert.match(src, /require\('\.\.\/\.\.\/utils\/forwardText'\)/, '复用共享的文本转发实现');
+    assert.match(src, /const sendOpts = buildForwardTextOptions\(msg\)/);
     assert.match(src, /bot\.sendMessage\(targetChatId, msg\.text, sendOpts\)/);
-    // 不能用 parse_mode：会把用户原文当 HTML/Markdown 解析而破坏格式。
-    // 说明：同文件前面的媒体分支确实要用 parse_mode: 'HTML'（caption 的既有逻辑），
-    // 这里只检查**文本转发分支自身**是否给发送选项加了 parse_mode（注释里提到该词不算）。
+    // 行为细节（entities 透传 / 不用 parse_mode）在 forwardText 的单测与文本分支检查里覆盖
     const start = src.indexOf('// 文本消息');
     const end = src.indexOf('const mediaInfo = extractMediaFromMessage');
     assert.ok(start > 0 && end > start, '定位文本转发分支失败');
     const textBranch = src.slice(start, end);
     assert.ok(!/parse_mode\s*[:=]/.test(textBranch), '文本转发分支不应给发送选项设置 parse_mode');
-    assert.match(textBranch, /sendOpts\.entities = msg\.entities/);
-    assert.match(textBranch, /bot\.sendMessage\(targetChatId, msg\.text, sendOpts\)/);
 });

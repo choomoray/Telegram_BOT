@@ -670,6 +670,72 @@ async function flushPackOnExit(userId) {
 // 注：回复成功后的 message 收录与标签统一由 utils/tagSession.recordAndTag 处理
 // （recordReplyMessage 旧实现已合并，避免同一 message 写两次）
 
+/**
+ * 就绪状态下的文本回复：把文本作为**消息回复**发到目标位置
+ *
+ * 与 /send 的文本转发行为一致：
+ *   - 保留 Telegram 文本格式（带原消息的 entities，不用 parse_mode）；
+ *   - 回复到 `targetChatId` / `targetMessageId`（消息回复模式定位到的那条消息）；
+ *   - 不写 message 集合、不进入打标签（打标签只针对媒体描述）。
+ *
+ * @param {number} userId
+ * @param {Object} state - message_reply 状态（含 targetChatId / targetMessageId）
+ * @param {Object} msg - 用户发来的文本消息
+ * @param {number} userMsgId - 用户消息 ID（用于给用户的回执定位）
+ */
+async function replyTextToTarget(userId, state, msg, userMsgId) {
+    const targetChatId = state.targetChatId;
+    const targetMessageId = state.targetMessageId;
+    const targetGroupId = state.targetGroupId;
+    const text = msg.text;
+
+    const { buildForwardTextOptions, countEntities } = require('../../utils/forwardText');
+    const options = {
+        ...buildForwardTextOptions(msg),
+        reply_to_message_id: targetMessageId,
+        allow_sending_without_reply: true
+    };
+
+    try {
+        const sent = await bot.sendMessage(targetChatId, text, options);
+        logger.info(`用户 ${userId} 回复文本到 ${targetChatId}/${targetMessageId}: msg=${sent.message_id}`);
+        logOperation({
+            action: 'reply_text',
+            source: 'private',
+            userId,
+            chatId: targetChatId,
+            messageId: sent.message_id,
+            target: { type: 'media_group', id: targetGroupId },
+            counts: { texts: 1, textLength: text.length },
+            detail: {
+                replyToMessageId: targetMessageId,
+                entityCount: countEntities(msg)
+            }
+        }).catch(() => { });
+        await bot.sendMessage(userId, '✅ 已回复文本', {
+            reply_to_message_id: userMsgId,
+            allow_sending_without_reply: true
+        }).catch(() => { });
+    } catch (err) {
+        logger.error(`回复文本失败: ${err.message}`);
+        logOperation({
+            action: 'reply_fail',
+            result: 'fail',
+            source: 'private',
+            userId,
+            chatId: targetChatId,
+            target: { type: 'media_group', id: targetGroupId },
+            counts: { texts: 1 },
+            detail: { replyToMessageId: targetMessageId },
+            error: err.message
+        }).catch(() => { });
+        await bot.sendMessage(userId, '❌ 回复文本失败，请检查机器人是否仍在目标群组/频道内', {
+            reply_to_message_id: userMsgId,
+            allow_sending_without_reply: true
+        }).catch(() => { });
+    }
+}
+
 async function processSingleMediaReply(userId, targetChatId, targetMessageId, targetGroupId, mediaInfo, userMsgId) {
     const ctx = getContext(userId);
     const { fileUniqueId, type, fileId, caption, has_spoiler, videoTime } = mediaInfo;
@@ -1249,8 +1315,20 @@ async function handleMessageReplyMode(msg, state) {
     }
 
     if (state.step === 'ready') {
+        // 文本消息：直接回复到目标位置（保留 Telegram 文本格式），且不进入打标签
+        // （打标签只针对媒体描述；纯文本没有 message 记录可打标签）
+        if (!mediaInfo && msg.text) {
+            await replyTextToTarget(userId, state, msg, userMsgId);
+            updateUserActivity(userId);
+            return true;
+        }
+
         if (!mediaInfo) {
-            logger.info(`用户 ${userId} 在就绪状态发送非媒体消息，已忽略`);
+            logger.info(`用户 ${userId} 在就绪状态发送无法识别的消息，已忽略`);
+            await bot.sendMessage(userId, '❌ 仅支持回复文本、图片、视频、音频、文档', {
+                reply_to_message_id: userMsgId,
+                allow_sending_without_reply: true
+            }).catch(() => { });
             return true;
         }
 
