@@ -69,13 +69,14 @@ function ensureLogDir() {
 }
 
 /**
- * 看门狗日志：控制台与 bot 日志同格式 `[时间] [级别] 内容`，并加 `[看门狗]` 便于区分；
+ * 看门狗日志：与 bot 日志同格式 `[时间] [级别] 内容`，只是多一个 `[看门狗]` 后缀标签
+ * （放在级别之后：`[时间] [INFO] [看门狗] 内容`，与 bot 的 `[时间] [INFO] 内容` 对齐）。
  * 写入 watchdog/watchdog.log 时**不带颜色**（文件里不需要转义码）。
  */
 function wlog(level, message) {
     const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
     const lv = LEVEL_PAINT[level] ? level : 'INFO';
-    const line = `${paint('90', `[${ts}]`)} ${paint('35', '[看门狗]')} ${LEVEL_PAINT[lv](`[${lv}]`)} ${message}`;
+    const line = `${paint('90', `[${ts}]`)} ${LEVEL_PAINT[lv](`[${lv}]`)} ${paint('35', '[看门狗]')} ${message}`;
     // eslint-disable-next-line no-console
     console.log(line);
     try {
@@ -83,7 +84,7 @@ function wlog(level, message) {
             ensureLogDir();
             logStream = fs.createWriteStream(cfg.logFile, { flags: 'a' });
         }
-        logStream.write(`[${ts}] [看门狗] [${lv}] ${message}\n`);
+        logStream.write(`[${ts}] [${lv}] [看门狗] ${message}\n`);
     } catch { }
 }
 

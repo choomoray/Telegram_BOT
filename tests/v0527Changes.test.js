@@ -223,11 +223,14 @@ test('看门狗日志：两个 [] 都上色，格式与 bot 一致（文件里�
     const src = read('watchdog.js');
     // 时间戳用 90（gray），级别按级别上色，看门狗标签用 35（洋红）
     assert.match(src, /paint\('90', `\[\$\{ts\}\]`\)/, '时间戳要上色');
-    assert.match(src, /paint\('35', '\[看门狗\]'\)/, '看门狗标签要上色');
     assert.match(src, /LEVEL_PAINT\[lv\]\(`\[\$\{lv\}\]`\)/, '级别要上色');
-    // 写文件的那一行不含 ANSI
-    assert.match(src, /logStream\.write\(`\[\$\{ts\}\] \[看门狗\] \[\$\{lv\}\] \$\{message\}\\n`\)/,
-        '文件写入不带颜色');
+    assert.match(src, /paint\('35', '\[看门狗\]'\)/, '看门狗标签要上色');
+    // 顺序必须是 [时间] [级别] [看门狗]：与 bot 的 [时间] [级别] 对齐，只是多一个后缀标签
+    assert.match(src, /paint\('90', `\[\$\{ts\}\]`\)\} \$\{LEVEL_PAINT\[lv\]\(`\[\$\{lv\}\]`\)\} \$\{paint\('35', '\[看门狗\]'\)\}/,
+        '级别要排在 [看门狗] 之前');
+    // 写文件的那一行同样顺序，且不含 ANSI
+    assert.match(src, /logStream\.write\(`\[\$\{ts\}\] \[\$\{lv\}\] \[看门狗\] \$\{message\}\\n`\)/,
+        '文件写入顺序一致且不带颜色');
 });
 
 test('logger 本身两个 [] 都在染色范围内（时间灰 + 级别色）', () => {
