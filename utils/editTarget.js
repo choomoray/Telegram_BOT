@@ -13,8 +13,18 @@
  *     只有群组位置的媒体（群里直接收录/发送的）才编辑群组消息。
  *
  * 因此原来的「一律优先群组位置」会让"刚 /send 到频道的消息"去改群里的转发副本而必然失败。
+ *
+ * 另外：编辑的**正文**分两种载体 ——
+ *   - 媒体消息：正文是 caption（photo/video/audio/document）
+ *   - 文本媒体（media_type='text'，/send、/reply 发出的纯文本）：正文是消息 text
+ * 两者都用这里的候选位置 + 逐个降级逻辑，只是最后的编辑调用不同
+ * （caption → editMessageCaption、text → editMessageText，见 editContentWithFallback）。
+ *
+ * 编辑时**严格保留用户发送的文本格式**：把用户消息里的 entities 原样带上（caption 用
+ * `caption_entities`），只有没有 entities 时才退回 HTML / 纯文本（见 utils/textEntities.js）。
  */
 const logger = require('../logger');
+const { normalizeEntities, captionEntities } = require('./textEntities');
 
 /** 位置类错误：换一个位置（频道 ↔ 群组）重试才有意义 */
 const TARGET_ERROR_PATTERNS = [
@@ -96,10 +106,26 @@ async function editCaptionWithFallback(targets, doEdit) {
 }
 
 /**
- * 编辑 caption：优先按 HTML 解析，文本里含 & < > 等字符导致解析失败时降级为纯文本
+ * 编辑 caption：
+ *   1. 用户消息带 entities（加粗/斜体/链接/剧透…）→ **原样带上**（`caption_entities`），
+ *      严格保留用户发送的格式，不用 parse_mode 去解析原文；
+ *   2. 没有 entities → 优先按 HTML 解析，文本里含 & < > 等字符导致解析失败时降级为纯文本；
+ *   3. entities 被 Telegram 拒绝（类型不被 caption 接受等）→ 丢掉 entities 用纯文本重试，正文不能丢。
  * （群组/频道回复编辑与私聊编辑共用，避免因解析错误被误判为"位置不可用"）
  */
-async function editCaptionHtml(bot, chatId, messageId, text) {
+async function editCaptionHtml(bot, chatId, messageId, text, entities) {
+    const list = captionEntities(entities);
+    if (list.length) {
+        try {
+            await bot.editMessageCaption(text, { chat_id: chatId, message_id: messageId, caption_entities: list });
+            return;
+        } catch (err) {
+            const msg = (err && err.message) || '';
+            // 只有"entities 本身不被接受"才降级；"消息改不了/不存在"要留给调用方换位置重试
+            if (!/entit/i.test(msg)) throw err;
+            logger.warn(`caption entities 被拒绝，降级为纯文本: ${msg}`);
+        }
+    }
     try {
         await bot.editMessageCaption(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML' });
     } catch (err) {
@@ -111,9 +137,93 @@ async function editCaptionHtml(bot, chatId, messageId, text) {
     }
 }
 
+/**
+ * 目标正文的载体类型
+ *   'text'    —— 文本媒体（media_type='text'）：改的是消息 text
+ *   'caption' —— 其余（图片/视频/音频/文档）：改的是 caption
+ * @param {Object} mediaDoc media 集合文档（可为空：库外消息按调用方给的 kind）
+ * @returns {'text'|'caption'}
+ */
+function editTargetKind(mediaDoc) {
+    return mediaDoc && mediaDoc.media_type === 'text' ? 'text' : 'caption';
+}
+
+/**
+ * 编辑文本消息正文：
+ *   1. 用户消息带 entities → **原样带上**（`entities`），严格保留用户发送的格式（不用 parse_mode）；
+ *   2. 没有 entities → 优先按 HTML 解析，含特殊字符解析失败时降级为纯文本；
+ *   3. entities 被 Telegram 拒绝 → 丢掉 entities 用纯文本重试，正文不能丢。
+ * （注意：Telegram 不允许把文本消息改成空文本，清空只对 caption 有效）
+ */
+async function editTextHtml(bot, chatId, messageId, text, entities) {
+    const list = normalizeEntities(entities);
+    if (list.length) {
+        try {
+            await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, entities: list });
+            return;
+        } catch (err) {
+            const msg = (err && err.message) || '';
+            if (!/entit/i.test(msg)) throw err;
+            logger.warn(`文本 entities 被拒绝，降级为纯文本: ${msg}`);
+        }
+    }
+    try {
+        await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML' });
+    } catch (err) {
+        if ((err.message || '').includes('parse')) {
+            await bot.editMessageText(text, { chat_id: chatId, message_id: messageId });
+        } else {
+            throw err;
+        }
+    }
+}
+
+/**
+ * 按载体类型编辑消息正文，候选位置逐个降级（与 editCaptionWithFallback 同一套语义）：
+ * 只有「位置类错误」才尝试下一个位置，其它错误立即抛出。
+ * @param {Object} bot
+ * @param {Array<{chatId:number, messageId:number, via:string}>} targets resolveEditTargets 的结果
+ * @param {'text'|'caption'|'auto'} kind - 'auto'：库里没有记录、不知道是媒体还是文本，
+ *        先按 caption 试，Telegram 报"没有 caption"再按文本试（消息链接 / 转发来源定位的库外消息）
+ * @param {string} text 新正文
+ * @param {Array} [entities] 新正文的 Telegram 富文本 entities（严格保留用户发送的格式）
+ * @returns {Promise<{chatId:number, messageId:number, via:string}>} 编辑成功的位置
+ */
+async function editContentWithFallback(bot, targets, kind, text, entities) {
+    return await editCaptionWithFallback(targets, async (t) => {
+        if (kind === 'text') {
+            await editTextHtml(bot, t.chatId, t.messageId, text, entities);
+            return;
+        }
+        // 清空描述：空文本不带 parse_mode / entities（与既有行为一致；Telegram 允许 caption 为空）
+        const clearCaption = async () => {
+            await bot.editMessageCaption('', { chat_id: t.chatId, message_id: t.messageId });
+        };
+        if (kind === 'caption') {
+            if (text === '') await clearCaption();
+            else await editCaptionHtml(bot, t.chatId, t.messageId, text, entities);
+            return;
+        }
+        // auto：先 caption 再 text
+        try {
+            if (text === '') await clearCaption();
+            else await editCaptionHtml(bot, t.chatId, t.messageId, text, entities);
+        } catch (err) {
+            if (/there is no caption in the message/i.test(err.message || '')) {
+                await editTextHtml(bot, t.chatId, t.messageId, text, entities);
+                return;
+            }
+            throw err;
+        }
+    });
+}
+
 module.exports = {
     isEditTargetError,
     resolveEditTargets,
     editCaptionWithFallback,
-    editCaptionHtml
+    editCaptionHtml,
+    editTargetKind,
+    editTextHtml,
+    editContentWithFallback
 };

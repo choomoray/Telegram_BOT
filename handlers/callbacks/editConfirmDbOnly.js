@@ -22,11 +22,19 @@ async function handleEditConfirmDbOnly(query) {
     }
 
     const { targetChatId, targetMessageId, targetGroupId, targetFileUniqueId, targetMediaType } = state;
-    const { isClearing, cleanText } = state.pendingEdit;
+    const { isClearing, cleanText, entities } = state.pendingEdit;
+    const isTextTarget = state.targetKind === 'text';
     const messageCol = getCollection(COLLECTIONS.MESSAGE);
 
     try {
-        if (isClearing) {
+        if (isTextTarget && !isClearing) {
+            // 文本消息（media_type='text'）：正文在 media.media_name，不能写 message 记录
+            // （message 是"媒体描述 + 标签"的载体，写进去会变成其他媒体的注释）；
+            // entities 一并写回，严格保留用户发送的格式
+            const { applyTextMediaEdit } = require('../../utils/textMediaEdit');
+            await applyTextMediaEdit(targetFileUniqueId, cleanText, entities);
+            if (targetGroupId) await syncGroupDeleteByText(targetGroupId);
+        } else if (isClearing) {
             // 清空描述：先清标签（此刻 message 记录还在，才能递减标签使用次数），再删 message 记录
             if (targetFileUniqueId) {
                 const { clearMessageTags } = require('../../utils/tagSync');
@@ -81,6 +89,7 @@ async function handleEditConfirmDbOnly(query) {
             counts: { edits: 1 },
             detail: {
                 via: 'db_only',
+                kind: isTextTarget ? 'text' : 'caption',
                 over48h: true,
                 mediaType: targetMediaType,
                 groupId: targetGroupId,

@@ -2,17 +2,20 @@
 const bot = require('../../bot');
 const logger = require('../../logger');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
-const { findMediaByFileUniqueId } = require('../../db/media');
+const { findMediaByFileUniqueId, findMediaByPosition } = require('../../db/media');
 const { syncGroupDeleteByText } = require('../../db/groupList');
 const { logOperation } = require('../../utils/opLog');
 const { deleteUserState, setUserState } = require('../../states');
 const { extractMediaFromMessage } = require('../../media');
 const { removeLevelSuffix } = require('../../utils/levelExtractor');
+const { resolveMessageOrigin } = require('../../utils/messageLocator');
+const { applyTextMediaEdit } = require('../../utils/textMediaEdit');
+const { projectEntities } = require('../../utils/textEntities');
 const {
     isEditTargetError,
     resolveEditTargets,
-    editCaptionWithFallback,
-    editCaptionHtml
+    editTargetKind,
+    editContentWithFallback
 } = require('../../utils/editTarget');
 
 /**
@@ -26,17 +29,128 @@ function extractChatIdFromGroupId(groupId) {
     return null;
 }
 
+/**
+ * 定位成功后的统一收尾：记下目标位置与正文载体类型（caption / text），
+ * 把"正在查找"提示改成"✅ 找到了"，等用户输入新正文
+ * @param {Object} p
+ *   - mediaDoc：媒体库记录（库外消息为 null）
+ *   - targetKind：'caption'（媒体描述）/ 'text'（文本消息）/ 'auto'（库外，不知道载体）
+ *   - processingMsgId：要改写成结果提示的消息
+ *   - editTargets：显式候选位置（库外消息用；库里有记录时按记录推导）
+ * @returns {Promise<boolean>}
+ */
+async function enterWaitingForText(userId, chatId, state, { mediaDoc, targetKind, processingMsgId, editTargets: givenTargets }) {
+    const targetGroupId = mediaDoc ? mediaDoc.group_id : null;
+    // 获取目标消息位置：媒体可能同时存在「频道源位置」与「群组位置」
+    // （频道 → 讨论群自动转发时，两条都在库里；改频道源消息 Telegram 会自动同步到群里的副本）
+    const editTargets = (Array.isArray(givenTargets) && givenTargets.length)
+        ? givenTargets
+        : (mediaDoc ? resolveEditTargets(mediaDoc, extractChatIdFromGroupId(targetGroupId)) : []);
+
+    if (!editTargets.length) {
+        logger.error(`消息缺少可编辑位置，无法编辑: group_id=${targetGroupId}`);
+        if (processingMsgId) {
+            await bot.editMessageText('❌ 媒体数据异常，无法编辑', {
+                chat_id: chatId,
+                message_id: processingMsgId
+            }).catch(() => { });
+        }
+        deleteUserState(userId);
+        return true;
+    }
+
+    // 保存目标信息（targetChatId/targetMessageId 取首选位置，用于日志与库记录）
+    setUserState(userId, {
+        ...state,
+        step: 'waiting_for_text',
+        targetKind,
+        targetChatId: editTargets[0].chatId,
+        targetMessageId: editTargets[0].messageId,
+        editTargets,
+        targetGroupId,
+        targetFileUniqueId: mediaDoc ? mediaDoc.file_unique_id : null,
+        targetMediaType: mediaDoc ? mediaDoc.media_type : null,
+        processingMsgId,
+        lastActivity: Date.now()
+    });
+
+    // 只有「媒体描述」能清空（/null）；文本消息与库外消息只给「退出」
+    const canClear = targetKind === 'caption';
+    let foundText = '✅ 找到了，请输入修改内容';
+    if (targetKind === 'text') foundText = '✅ 找到了（文本消息），请输入新的文本内容';
+    else if (targetKind === 'auto') foundText = '✅ 找到了（媒体库中无该消息记录，仅修改 Telegram），请输入新的文本内容';
+
+    await bot.editMessageText(foundText, {
+        chat_id: chatId,
+        message_id: processingMsgId,
+        reply_markup: {
+            inline_keyboard: [canClear
+                ? [
+                    { text: '🗑 清空描述', callback_data: 'edit_clear' },
+                    { text: '🚪 退出', callback_data: 'edit_exit' }
+                ]
+                : [{ text: '🚪 退出', callback_data: 'edit_exit' }]]
+        }
+    });
+
+    logger.info(`用户 ${userId} 进入编辑模式第二步，待编辑消息: ${editTargets[0].chatId}/${editTargets[0].messageId} (via=${editTargets[0].via}, kind=${targetKind})`);
+    return true;
+}
+
+/**
+ * 用「消息链接 / 含转发源的消息」定位目标（私聊里不必重新发送媒体）：
+ * 库里能找到记录 → 按记录判定正文载体（媒体 caption / 文本 text）；
+ * 库里没有 → 'auto'（先按 caption 试、Telegram 报没有 caption 再按文本试），只改 Telegram
+ * @returns {Promise<boolean>} 是否已处理
+ */
+async function enterEditByLocatedMessage(userId, chatId, state, msg, origin) {
+    let processingMsg = null;
+    try {
+        processingMsg = await bot.sendMessage(chatId, '🔍 正在查找消息...', {
+            reply_to_message_id: msg.message_id,
+            allow_sending_without_reply: true
+        });
+    } catch (err) {
+        logger.error(`发送查找中消息失败: ${err.message}`);
+        return true;
+    }
+
+    const mediaDoc = await findMediaByPosition(origin.chatId, origin.messageId);
+    logger.info(`用户 ${userId} 通过 ${origin.via} 定位消息: chat=${origin.chatId}/${origin.messageId}, 库中${mediaDoc ? '有' : '无'}记录`);
+
+    if (mediaDoc) {
+        return await enterWaitingForText(userId, chatId, state, {
+            mediaDoc,
+            targetKind: editTargetKind(mediaDoc),
+            processingMsgId: processingMsg.message_id
+        });
+    }
+
+    return await enterWaitingForText(userId, chatId, state, {
+        mediaDoc: null,
+        targetKind: 'auto',
+        processingMsgId: processingMsg.message_id,
+        editTargets: [{ chatId: origin.chatId, messageId: origin.messageId, via: origin.via }]
+    });
+}
+
 async function handleEditMode(msg, state) {
     const userId = msg.from.id;
     const chatId = msg.chat.id;
     const messageId = msg.message_id;
     const messageText = msg.text;
 
-    // 步骤1：等待用户发送媒体
+    // 步骤1：等待用户发送媒体（或消息链接 / 含转发源的消息）
     if (state.step === 'waiting_for_media') {
         const mediaInfo = extractMediaFromMessage(msg);
+
+        // 1a) 不是媒体：可能是「消息链接」或「含转发源的消息」（含机器人发出的文本消息）→ 直接定位
         if (!mediaInfo) {
-            await bot.sendMessage(chatId, '❌ 请发送媒体消息（图片、视频、音频或文档）', {
+            const origin = await resolveMessageOrigin(msg, bot);
+            if (origin) {
+                return await enterEditByLocatedMessage(userId, chatId, state, msg, origin);
+            }
+            await bot.sendMessage(chatId, '❌ 请发送媒体消息（图片、视频、音频或文档），或发送该消息的链接 / 转发该消息', {
                 reply_to_message_id: messageId
             });
             return true;
@@ -67,49 +181,11 @@ async function handleEditMode(msg, state) {
             return true;
         }
 
-        // 获取目标消息位置：媒体可能同时存在「频道源位置」与「群组位置」
-        // （频道 → 讨论群自动转发时，两条都在库里；改频道源消息 Telegram 会自动同步到群里的副本）
-        const targetGroupId = mediaDoc.group_id;
-        const editTargets = resolveEditTargets(mediaDoc, extractChatIdFromGroupId(targetGroupId));
-
-        if (!editTargets.length) {
-            logger.error(`媒体缺少可编辑位置，无法编辑: group_id=${targetGroupId}, message_id=${mediaDoc.message_id}`);
-            await bot.editMessageText('❌ 媒体数据异常，无法编辑', {
-                chat_id: chatId,
-                message_id: processingMsg.message_id
-            });
-            deleteUserState(userId);
-            return true;
-        }
-
-        // 保存目标信息（targetChatId/targetMessageId 取首选位置，用于日志与库记录）
-        setUserState(userId, {
-            ...state,
-            step: 'waiting_for_text',
-            targetChatId: editTargets[0].chatId,
-            targetMessageId: editTargets[0].messageId,
-            editTargets: editTargets,
-            targetGroupId: targetGroupId,
-            targetFileUniqueId: fileUniqueId,
-            targetMediaType: mediaDoc.media_type,
-            processingMsgId: processingMsg.message_id,
-            lastActivity: Date.now()
+        return await enterWaitingForText(userId, chatId, state, {
+            mediaDoc,
+            targetKind: editTargetKind(mediaDoc),
+            processingMsgId: processingMsg.message_id
         });
-
-        // 编辑原消息为“✅ 找到了，请输入修改内容”，并给出「清空描述 / 退出」快捷按钮
-        await bot.editMessageText('✅ 找到了，请输入修改内容', {
-            chat_id: chatId,
-            message_id: processingMsg.message_id,
-            reply_markup: {
-                inline_keyboard: [[
-                    { text: '🗑 清空描述', callback_data: 'edit_clear' },
-                    { text: '🚪 退出', callback_data: 'edit_exit' }
-                ]]
-            }
-        });
-
-        logger.info(`用户 ${userId} 进入编辑模式第二步，待编辑消息: ${editTargets[0].chatId}/${editTargets[0].messageId} (via=${editTargets[0].via})`);
-        return true;
     }
 
     // 步骤2：等待用户输入新文本
@@ -138,19 +214,84 @@ async function handleEditMode(msg, state) {
         const isClearing = (messageText.trim() === 'null');
 
         const cleanText = removeLevelSuffix(messageText);
+        // 正文载体：'text' 文本消息（media_type='text'，改的是消息 text）/ 'caption' 媒体描述 /
+        // 'auto' 库外消息（消息链接、转发来源定位，媒体库里没有记录，只能直接改 Telegram）
+        const kind = (state.targetKind === 'text' || state.targetKind === 'auto') ? state.targetKind : 'caption';
+        const hasRecord = !!targetFileUniqueId;
+        // 严格保留用户发送的格式：把这条消息的 entities 带上（落库用 cleanText，偏移量各平移一次）
+        const msgEntities = msg.entities;
+        const dbEntities = projectEntities(msgEntities, msg.text, cleanText);
+
+        // 文本消息不能清空：Telegram 不允许把文本消息改成空文本（保持状态，等用户重新输入）
+        if (kind === 'text' && isClearing) {
+            await bot.sendMessage(chatId, '❌ 文本消息无法清空（Telegram 不允许空文本），请直接发送新的文本内容', {
+                reply_to_message_id: messageId
+            });
+            return true;
+        }
 
         try {
-            // 先尝试编辑 Telegram 消息的 caption（可能会因超时 / 位置不是机器人发的而失败）
-            const edited = await editCaptionWithFallback(editTargets, async (t) => {
-                if (isClearing) {
-                    await bot.editMessageCaption('', {
-                        chat_id: t.chatId,
-                        message_id: t.messageId
-                    });
-                } else {
-                    await editCaptionHtml(bot, t.chatId, t.messageId, messageText);
-                }
-            });
+            // 1) 先编辑 Telegram 正文：文本消息改 text、媒体改 caption
+            //    （可能会因超时 / 位置不是机器人发的而失败）
+            const edited = await editContentWithFallback(bot, editTargets, kind, isClearing ? '' : messageText, msgEntities);
+
+            // 2) 库外消息（消息链接 / 转发来源定位，媒体库里没有记录）：只改 Telegram，数据库无可更新
+            if (!hasRecord) {
+                await bot.sendMessage(chatId, '✅ 修改完毕（媒体库中无该消息记录，仅修改了 Telegram 消息）', {
+                    reply_to_message_id: messageId
+                });
+                deleteUserState(userId);
+                logOperation({
+                    action: 'media_edit',
+                    source: 'private',
+                    userId,
+                    chatId,
+                    messageId,
+                    target: { type: 'media', id: 'unknown' },
+                    counts: { edits: 1 },
+                    detail: {
+                        via: 'private_located_edit',
+                        kind,
+                        targetChatId: edited.chatId,
+                        targetMessageId: edited.messageId,
+                        editVia: edited.via,
+                        after: cleanText,
+                        noRecord: true
+                    }
+                }).catch(() => { });
+                logger.info(`用户 ${userId} 编辑库外消息 ${edited.chatId}/${edited.messageId} (via=${edited.via}, kind=${kind})`);
+                return true;
+            }
+
+            // 3) 文本消息（media_type='text'）：正文存在 media.media_name（顺带同步可能存在的 message 记录）
+            if (kind === 'text') {
+                await applyTextMediaEdit(targetFileUniqueId, cleanText, dbEntities);
+                await bot.sendMessage(chatId, '✅ 修改完毕', {
+                    reply_to_message_id: messageId
+                });
+                deleteUserState(userId);
+                logOperation({
+                    action: 'media_edit',
+                    source: 'private',
+                    userId,
+                    chatId,
+                    messageId,
+                    target: { type: 'media', id: targetFileUniqueId },
+                    counts: { edits: 1 },
+                    detail: {
+                        via: 'private_edit',
+                        kind: 'text',
+                        mediaType: targetMediaType,
+                        groupId: targetGroupId,
+                        targetChatId: edited.chatId,
+                        targetMessageId: edited.messageId,
+                        editVia: edited.via,
+                        after: cleanText
+                    }
+                }).catch(() => { });
+                logger.info(`用户 ${userId} 成功编辑文本消息 ${edited.chatId}/${edited.messageId} (via=${edited.via})`);
+                return true;
+            }
 
             // 清空描述 = 移除该 message 的标签：必须先清标签（此刻 message 记录还在，才能递减标签使用次数），
             // 再删 message 记录；编辑描述则**保留已有标签**（只补充新文本匹配到的）
@@ -226,6 +367,7 @@ async function handleEditMode(msg, state) {
                 counts: { edits: 1 },
                 detail: {
                     via: 'private_edit',
+                    kind: 'caption',
                     mediaType: targetMediaType,
                     groupId: targetGroupId,
                     targetChatId: edited.chatId,
@@ -239,13 +381,32 @@ async function handleEditMode(msg, state) {
         } catch (err) {
             // 判断是否为"消息无法编辑"类错误（超过 48 小时 / 不是机器人发送的消息等）
             const isEditDenied = isEditTargetError(err);
+            const what = kind === 'text' ? '文本' : '描述';
 
-            if (isEditDenied) {
+            if (isEditDenied && !hasRecord) {
+                // 库外消息又改不了：不是机器人发的 / 只是频道转发的副本（Telegram 只允许改机器人自己的消息）
+                logger.warn(`编辑库外消息失败: ${err.message}`);
+                logOperation({
+                    action: 'media_edit',
+                    result: 'fail',
+                    source: 'private',
+                    userId,
+                    chatId,
+                    messageId,
+                    target: { type: 'media', id: 'unknown' },
+                    detail: { via: 'private_located_edit', kind, over48h: false, noRecord: true },
+                    error: err.message
+                }).catch(() => { });
+                await bot.sendMessage(chatId, '❌ 无法修改该消息（不是机器人发送的，或只是频道转发的副本）；请在原群组/频道里修改它', {
+                    reply_to_message_id: messageId
+                });
+                deleteUserState(userId);
+            } else if (isEditDenied) {
                 // 保存待执行的数据操作到状态，询问用户
                 setUserState(userId, {
                     ...state,
                     step: 'confirm_db_only',
-                    pendingEdit: { isClearing, cleanText },
+                    pendingEdit: { isClearing, cleanText, entities: dbEntities },
                     lastActivity: Date.now()
                 });
 
@@ -257,7 +418,7 @@ async function handleEditMode(msg, state) {
                 };
 
                 await bot.editMessageText(
-                    `⚠️ 消息已超过编辑时效（48小时），无法修改 Telegram 上的描述。\n是否只更改数据库中的描述？`,
+                    `⚠️ 消息已超过编辑时效（48小时），无法修改 Telegram 上的${what}。\n是否只更改数据库中的${what}？`,
                     {
                         chat_id: chatId,
                         message_id: processingMsgId,
@@ -275,8 +436,8 @@ async function handleEditMode(msg, state) {
                     userId,
                     chatId,
                     messageId,
-                    target: { type: 'media', id: targetFileUniqueId },
-                    detail: { via: 'private_edit', over48h: !!isEditDenied, mediaType: targetMediaType },
+                    target: { type: 'media', id: targetFileUniqueId || 'unknown' },
+                    detail: { via: 'private_edit', kind, over48h: !!isEditDenied, mediaType: targetMediaType },
                     error: err.message
                 }).catch(() => { });
                 await bot.sendMessage(chatId, '❌ 修改失败，请稍后重试', {
@@ -318,10 +479,22 @@ async function handleEditMode(msg, state) {
         const messageCol = getCollection(COLLECTIONS.MESSAGE);
         const isClearing = (messageText.trim() === 'null');
         const cleanText = removeLevelSuffix(messageText);
+        // 正文载体：'text' 文本消息（改消息 text）/ 'caption' 媒体描述 / 'auto' 库外消息
+        const kind = (state.targetKind === 'text' || state.targetKind === 'auto') ? state.targetKind : 'caption';
+        const hasRecord = !!targetFileUniqueId;
+        // 严格保留管理员发送的格式：把这条文本消息的 entities 带上（落库用 cleanText，偏移量各平移一次）
+        const msgEntities = msg.entities;
+        const dbEntities = projectEntities(msgEntities, msg.text, cleanText);
         const { scheduleDelete } = require('../groupMessageHandlers');
         const { reMatchMessageTags, clearMessageTags } = require('../../utils/tagSync');
 
         const updateDbAndTags = async (target) => {
+            if (!hasRecord) return false; // 库外消息：只改 Telegram，数据库无可更新
+            // 文本消息：正文在 media.media_name（顺带同步可能存在的 message 记录）
+            if (kind === 'text') {
+                await applyTextMediaEdit(targetFileUniqueId, cleanText, dbEntities);
+                return true;
+            }
             // 清空描述：先清标签（此刻 message 记录还在，才能递减标签使用次数），再删记录；
             // 编辑描述：保留已有标签，只补充新文本匹配到的标签（在 updateMessageDb 之后，确保记录存在）
             if (isClearing) {
@@ -334,6 +507,7 @@ async function handleEditMode(msg, state) {
             if (!isClearing && cleanText) {
                 await reMatchMessageTags(targetFileUniqueId, cleanText);
             }
+            return true;
         };
 
         const scheduleAllCleanup = (extraMsgId) => {
@@ -343,22 +517,27 @@ async function handleEditMode(msg, state) {
             scheduleDelete(notifyChat, messageId); // 管理员输入的这条文本
         };
 
-        try {
-            // 先尝试编辑 Telegram 消息的 caption（HTML 解析失败降级纯文本；位置不可用则换另一个位置）
-            const edited = await editCaptionWithFallback(editTargets, async (t) => {
-                if (isClearing) {
-                    await bot.editMessageCaption('', {
-                        chat_id: t.chatId,
-                        message_id: t.messageId
-                    });
-                } else {
-                    await editCaptionHtml(bot, t.chatId, t.messageId, messageText);
-                }
+        // 文本消息不能清空：Telegram 不允许把文本消息改成空文本（保持状态，等管理员重新输入）
+        if (kind === 'text' && isClearing) {
+            const errMsg = await bot.sendMessage(notifyChat, '❌ 文本消息无法清空（Telegram 不允许空文本），请直接发送新的文本内容', {
+                reply_to_message_id: messageId,
+                allow_sending_without_reply: true
             });
+            scheduleAllCleanup(errMsg.message_id);
+            return true;
+        }
+
+        try {
+            // 1) 先编辑 Telegram 正文：文本消息改 text、媒体改 caption
+            //    （HTML 解析失败降级纯文本；位置不可用则换另一个位置）
+            const edited = await editContentWithFallback(bot, editTargets, kind, isClearing ? '' : messageText, msgEntities);
 
             await updateDbAndTags(edited);
 
-            const okMsg = await bot.sendMessage(notifyChat, isClearing ? '✅ 已清空描述' : '✅ 修改完毕', {
+            const okText = isClearing
+                ? '✅ 已清空描述'
+                : (hasRecord ? '✅ 修改完毕' : '✅ 修改完毕（媒体库中无该消息记录，仅修改了 Telegram 消息）');
+            const okMsg = await bot.sendMessage(notifyChat, okText, {
                 reply_to_message_id: messageId,
                 allow_sending_without_reply: true
             });
@@ -369,10 +548,11 @@ async function handleEditMode(msg, state) {
                 source: 'group',
                 userId,
                 chatId: notifyChat,
-                target: { type: 'media', id: targetFileUniqueId },
+                target: { type: 'media', id: targetFileUniqueId || 'unknown' },
                 counts: { edits: 1 },
                 detail: {
                     via: 'group_two_step',
+                    kind,
                     groupId: targetGroupId,
                     targetChatId: edited.chatId,
                     targetMessageId: edited.messageId,
@@ -382,11 +562,32 @@ async function handleEditMode(msg, state) {
                     after: cleanText || undefined
                 }
             }).catch(() => { });
-            logger.info(`用户 ${userId} 群组快捷编辑两步完成: ${edited.chatId}/${edited.messageId} (via=${edited.via})`);
+            logger.info(`用户 ${userId} 群组快捷编辑两步完成: ${edited.chatId}/${edited.messageId} (via=${edited.via}, kind=${kind})`);
         } catch (err) {
             const isEditDenied = isEditTargetError(err);
+            const what = kind === 'text' ? '文本' : '描述';
 
-            if (isEditDenied) {
+            if (isEditDenied && !hasRecord) {
+                // 库外消息又改不了：不是机器人发的 / 只是频道转发的副本
+                logger.warn(`群组快捷编辑两步失败（库外消息不可编辑）: ${err.message}`);
+                logOperation({
+                    action: 'media_edit',
+                    source: 'group',
+                    result: 'fail',
+                    userId,
+                    chatId: notifyChat,
+                    target: { type: 'media', id: 'unknown' },
+                    detail: { via: 'group_two_step', kind, over48h: false, noRecord: true },
+                    error: err.message
+                }).catch(() => { });
+                const failMsg = await bot.sendMessage(
+                    notifyChat,
+                    '❌ 无法修改该消息（不是机器人发送的，或只是频道转发的副本）；请在原频道/群组里回复它再试',
+                    { reply_to_message_id: messageId, allow_sending_without_reply: true }
+                );
+                scheduleAllCleanup(failMsg.message_id);
+                deleteUserState(userId);
+            } else if (isEditDenied) {
                 // 超 48 小时 / 该位置不是机器人发的：仅更新数据库 + 重算标签
                 // （库记录位置沿用首选位置，与 message 记录的频道源位置一致）
                 try {
@@ -400,13 +601,14 @@ async function handleEditMode(msg, state) {
                         counts: { edits: 1 },
                         detail: {
                             via: 'group_two_step',
+                            kind,
                             groupId: targetGroupId,
                             over48h: true,
                             clearing: isClearing,
                             after: cleanText || undefined
                         }
                     }).catch(() => { });
-                    const warnMsg = await bot.sendMessage(notifyChat, '⚠️ 消息已超过编辑时效（48小时），已仅更新数据库中的描述', {
+                    const warnMsg = await bot.sendMessage(notifyChat, `⚠️ 消息已超过编辑时效（48小时），已仅更新数据库中的${what}`, {
                         reply_to_message_id: messageId,
                         allow_sending_without_reply: true
                     });

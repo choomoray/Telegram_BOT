@@ -42,6 +42,12 @@ async function handleEditClear(query) {
         return;
     }
 
+    // 文本消息（media_type='text'）没有 caption 可清空：Telegram 也不允许把文本消息改成空文本
+    if (state.targetKind === 'text') {
+        await bot.answerCallbackQuery(query.id, { text: '❌ 文本消息无法清空，请直接发送新的文本内容' });
+        return;
+    }
+
     const editTargets = resolveTargets(state);
     const messageCol = getCollection(COLLECTIONS.MESSAGE);
     const { updateMessageDb } = require('../modes/editMode');

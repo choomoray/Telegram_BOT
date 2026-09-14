@@ -513,6 +513,39 @@ function generateGroupIdFromMessage(msg) { ... }
 
 `transportLinkUrl({ chat_id, url })`：有 http(s) 链接就用它；否则用 chat_id 推导 `https://t.me/c/<内部ID>`——**仅当形如 `-100` + 至少 9 位**（真正的超级群/频道）才推导，避免 `-1002` 这类普通群被误判成「频道 2」。控制台与机器人共用，保证跳转链接口径一致。
 
+#### messageLocator.js — 把一条消息定位成可编辑目标
+
+`/edit` 之外的三条定位路径共用（私聊消息链接 / 转发来源、群组里被回复的频道转发副本）：
+
+| 导出 | 功能 |
+|------|------|
+| `parseMessageLink(text)` | 解析消息链接（纯函数）：`t.me/c/<内部ID>/<消息ID>` → `chatId=-100<内部ID>`；`t.me/<公开用户名>/<消息ID>` → 只给用户名（需 `getChat` 解析）；邀请链接等非消息链接返回 null |
+| `resolveUsernameChatId(username, bot)` | 公开用户名 → chat_id（`getChat('@name')`，机器人无权访问时返回 null） |
+| `resolveMessageOrigin(msg, bot)` | 从一条消息解析原始位置：`forward_origin`（频道帖带 `message_id`）→ 旧版 `forward_from_chat` + `forward_from_message_id` → 文本/说明里的消息链接 |
+
+> **Telegram 限制：** 从**群组**转发的消息（`MessageOriginChat`）**不带原消息 ID**，无法定位 —— 这时请改用消息链接。
+
+#### textMediaEdit.js — 文本媒体的正文修改
+
+`applyTextMediaEdit(fileUniqueId, cleanText, entities)`：改写 `media.media_name` 与 `media_entities`（**严格保留用户发送的格式**；新正文没有格式时清掉旧 entities），若该 `file_unique_id` 上存在 `message` 记录（历史数据 / 控制台补过描述）再同步它的 `text` 与标签。群组回复 `/edit`、私聊 `/edit`、控制台改描述共用。
+
+#### textEntities.js — 编辑时保留用户发送的文本格式（纯函数）
+
+Telegram 的富文本是「纯文本 + entities」（加粗 / 斜体 / 下划线 / 删除线 / 剧透 / 代码 / 链接 / 自定义 emoji…），
+offset/length 单位是 UTF-16 code unit（与 JS 字符串下标一致）。**保留格式的唯一正确做法是把用户消息里的 entities 原样带上**，
+不要用 `parse_mode` 去解析原文（用户写的 `<3`、`*星号*` 会被吃掉甚至报错）——与 `/send`、`/reply` 的文本转发同一套思路（`utils/forwardText.js`）。
+
+| 导出 | 功能 |
+|------|------|
+| `normalizeEntities(entities)` | 校验 / 规范化：丢掉 offset/length 非法的项，按位置排序，不改动入参 |
+| `shiftEntities(entities, start, length)` | 已知截取位置时按**精确下标**平移 / 裁剪（正文与命令前缀字符重合也不会错位，如 `/edit@SexFavoritesBOT BOT`） |
+| `projectEntities(entities, rawText, newText)` | 正文被**截取**后（去 `/edit@Bot ` 前缀、去首尾空白、去 `#X` 后缀）平移 / 裁剪 entities；命令自身的 `bot_command` 被丢掉，越界项裁掉或丢弃；`newText` 不是 `rawText` 子串时返回空数组（宁可丢格式，也不给出错位的实体） |
+| `captionEntities(entities)` | 过滤出 caption 允许的类型（`bold/italic/underline/strikethrough/spoiler/code/pre/text_link/text_mention/custom_emoji/blockquote`）；`mention`/`hashtag`/`url`/`bot_command` 等自动识别类型在 caption 里会被 Telegram 拒绝，过滤掉即可（客户端仍会自动渲染成链接） |
+
+> **编辑正文时的两条路径**（`utils/editTarget.js`）：有 entities → `editMessageText({ entities })` /
+> `editMessageCaption({ caption_entities })`（不用 parse_mode）；没有 entities → 退回原来的「HTML 解析 → 纯文本」；
+> entities 被 Telegram 拒绝时丢掉 entities 用纯文本重试，保证正文一定写得进去。
+
 #### tagUi.js — 标签按钮键盘（两区版面）
 `/send` 打标签面板与 `/tag` 标签模式共用：
 
@@ -666,6 +699,8 @@ module.exports = {
 | `findMediaByGroupId(groupId)` | 按 group_id 查询所有媒体 |
 | `getMaxSubgroup(groupId)` | 获取指定组的最大子组编号 |
 | `deleteMediaByFileUniqueId(fileUniqueId)` | 按 file_unique_id 删除 |
+| `findMediaByPosition(chatId, messageId)` | 按「聊天 + 消息 ID」反查媒体（群组位置 / 频道位置 / 旧数据顶层位置，以及文本媒体的 `text:<chatId>:<messageId>`）——回复 `/edit`、消息链接、转发来源定位共用 |
+| `updateTextMediaContent(fileUniqueId, text)` | 改写文本媒体的正文（`media_name`，并清掉与新正文错位的旧 `media_entities`） |
 | `updateMediaPassword(fileUniqueId, pwd)` | 更新媒体密码 |
 | `buildMediaLocation(chatId, messageId, chatType)` | 按聊天类型构建媒体位置（频道 → `channel`，群组 → `group`） |
 
@@ -675,6 +710,7 @@ module.exports = {
 > **`media_name`（文件/音乐名称）：** 收录时**只对文档与音频**写入（图片、视频不写）——文档取 Telegram 的 `file_name`，音频优先 `file_name`、没有则用「标题 - 艺术家」。它是"按文件名搜索"的唯一数据来源（见 `handlers/queryHandler.js` 的第二个数据源；WebUI 媒体库的搜索同样会匹配它）。
 >
 > **文本媒体（`media_type: 'text'`）：** `/send`、`/reply` 发出的纯文本通过 `media.recordTextMedia()` 收录成一条 media：文本内容存在 `media_name`（"借用"文件名那个字段），原消息的 `entities` 存在 `media_entities` 以**保留 Telegram 文本格式**；文本没有 Telegram file，`file_unique_id` 用 `text:<chatId>:<messageId>` 造唯一值。不写 `message` 集合（message 是"描述 + 标签"的载体），但 `group_list.is_delete` 会把文本媒体视为"有内容"，不会被 `/clean` 清掉。
+> 它的正文**也能改**（改的是消息 `text`、落库改 `media_name`，见 `utils/textMediaEdit.js`）：群组/频道里管理员回复该消息发 `/edit 新文本`，或私聊 `/edit` 后发消息链接 / 转发该消息。文本消息**不能清空**（Telegram 不允许空文本）。
 
 #### db/message.js — 消息记录
 
@@ -968,7 +1004,7 @@ for (const file of commandFiles) {
 | `/clean` | clean.js | 数据库清理模式 | 扫描空数据的 group_list，批量删除 |
 | `/delete` | delete.js | 删除单一媒体 | 进入 delete 模式，等待用户发送媒体或链接 |
 | `/delete_group` | deleteGroup.js | 删除整个媒体组 | 进入 deleteGroup 模式，等待用户操作 |
-| `/edit` | edit.js | 编辑消息文本 | 进入 edit 模式，等待用户选择要编辑的消息；群组/频道中管理员**回复**一条媒体消息并发送 `/edit [新描述]`（也支持 `/edit@机器人用户名 [新描述]`）可跳过定位直接修改该媒体（带文字一步完成；不带文字时群组内等管理员下一条文本；频道仅支持带文字）。修改后 1 分钟自动删除全部操作记录（机器人提示 + 管理员的命令消息） |
+| `/edit` | edit.js | 编辑消息文本 | 进入 edit 模式：① 发送要编辑的媒体（图片/视频/音频/文档）；② 或**发送消息链接**（`t.me/c/...`、`t.me/<用户名>/...`）**/ 转发该消息**（含转发来源）直接定位；③ 群组/频道中管理员**回复**一条消息（媒体**或机器人发出的文本消息**）并发送 `/edit [新描述]`（也支持 `/edit@机器人用户名 [新描述]`）可跳过定位直接修改（带文字一步完成；不带文字时群组内等管理员下一条文本；频道仅支持带文字）。媒体改 caption、文本消息改消息 `text`，**新正文一律带上管理员这条消息自己的 entities（严格保留加粗/斜体/链接等格式）**，库外消息只改 Telegram；文本消息不支持 `/null` 清空。修改后 1 分钟自动删除全部操作记录（机器人提示 + 管理员的命令消息） |
 | `/exit` | exit.js | 退出当前模式 | 调用 deleteUserState 清理状态 |
 | `/help` | help.js | 显示命令按钮 | 发送带所有命令的内联键盘 |
 | `/log` | log.js | 操作统计 | 从 log 集合聚合统计并展示 |
@@ -1336,7 +1372,7 @@ handleGroupEditedMessage()
 | `/mark` | 标记模式（单选题：发媒体正常标记 / 「📝 仅记录」只记录，完成即退出） | modes/markMode.js |
 | `/send` | 发送模式（选择群组/频道发送并收录；发送后先显示"正在发送中"再刷新为结果，可打标签——打标签面板为两区版面：上区=已有标签（点击移除）、下区=标签库（置顶在前、点击添加）；媒体组**描述先行带上**（发送时先内联带在第一条上，任何副本/自动转发都带描述），发完再还原到原本的媒体位置并对该媒体打标签；发文本同样收录为 `media_type='text'`） | modes/sendMode.js |
 | `/tag` | 标签模式（修改消息标签 / 编辑标签：添加、改名、删除、固定置顶位置，同步 message）。标签按 message 独立：新增/修改文本只打该条 message 的标签；修改消息标签时只作用于定位的那条媒体，并把组内所有带文本 message 的标签分别列出。**添加标签为两区版面**：上区=已有标签（点击移除），下区=标签库（置顶标签在最前，点击添加；已打上的非置顶标签不再重复显示，已打上的置顶标签仍保留在下区） | modes/tagMode.js |
-| `/edit` | 编辑消息文本或清空（私聊定位后编辑；群组/频道中管理员回复一条媒体消息并发送 `/edit [新描述]` 可跳过定位直接修改，支持 `/edit@机器人用户名`，操作记录 1 分钟后自动删除） | modes/editMode.js、handlers/groupReplyEdit.js |
+| `/edit` | 编辑消息正文（媒体改 caption、**机器人发出的文本消息改消息 text**；私聊可发媒体、**消息链接**或**转发来源**定位；群组/频道中管理员回复一条消息并发送 `/edit [新描述]` 可跳过定位直接修改，支持 `/edit@机器人用户名`，操作记录 1 分钟后自动删除；文本消息不能 `/null` 清空） | modes/editMode.js、handlers/groupReplyEdit.js、utils/messageLocator.js |
 | `/log` | 查看操作统计 | commands/log.js |
 | `/help` | 显示命令列表按钮 | commands/help.js |
 | `/setting` | 全局设置面板 | modes/settingMode.js |
@@ -1362,7 +1398,7 @@ handleGroupEditedMessage()
 | 媒体自动收录 | 群组/频道媒体自动入库（去重），带文本的媒体同步写入 message |
 | 频道转发双位置 | 频道转发至群组的媒体（含 `is_automatic_forward` 自动转发识别）在 message 记录新增 `channel_forward`、media 记录写入 `group`/`channel` 双位置，回复时可选回复在频道或群组；**`/send` 刚把同一批媒体发给频道时**（Telegram 会立刻自动转发到关联讨论群），库里可能还没落库 → 先按 `utils/inflight.js` 的登记短暂等落库完成再收录，**不另建"无描述、可清理"的影子媒体组**，只补一个群组位置 |
 | 编辑同步 | 消息编辑/删除后自动同步数据库 |
-| 回复 `/edit` 快捷编辑 | 管理员回复一条媒体消息并发送 `/edit [新描述]`（支持 `/edit@机器人用户名`）可直接修改该媒体：改 Telegram caption + 同步数据库 + 按新文本重算该媒体标签；超 48 小时自动降级为仅更新数据库；**1 分钟后自动删除全部操作记录**（机器人提示 + 管理员的命令消息） |
+| 回复 `/edit` 快捷编辑 | 管理员回复一条消息并发送 `/edit [新描述]`（支持 `/edit@机器人用户名`）可直接修改该消息：媒体改 Telegram caption、**机器人发出的文本消息改消息 text**（正文同步进 `media.media_name`）+ 同步数据库 + 按新文本重算该媒体标签；**新正文严格保留管理员发来的格式**（entities 原样带上，含 `/edit@Bot ` 前缀的偏移平移；没有格式时才退回 HTML/纯文本）；被回复的是**频道帖的自动转发副本**时按转发来源定位频道源消息再改；库里没有记录的消息也允许改（只改 Telegram）；文本消息不能 `/null` 清空；超 48 小时自动降级为仅更新数据库；**1 分钟后自动删除全部操作记录**（机器人提示 + 管理员的命令消息） |
 | 关键字查询 | 管理员在群组中发送文本自动搜索 |
 | 成员记录 | 加入/退出自动记录，可配置封禁策略 |
 | 入群审批 | 关联频道的用户自动通过加群申请 |
@@ -1422,7 +1458,54 @@ handleGroupEditedMessage()
 
 ## 版本历史
 
-### v0.5.30（当前）
+### v0.5.31（当前）
+- **机器人发出的「文本消息」也能改描述**（此前 `/edit` 只认图片/视频/音频/文档，回复文本消息会得到
+  "⚠️ 请回复一条媒体消息再使用 /edit"）。文本消息就是 `media_type='text'`（见「文本媒体」一节）：
+  它的**正文是消息 `text`**、库里存在 `media.media_name`，与媒体 caption 不是一回事。现在：
+  - **群组/频道：回复该消息 + `/edit 新文本`**（支持 `/edit@机器人用户名`）一步直改；
+    不带文字时（仅群组）提示"请发送新的文本内容"，管理员下一条文本即新正文。
+    被回复的是**频道帖的自动转发副本**时，按转发来源（`forward_origin` / 旧版 `forward_from_chat`
+    + `forward_from_message_id`）定位**频道源消息**再改 —— 改频道源消息 Telegram 会自动同步到群里的副本。
+  - **私聊 `/edit`：发消息链接或含转发源的消息**即可定位，不必重新发送媒体：
+    `t.me/c/<内部ID>/<消息ID>`（私有频道/超级群，内部 ID 前补 `-100`）、
+    `t.me/<公开用户名>/<消息ID>`（用 `getChat` 解析 chat_id）、转发来的频道帖（带 `message_id`）。
+  - **严格保留管理员发送的文本格式**（`utils/textEntities.js`）：新正文一律带上**这条消息自己的
+    entities**（加粗 / 斜体 / 下划线 / 删除线 / 剧透 / 代码 / 链接 / 自定义 emoji …），
+    文本消息用 `entities`、媒体描述用 `caption_entities`，**不再用 `parse_mode` 解析原文**
+    （与 `/send`、`/reply` 的文本转发同一套思路：用户写的 `<3`、`*星号*` 不会被吃掉）。
+    正文是从命令消息里**截取**出来的（去掉 `/edit@Bot ` 前缀 / 首尾空白 / `#X` 后缀），
+    entities 的偏移量会跟着平移、越界的裁掉（`shiftEntities` 按**精确下标**平移，不按内容猜；
+    `projectEntities` 负责落库文本对齐），命令自身的 `bot_command` 自然被丢掉；
+    caption 装不下的自动识别类型（`mention`/`hashtag`/`url`/`bot_command`…）会先过滤掉
+    （客户端本来就会把它们渲染成链接）。**新正文没有格式时才退回**原来的「HTML 解析 → 纯文本」，
+    entities 被 Telegram 拒绝时也会丢掉 entities 用纯文本重试，保证正文一定写得进去。
+    文本媒体的格式一并写回 `media.media_name` + `media_entities`（查看媒体组重新发出时不丢格式）。
+  - **修改 = 改 Telegram 消息 `text`（有 entities 时原样带上，否则 HTML 解析失败自动降级纯文本）
+    + 把新正文写回 `media.media_name`（清掉与新正文错位的旧 `media_entities`）+
+    若该 `file_unique_id` 上存在 `message` 记录则同步它的 `text` 与标签；
+    超 48 小时 / 位置不是机器人发的，仍按老规矩降级为"仅更新数据库"。
+  - 库里**没有记录**的消息（消息链接/转发来源指向未收录消息、或群里的历史提示消息）也允许改：
+    只改 Telegram，提示里说明"媒体库中无该消息记录"。
+  - **文本消息不能清空**：Telegram 不允许把文本消息改成空文本，`/edit null`、私聊的「🗑 清空描述」
+    按钮与私聊两步里的 `/null` 都会被明确拒绝（保持状态让管理员重新输入）。
+  - 控制台同步：媒体详情里文本媒体的"描述"就是这条文本本身（编辑框预填 `media.name`），
+    保存走 `media_name` + `editMessageText`（不再凭空建 `message` 记录），清空同样被拒绝。
+- **新增 `utils/messageLocator.js`**：`parseMessageLink` / `resolveUsernameChatId` / `resolveMessageOrigin`
+  —— "消息链接 / 转发来源"定位的统一入口（纯函数 + getChat 解析）。
+  **新增 `utils/textMediaEdit.js`**：`applyTextMediaEdit` —— 文本媒体正文修改的统一落库入口。
+  **新增 `utils/textEntities.js`**：`normalizeEntities` / `shiftEntities` / `projectEntities` / `captionEntities`
+  —— 编辑时**严格保留用户发送的文本格式**（entities 精确平移裁剪 + caption 类型过滤）。
+  **`db/media.js` 新增** `findMediaByPosition(chatId, messageId)`（群组/频道/顶层位置 + 文本媒体位置 ID）
+  与 `updateTextMediaContent(fileUniqueId, text, entities)`。
+- 测试：新增 `tests/editTextMedia.test.js`（24 项：群组回复一步/两步、`/null` 拒绝、库外编辑、
+  消息链接、转发来源、公开用户名链接、auto 降级改 text、媒体两步清空回归、**entities 严格保留
+  （前缀精确平移 / 与机器人用户名重合 / 多余空白 / `#X` 后缀对齐 / caption_entities 过滤 /
+  被拒绝时降级纯文本 / 无 entities 时仍走 HTML）**、无法解析的群组转发、
+  `parseMessageLink` / `resolveMessageOrigin`）、
+  `tests/textEntities.test.js`（10 项纯函数），`tests/webui.test.js` 增加控制台改文本媒体描述的用例；
+  全量 **478 项通过**。
+
+### v0.5.30
 - **描述（注释）必须随相册一起发出去**（`media.js` + `handlers/modes/sendMode.js`）：Telegram 只有
   **第一条**媒体带的注释会随相册一起发出，而**频道帖 → 关联讨论群**的自动转发是在**发送那一刻**
   复制消息的。旧做法是"描述不在第一条 → 先不带注释发出，发完再 `editMessageCaption` 补上"，

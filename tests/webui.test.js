@@ -1665,6 +1665,43 @@ test('POST /api/media/description：未知媒体 404、缺参 400、可跳过 Te
     });
 });
 
+test('POST /api/media/description：文本媒体改 media_name + 消息 text（不写 message 记录），清空被拒绝', async () => {
+    const data = makeDomainData();
+    data.group_list.push({ _id: '0015', group_id: '-100_5', is_group: 1, is_delete: 0, mark: 0, last_mark_time: null });
+    data.media.push({
+        _id: 'mt', group_id: '-100_5', subgroup: 1, media_type: 'text', file_id: null,
+        file_unique_id: 'text:-100:55', media_name: '原本的文本', group: { chat_id: -100, message_id: 55 }
+    });
+    const deps = makeMemoryDeps(data);
+    const textCalls = [];
+    let captionCalls = 0;
+    deps.editText = async (chatId, messageId, text) => { textCalls.push({ chatId, messageId, text }); return true; };
+    deps.editCaption = async () => { captionCalls++; return true; };
+
+    await withDomain(deps, async (b, auth) => {
+        const r = await domainReq(b, auth, '/api/media/description', {
+            method: 'POST',
+            body: JSON.stringify({ fileUniqueId: 'text:-100:55', text: '改后的文本' })
+        });
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(r.body.telegramEdited, true);
+        assert.deepStrictEqual(textCalls, [{ chatId: -100, messageId: 55, text: '改后的文本' }], '文本消息用 editMessageText');
+        assert.strictEqual(captionCalls, 0, '文本消息没有 caption 可改');
+        assert.strictEqual(deps.getCollection('media').docs.find(m => m.file_unique_id === 'text:-100:55').media_name, '改后的文本');
+        assert.ok(!deps.getCollection('message').docs.some(m => m.file_unique_id === 'text:-100:55'),
+            '文本媒体不写 message 记录（否则会被当成其他媒体的注释）');
+
+        // 清空被拒绝：Telegram 不允许把文本消息改成空文本
+        const r2 = await domainReq(b, auth, '/api/media/description', {
+            method: 'POST',
+            body: JSON.stringify({ fileUniqueId: 'text:-100:55', text: '   ' })
+        });
+        assert.strictEqual(r2.status, 400);
+        assert.match(r2.body.error, /不能清空/);
+        assert.strictEqual(deps.getCollection('media').docs.find(m => m.file_unique_id === 'text:-100:55').media_name, '改后的文本');
+    });
+});
+
 // ---------------- 用户增删改 ----------------
 
 test('POST /api/users/create：校验 id、拒绝重复、写入默认字段', async () => {

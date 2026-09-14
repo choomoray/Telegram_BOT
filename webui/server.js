@@ -33,6 +33,7 @@ const { reMatchMessageTags, clearMessageTags } = require('../utils/tagSync');
 const { removeLevelSuffix } = require('../utils/levelExtractor');
 const { updateMessageDb } = require('../handlers/modes/editMode');
 const { resolveEditTargets, editCaptionWithFallback } = require('../utils/editTarget');
+const { applyTextMediaEdit } = require('../utils/textMediaEdit');
 const { sortMediaDocsByPosition, mediaPositionMessageId, resolveMediaPosition } = require('../db/media');
 const { transportLinkUrl } = require('../utils/tgLink');
 
@@ -57,7 +58,8 @@ const defaultDeps = {
     callAI: callDeepSeek,
     password: null, // 测试时可用固定密码
     telegramGetFile, // 缩略图代理：file_id -> 下载地址（函数声明提升，见下方定义）
-    editCaption // 修改 Telegram 媒体描述（控制台改描述用）
+    editCaption, // 修改 Telegram 媒体描述（控制台改描述用）
+    editText     // 修改 Telegram 文本消息正文（media_type='text' 的控制台改描述用）
 };
 
 // 领域接口常量
@@ -1145,6 +1147,12 @@ async function handleMediaDescription(D, url, body) {
     const rawText = typeof body.text === 'string' ? body.text : '';
     const isClearing = !rawText.trim();
     const cleanText = isClearing ? '' : removeLevelSuffix(rawText);
+    // 文本媒体（media_type='text'，/send、/reply 发出的纯文本）：正文是消息 text、存在 media.media_name，
+    // 与媒体 caption 不是一回事；且 Telegram 不允许把文本消息改成空文本（不能清空）
+    const isTextTarget = mediaDoc.media_type === 'text';
+    if (isTextTarget && isClearing) {
+        return { status: 400, data: { error: '文本消息不能清空描述（Telegram 不允许空文本），请直接填写新的文本' } };
+    }
     const targetGroupId = mediaDoc.group_id || null;
     // 编辑目标位置：频道源位置优先（频道 → 讨论群自动转发时改频道源消息，Telegram 自动同步到群里的副本），
     // 其次群组位置；改不了的会在调用 Telegram 时自动降级到下一个位置
@@ -1154,44 +1162,55 @@ async function handleMediaDescription(D, url, body) {
     const targetMessageId = primary ? primary.messageId : (mediaPositionMessageId(mediaDoc) || null);
 
     const messageCol = D.getCollection(COLLECTIONS.MESSAGE);
-    const before = await messageCol.findOne({ file_unique_id: fileUniqueId });
+    // 修改前的正文：文本媒体看 media_name，媒体看 message 记录
+    const before = isTextTarget
+        ? { text: mediaDoc.media_name }
+        : await messageCol.findOne({ file_unique_id: fileUniqueId });
 
     // 1) 清空描述 = 移除该 message 的标签：必须先清标签（此刻记录还在，才能递减标签使用次数）
     if (isClearing && typeof clearMessageTags === 'function') {
         await clearMessageTags(fileUniqueId);
     }
 
-    // 2) 数据库：message 记录增/改/删 + group_list.is_delete 重算（复用机器人编辑逻辑）
-    await updateMessageDb(messageCol, {
-        isClearing,
-        targetChatId,
-        targetMessageId,
-        targetGroupId,
-        targetFileUniqueId: fileUniqueId,
-        targetMediaType: mediaDoc.media_type,
-        cleanText
-    });
-
-    // 3) 标签：编辑描述**保留已有标签**，只补充新文本匹配到的（清空描述已在上一步清掉）
-    if (!isClearing) {
-        await reMatchMessageTags(fileUniqueId, cleanText);
+    // 2) 数据库：文本媒体改 media_name（不写 message 记录 —— 那是"媒体描述 + 标签"的载体）；
+    //    媒体沿用聊天编辑逻辑（message 记录增/改/删 + group_list.is_delete 重算）
+    if (isTextTarget) {
+        await applyTextMediaEdit(fileUniqueId, cleanText);
+    } else {
+        await updateMessageDb(messageCol, {
+            isClearing,
+            targetChatId,
+            targetMessageId,
+            targetGroupId,
+            targetFileUniqueId: fileUniqueId,
+            targetMediaType: mediaDoc.media_type,
+            cleanText
+        });
+        // 标签：编辑描述**保留已有标签**，只补充新文本匹配到的（清空描述已在上一步清掉）
+        if (!isClearing) {
+            await reMatchMessageTags(fileUniqueId, cleanText);
+        }
     }
 
-    // 4) 尝试同步 Telegram 描述（超 48 小时 / 消息不是机器人发送的会失败，但数据库已更新）
+    // 3) 尝试同步 Telegram 正文（超 48 小时 / 消息不是机器人发送的会失败，但数据库已更新）
     let telegramEdited = false;
     let telegramError = null;
     let telegramVia = null;
     const wantTelegram = body.editTelegram !== false;
     if (wantTelegram && editTargets.length) {
         try {
-            const edited = await editCaptionWithFallback(editTargets, (t) =>
-                D.editCaption(t.chatId, t.messageId, isClearing ? null : cleanText)
-            );
+            const edited = await editCaptionWithFallback(editTargets, (t) => {
+                if (isTextTarget) {
+                    if (typeof D.editText !== 'function') throw new Error('未注入 Telegram 文本编辑接口');
+                    return D.editText(t.chatId, t.messageId, cleanText);
+                }
+                return D.editCaption(t.chatId, t.messageId, isClearing ? null : cleanText);
+            });
             telegramEdited = true;
             telegramVia = edited.via;
         } catch (err) {
-            telegramError = err.message || '修改 Telegram 描述失败';
-            logger.warn(`WebUI 修改 Telegram 描述失败 [${targetChatId}/${targetMessageId}]: ${telegramError}`);
+            telegramError = err.message || '修改 Telegram 正文失败';
+            logger.warn(`WebUI 修改 Telegram 正文失败 [${targetChatId}/${targetMessageId}]: ${telegramError}`);
         }
     }
 
@@ -1203,6 +1222,7 @@ async function handleMediaDescription(D, url, body) {
         counts: { edits: 1 },
         detail: {
             via: 'webui',
+            kind: isTextTarget ? 'text' : 'caption',
             groupId: targetGroupId,
             mediaType: mediaDoc.media_type,
             before: before ? before.text : undefined,
@@ -1745,6 +1765,30 @@ async function editCaption(chatId, messageId, text) {
         // HTML 解析失败：降级为纯文本，保证任何字符的描述都能写入
         if (String(err && err.message || '').toLowerCase().includes('parse')) {
             await bot.editMessageCaption(text, { chat_id: chatId, message_id: messageId });
+        } else {
+            throw err;
+        }
+    }
+    return true;
+}
+
+/**
+ * 修改 Telegram 文本消息正文（控制台改「文本媒体」的描述用）
+ * 与 editCaption 同理：优先 HTML 解析，含特殊字符解析失败时降级纯文本
+ * （文本消息不能清空：Telegram 不允许空文本，调用方会先拦下）
+ * @param {number} chatId
+ * @param {number} messageId
+ * @param {string} text - 新正文（非空）
+ * @returns {Promise<boolean>} 成功返回 true，失败抛错（调用方回报给前端，不回滚数据库）
+ */
+async function editText(chatId, messageId, text) {
+    const bot = require('../bot');
+    try {
+        await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML' });
+    } catch (err) {
+        // HTML 解析失败：降级为纯文本，保证任何字符的正文都能写入
+        if (String(err && err.message || '').toLowerCase().includes('parse')) {
+            await bot.editMessageText(text, { chat_id: chatId, message_id: messageId });
         } else {
             throw err;
         }

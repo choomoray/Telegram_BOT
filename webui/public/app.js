@@ -2184,9 +2184,12 @@
       const media = ((state.detail && state.detail.media) || []).find(m => m.file_unique_id === file);
       if (media) {
         const pos = media.group || media.channel || {};
+        // 文本媒体（media_type='text'）没有 message 记录：它的"描述"就是这条文本本身
+        // （存在 media.name），预填出来让管理员直接改，而不是面对一个空框
+        const isTextMedia = media.media_type === 'text';
         draft = elementFromHtml(msgBlockHtml({
           file_unique_id: file,
-          text: '',
+          text: isTextMedia ? (media.name || '') : '',
           tags: [],
           chat_id: pos.chat_id !== undefined ? pos.chat_id : media.message_id,
           message_id: pos.message_id !== undefined ? pos.message_id : media.message_id

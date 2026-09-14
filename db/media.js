@@ -190,6 +190,68 @@ async function findMediaByFileUniqueId(fileUniqueId) {
 }
 
 /**
+ * 按「聊天 + 消息 ID」反查 media —— 回复 /edit、消息链接、转发来源定位共用。
+ *
+ * 位置可能是群组位置（group 子文档）、频道位置（channel 子文档），或旧数据的顶层位置；
+ * 文本媒体（media_type='text'）没有 Telegram file，file_unique_id 由位置生成
+ * （见 media.recordTextMedia：`text:<chatId>:<messageId>`），所以也一并按它匹配。
+ * @param {number|string} chatId
+ * @param {number|string} messageId
+ * @returns {Promise<Object|null>}
+ */
+async function findMediaByPosition(chatId, messageId) {
+    try {
+        const c = Number(chatId);
+        const m = Number(messageId);
+        if (!Number.isFinite(c) || !Number.isFinite(m) || m <= 0) return null;
+        const col = getCollection(COLLECTIONS.MEDIA);
+        return await col.findOne({
+            $or: [
+                { 'group.chat_id': c, 'group.message_id': m },
+                { 'channel.chat_id': c, 'channel.message_id': m },
+                { chat_id: c, message_id: m },
+                { file_unique_id: `text:${c}:${m}` }
+            ]
+        });
+    } catch (err) {
+        logger.error(`按位置查询 media 失败: ${err.message}`);
+        return null;
+    }
+}
+
+/**
+ * 更新文本媒体（media_type='text'）的正文
+ *
+ * 文本媒体的内容存在 `media_name`（"借用"文件名那个字段），格式存在 `media_entities`；
+ * 编辑时**原样带上用户新正文的 entities**（严格保留用户发送的格式，见 utils/textEntities.js）；
+ * 新正文没有格式时清掉旧 entities —— 旧 entities 的偏移量对新文本已无意义。
+ * @param {string} fileUniqueId
+ * @param {string} text - 新正文
+ * @param {Array} [entities] - 新正文的 Telegram 富文本 entities
+ * @returns {Promise<boolean>} 是否命中并更新
+ */
+async function updateTextMediaContent(fileUniqueId, text, entities) {
+    try {
+        if (!fileUniqueId) return false;
+        const col = getCollection(COLLECTIONS.MEDIA);
+        const content = String(text === undefined || text === null ? '' : text);
+        const list = Array.isArray(entities) ? entities.filter(e => e && e.type && Number(e.length) > 0) : [];
+        const update = { $set: { media_name: content, updated_at: Date.now() } };
+        if (list.length) {
+            update.$set.media_entities = list;
+        } else {
+            update.$unset = { media_entities: '' };
+        }
+        const result = await col.updateOne({ file_unique_id: fileUniqueId }, update);
+        logger.info(`文本媒体正文更新: file_unique_id=${fileUniqueId}, 长度=${content.length}, entities=${list.length}, matched=${result.matchedCount}`);
+        return result.matchedCount > 0;
+    } catch (err) {
+        logger.error(`更新文本媒体正文失败: ${err.message}`);
+        return false;
+    }
+}
+
+/**
  * 根据 group_id 查询 media 列表，按 subgroup、位置消息 ID 升序排序
  * （位置在 group / channel 子文档里，旧数据才是顶层 message_id，因此排序在内存里按解析结果做）
  */
@@ -275,6 +337,8 @@ async function updateMediaPassword(fileUniqueId, password) {
 module.exports = {
     insertMedia,
     findMediaByFileUniqueId,
+    findMediaByPosition,
+    updateTextMediaContent,
     findMediaByGroupId,
     findMediaByGroupIdAndSubgroup,
     getMaxSubgroup,
