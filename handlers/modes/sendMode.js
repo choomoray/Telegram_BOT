@@ -433,10 +433,16 @@ async function handleSendMode(msg, state) {
     const targetChatId = state.targetChatId;
     const targetName = state.targetName || '目标群组';
 
-    // 文本消息：直接发送，不收录
+    // 文本消息：直接发送，不收录（保留 Telegram 消息格式：加粗/斜体/链接/代码等）
     if (msg.text && !msg.photo && !msg.video && !msg.audio && !msg.document) {
         try {
-            const sent = await bot.sendMessage(targetChatId, msg.text);
+            // entities 是 Telegram 的富文本描述（与文本绑定），原样带上即可保留格式；
+            // 不要用 parse_mode：它会把用户文本当成 HTML/Markdown 解析而破坏原文。
+            const sendOpts = {};
+            if (Array.isArray(msg.entities) && msg.entities.length) {
+                sendOpts.entities = msg.entities;
+            }
+            const sent = await bot.sendMessage(targetChatId, msg.text, sendOpts);
             logger.info(`用户 ${userId} 发送文本到 ${targetChatId}: msg=${sent.message_id}`);
             logOperation({
                 action: 'send_text',
@@ -446,7 +452,11 @@ async function handleSendMode(msg, state) {
                 messageId: sent.message_id,
                 target: { type: 'chat', id: targetChatId },
                 counts: { texts: 1, textLength: msg.text.length },
-                detail: { targetName, targetType: state.targetType || 'group' }
+                detail: {
+                    targetName,
+                    targetType: state.targetType || 'group',
+                    entityCount: sendOpts.entities ? sendOpts.entities.length : 0
+                }
             }).catch(() => { });
             await bot.sendMessage(userId, `✅ 已发送到 ${targetName}`, {
                 reply_to_message_id: userMsgId

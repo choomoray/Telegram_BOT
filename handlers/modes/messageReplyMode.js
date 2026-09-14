@@ -807,11 +807,14 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
     const sortedItems = [...mediaItems].sort((a, b) => a.message_id - b.message_id);
 
     const newItems = [];
+    let ignoredCount = 0;
     for (const item of sortedItems) {
         const existing = await findMediaByFileUniqueId(item.fileUniqueId);
         if (!existing) {
             newItems.push(item);
         } else {
+            // 已存在 = 被忽略（不算失败，但要在汇报里说明数量）
+            ignoredCount++;
             logger.info(`媒体已存在，跳过: file_unique_id=${item.fileUniqueId}`);
         }
     }
@@ -897,7 +900,8 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
         counts: {
             media: newItems.length,
             groups: 1,
-            captions: newItems.filter(i => i.caption).length
+            captions: newItems.filter(i => i.caption).length,
+            ignored: ignoredCount || undefined
         },
         detail: {
             isMediaGroup: true,
@@ -910,9 +914,16 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
         }
     }).catch(() => { });
 
+    // 汇报文案：有被忽略的媒体时说明数量，没有就直接报数量
+    //   有忽略：✅ 已回复媒体组 (成功 5 个，忽略 3 个）
+    //   无忽略：✅ 已回复媒体组 (9 个)
+    const repliedText = ignoredCount > 0
+        ? `✅ 已回复媒体组 (成功 ${newItems.length} 个，忽略 ${ignoredCount} 个）`
+        : `✅ 已回复媒体组 (${newItems.length} 个)`;
+
     if (options.withTagging === false) {
         // 打包模式/退出冲刷：仅提示，不进入打标签流程（避免打断打包会话）
-        await bot.sendMessage(userId, `✅ 已回复媒体组 (${newItems.length} 个)`, {
+        await bot.sendMessage(userId, repliedText, {
             reply_to_message_id: userMsgId,
             allow_sending_without_reply: true
         }).catch(() => { });
@@ -922,7 +933,7 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
 
         // 收录 message（有描述时）+ 自动进入打标签会话（不退出回复模式，用户可继续发送媒体）。
         // 每个带描述的媒体各打各的标签；当前标签没打完时后来的进入队列，点《完成》后依次切换。
-        const successText = `✅ 已回复媒体组 (${newItems.length} 个)`;
+        const successText = repliedText;
         const items = sentMessages.map((sentMsg, i) => {
             const original = newItems[i];
             if (!original) return null;
@@ -944,7 +955,7 @@ async function processMediaGroupReply(userId, targetChatId, targetMessageId, tar
     }
 
     await syncGroupDeleteByText(targetGroupId);
-    logger.info(`用户 ${userId} 已回复媒体组到群组 ${targetChatId}/${targetMessageId}，新 subgroup=${newSubgroup}，共 ${newItems.length} 个媒体`);
+    logger.info(`用户 ${userId} 已回复媒体组到群组 ${targetChatId}/${targetMessageId}，新 subgroup=${newSubgroup}，共 ${newItems.length} 个媒体${ignoredCount ? `（忽略 ${ignoredCount} 个已存在）` : ''}`);
 }
 
 async function processTargetGroup(userId, groupKey, mediaItems, processingMsgId) {

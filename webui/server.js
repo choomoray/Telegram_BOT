@@ -1945,6 +1945,13 @@ async function handleTransportList(D, url) {
     const page = Math.max(1, parseInt(url.searchParams.get('page'), 10) || 1);
     const pageSize = Math.min(200, Math.max(1, parseInt(url.searchParams.get('pageSize'), 10) || 20));
 
+    // 进入「搬运收录」视图 → 顺带触发一次链接活性检查（带节流与并发去重，
+    // 见 utils/transportCheck.js）。默认异步触发，不阻塞列表返回。
+    try {
+        const { checkTransportOnDemand } = require('../utils/transportCheck');
+        checkTransportOnDemand().catch(() => { });
+    } catch { }
+
     const and = [];
     if (q) {
         const or = [

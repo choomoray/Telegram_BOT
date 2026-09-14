@@ -17,6 +17,7 @@ const bot = require('../../bot');
 const logger = require('../../logger');
 const { getCollection, COLLECTIONS } = require('../../db/getCollection');
 const { ACTION_BY_TYPE, ACTIONS, actionLabel, categoryLabel, logOperation } = require('../../utils/opLog');
+const { safeApiCall } = require('../../utils/safeApiCall');
 
 const MAX_DOCS = 20000;      // 单次统计的最大条数（避免日志量过大拖慢查询）
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -170,10 +171,10 @@ async function handleLogCommand(userId, msg) {
 
     let processingMsg;
     try {
-        processingMsg = await bot.sendMessage(chatId, '🔍 日志正在查询中...', {
+        processingMsg = await safeApiCall(() => bot.sendMessage(chatId, '🔍 日志正在查询中...', {
             reply_to_message_id: messageId,
             allow_sending_without_reply: true
-        });
+        }));
     } catch (err) {
         logger.error(`用户 ${userId} /log 发送查询中消息失败: ${err.message}`);
         return;
@@ -188,14 +189,16 @@ async function handleLogCommand(userId, msg) {
             const monthStart = Date.UTC(beijingNow.getUTCFullYear(), beijingNow.getUTCMonth(), 1) - BEIJING_OFFSET_MS;
             const yearStart = Date.UTC(beijingNow.getUTCFullYear(), 0, 1) - BEIJING_OFFSET_MS;
 
-            // 一次取数（年初至今），三个口径在 JS 内按时间切分
+            // 一次取数（年初至今），三个口径在 JS 内按时间切分。
+            // 按时间**倒序**取，保证 MAX_DOCS 截断时丢的是最老的记录而不是最新的
+            // （旧的升序 + limit 会在日志量超限时把"最近"的数据切掉，统计就时对时错）。
             const logCol = getCollection(COLLECTIONS.LOG);
             const docs = await logCol.find({
                 $or: [
                     { date: { $gte: new Date(yearStart) } },
                     { time: { $gte: yearStart } }
                 ]
-            }).limit(MAX_DOCS).toArray();
+            }).sort({ date: -1, time: -1 }).limit(MAX_DOCS).toArray();
 
             const recent7d = docs.filter(d => resolveTime(d) >= last7d);
             const recentMonth = docs.filter(d => resolveTime(d) >= monthStart);
@@ -219,10 +222,10 @@ async function handleLogCommand(userId, msg) {
                 result = [week.text.split('\n\n')[0], month.text, year.text, '', buildHourChart(year.agg.slots)].join('\n');
             }
             if (result.length > 4000) result = result.slice(0, 3990) + '…';
-            await bot.editMessageText(result, {
+            await safeApiCall(() => bot.editMessageText(result, {
                 chat_id: chatId,
                 message_id: processingMsg.message_id
-            });
+            }));
 
             // 统计查看留痕（记录本次统计覆盖的动作数）
             logOperation({
@@ -236,10 +239,10 @@ async function handleLogCommand(userId, msg) {
         } catch (err) {
             logger.error(`执行 /log 失败: ${err.message}`);
             try {
-                await bot.editMessageText('❌ 统计失败，请稍后重试', {
+                await safeApiCall(() => bot.editMessageText('❌ 统计失败，请稍后重试', {
                     chat_id: chatId,
                     message_id: processingMsg.message_id
-                });
+                }), 1);
             } catch (editErr) {
                 logger.error(`编辑错误消息失败: ${editErr.message}`);
             }

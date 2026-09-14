@@ -7,6 +7,7 @@ const {
     updateUserActivity
 } = require('../../states');
 const { cleanPreviousMode } = require('../../utils/enterMode');
+const { checkTransportOnDemand } = require('../../utils/transportCheck');
 
 async function handleTransportCommand(userId, msg) {
     const state = getUserState(userId);
@@ -14,6 +15,8 @@ async function handleTransportCommand(userId, msg) {
         updateUserActivity(userId);
         const transportMode = require('../modes/transportMode');
         await transportMode.showTransportList(userId, state.mainMsgId);
+        // 进入搬运模式 = 触发一次链接活性检查（带节流，不会每次点击都发请求）
+        checkTransportOnDemand().catch(() => { });
         return;
     }
 
@@ -31,6 +34,8 @@ async function handleTransportCommand(userId, msg) {
             _onExit: async () => { }
         });
         logger.info(`用户 ${userId} 进入搬运模式，主消息ID: ${sentMsg.message_id}`);
+        // 进入搬运模式 = 触发一次链接活性检查（带 10 分钟节流）
+        checkTransportOnDemand().catch(() => { });
     } else {
         logger.error(`用户 ${userId} 进入搬运模式失败`);
     }

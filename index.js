@@ -9,7 +9,7 @@ const { upsertChannelGroup, getChannelGroupById } = require('./db/channelGroup')
 const { startHealthServer } = require('./healthServer');
 // 集中式停机状态 + 信号接管：require 即生效，覆盖整个启动期
 // （否则启动阶段卡在 connectDB 重试里时，Ctrl+C 会被静默吞掉，见 shutdown.js 注释）
-const { getAbortSignal, isShuttingDown, markStartupComplete, watchParentProcess } = require('./shutdown');
+const { getAbortSignal, isShuttingDown, markStartupComplete, watchParentProcess, getShutdownReason, RESTART_EXIT_CODE } = require('./shutdown');
 
 // 全局异常兜底：防止单个事件处理器的漏网错误导致整个进程崩溃
 process.on('unhandledRejection', (reason) => {
@@ -38,45 +38,10 @@ let webServer = null;
 // 健康检查端口（看门狗轮询 /health、调用 POST /shutdown 都用它）
 const HEALTH_PORT = config.HEALTH_PORT || 9699;
 
-// 搬运收录链接活性巡检：启动 1 分钟后首查，之后每 6 小时一次；新失效的链接提醒管理员
-const TRANSPORT_CHECK_INTERVAL = 6 * 60 * 60 * 1000;
-const TRANSPORT_CHECK_FIRST_DELAY = 60 * 1000;
+// 搬运收录链接活性巡检：**按需触发**（见 utils/transportCheck.js），
+// 触发时机为用户执行 /transport 或 WebUI 进入「搬运收录」视图，
+// 不再随启动自动跑（启动阶段本来就忙着连库/建索引，没必要额外发外网请求）。
 
-function startTransportHealthCheck() {
-    const run = async () => {
-        try {
-            const { checkAllTransports, formatDeadReport, notifyAdmins } = require('./utils/linkHealth');
-            const summary = await checkAllTransports({ force: true, concurrency: 3 });
-            if (summary.newlyDead.length) {
-                const sent = await notifyAdmins(formatDeadReport(summary.newlyDead));
-                logger.warn(`搬运收录巡检：新失效 ${summary.newlyDead.length} 条，已提醒 ${sent} 位管理员`);
-                logOperation({
-                    action: 'transport_check',
-                    source: 'system',
-                    result: 'fail',
-                    target: { type: 'collection', id: 'transport' },
-                    counts: { chats: summary.newlyDead.length },
-                    detail: {
-                        total: summary.total, ok: summary.ok, dead: summary.dead.length,
-                        unknown: summary.unknown.length, newlyDead: summary.newlyDead.map(d => d.chat_name || d.chat_id),
-                        notified: sent
-                    }
-                }).catch(() => { });
-            } else {
-                logger.info(`搬运收录巡检：共 ${summary.total} 条，有效 ${summary.ok}，失效 ${summary.dead.length}，未知 ${summary.unknown.length}`);
-            }
-            if (summary.recovered.length) logger.success(`搬运收录巡检：${summary.recovered.length} 条链接已恢复可访问`);
-        } catch (err) {
-            logger.error(`搬运收录巡检失败: ${err.message}`);
-        }
-    };
-    const first = setTimeout(() => {
-        run();
-        const timer = setInterval(run, TRANSPORT_CHECK_INTERVAL);
-        if (typeof timer.unref === 'function') timer.unref();
-    }, TRANSPORT_CHECK_FIRST_DELAY);
-    if (typeof first.unref === 'function') first.unref();
-}
 
 // test 模式（node index test）：在 webui 基础上，日志额外复制一份到 test-log（启动时重置）
 const TEST_MODE = process.argv.includes('test');
@@ -264,8 +229,8 @@ async function start() {
             }
         });
 
-        // 搬运收录链接活性巡检（失效提醒管理员）
-        startTransportHealthCheck();
+        // 搬运收录链接活性巡检改为**按需触发**（/transport 或 WebUI 进入该视图），
+        // 不再随启动自动跑：启动阶段本来就忙着连库/建索引，没必要额外发一堆外网请求
 
         // 可选：启动 Web UI 管理面板（node index.js webui / node index.js test）
         if (process.argv.includes('webui') || TEST_MODE) {
@@ -374,8 +339,16 @@ async function gracefulShutdown(signal) {
         clearTimeout(forceExitTimer);
     }
 
-    process.exit(0);
+    // 退出码承载"停机意图"（由 /restart 置位），看门狗据此决定是否重新拉起：
+    //   75 = RESTART_EXIT_CODE → 立刻按原启动方式重启
+    //   0                      → 人工/看门狗要求的关闭，不再拉起
+    const code = getShutdownReason() === 'restart' ? RESTART_EXIT_CODE : 0;
+    if (code === RESTART_EXIT_CODE) logger.info(`以退出码 ${code} 结束（请求重启）`);
+    process.exit(code);
 }
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+// 把优雅关闭注册给其它模块（如 /restart 指令），避免循环 require
+require('./shutdownRunner').registerGracefulShutdown(gracefulShutdown);

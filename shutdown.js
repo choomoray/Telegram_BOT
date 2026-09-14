@@ -60,16 +60,37 @@ function markStartupComplete() {
 }
 
 /**
- * 请求停机：置位中止标记 + 唤醒所有 abort 等待者。
- * 可重复调用（幂等）。
- * @returns {boolean} 本次调用是否首次请求（false 表示此前已请求过）
+ * 停机意图：'stop' = 与看门狗无关的停机（/shutdown、Ctrl+C），
+ *          'restart' = 要求看门狗**立刻按原启动方式重启**（/restart 指令）。
+ * 之所以要区分：看门狗收到 shutdown=0 会当成"人工关闭"不再拉起，而
+ * restart=75 必须重新拉起。
  */
-function requestShutdown() {
+let shutdownReason = 'stop';
+
+/** 请求停机：置位中止标记 + 唤醒所有 abort 等待者。（幂等） */
+function requestShutdown(reason = 'stop') {
     if (shutdownRequested) return false;
     shutdownRequested = true;
+    shutdownReason = reason === 'restart' ? 'restart' : 'stop';
     abortController.abort();
     return true;
 }
+
+/** 停机意图（见 shutdownReason 注释） */
+function getShutdownReason() {
+    return shutdownReason;
+}
+
+/**
+ * 请求「重启」：置位意图后由调用方走优雅关闭、最后以退出码 75 结束。
+ * 看门狗把 75 解释为"要求重启"，不会当成崩溃，也不会当成人工关闭。
+ */
+function requestRestart() {
+    return requestShutdown('restart');
+}
+
+/** 看门狗用来识别"要求重启"的退出码（超过 128 会被当成信号，所以取 75） */
+const RESTART_EXIT_CODE = 75;
 
 /**
  * 退出前的最后动作：尽力把日志刷盘，但不阻塞超过 `timeoutMs`。
@@ -213,6 +234,9 @@ module.exports = {
     isStartupComplete,
     markStartupComplete,
     requestShutdown,
+    requestRestart,
+    getShutdownReason,
+    RESTART_EXIT_CODE,
     installSignalHandlers,
     decideOnSignal,
     configure,

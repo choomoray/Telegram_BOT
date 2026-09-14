@@ -38,7 +38,8 @@ async function handleHelpCommand(userId, msg) {
                 { text: '🏷️ 标签', callback_data: 'exec_cmd:/tag' }
             ],
             [
-                { text: '📄 文章', callback_data: 'exec_cmd:/articles' }
+                { text: '📄 文章', callback_data: 'exec_cmd:/articles' },
+                { text: '♻️ 重启', callback_data: 'exec_cmd:/restart' }
             ]
         ]
     };

@@ -62,17 +62,33 @@ test('buildConfig：环境变量可覆盖默认值（含非法值回退）', () 
 // ---------------- 重启决策（直接用 watchdog.js 导出的真实实现） ----------------
 
 const { nextRestartState, decideAfterExit } = require('../watchdog');
+const { RESTART_EXIT_CODE } = require('../shutdown');
 
 test('人工关闭（看门狗主动请求退出）不触发重启', () => {
-    assert.strictEqual(decideAfterExit({ intentionalStop: true, exited: false }), 'stop');
+    assert.strictEqual(decideAfterExit({ exitCode: 0, signal: null, intentionalStop: true, exited: false }), 'stop');
 });
 
 test('看门狗自身正在退出时不重启', () => {
-    assert.strictEqual(decideAfterExit({ intentionalStop: false, exited: true }), 'stop');
+    assert.strictEqual(decideAfterExit({ exitCode: 0, signal: null, intentionalStop: false, exited: true }), 'stop');
 });
 
-test('非人工退出一律视为崩溃并重启（含 exitCode=0 的意外退出）', () => {
-    assert.strictEqual(decideAfterExit({ intentionalStop: false, exited: false }), 'restart');
+test('非人工退出一律视为崩溃（含 exitCode=0 的意外退出）', () => {
+    assert.strictEqual(decideAfterExit({ exitCode: 0, signal: null, intentionalStop: false, exited: false }), 'crash');
+    assert.strictEqual(decideAfterExit({ exitCode: 1, signal: null, intentionalStop: false, exited: false }), 'crash');
+    assert.strictEqual(decideAfterExit({ exitCode: null, signal: 'SIGKILL', intentionalStop: false, exited: false }), 'crash');
+});
+
+test('/restart 的退出码 → 立即按原启动方式重启（不当崩溃、不等待）', () => {
+    assert.strictEqual(
+        decideAfterExit({ exitCode: RESTART_EXIT_CODE, signal: null, intentionalStop: false, exited: false }),
+        'restart'
+    );
+    // 即使同时被标记为"主动停"，/restart 也必须重启（用户明确要求重启）
+    assert.strictEqual(
+        decideAfterExit({ exitCode: RESTART_EXIT_CODE, signal: null, intentionalStop: true, exited: false }),
+        'restart'
+    );
+    assert.strictEqual(RESTART_EXIT_CODE, 75, '退出码取 75，避免与 128+signal 区间冲突');
 });
 
 // ---------------- 重启风暴保护（真实实现） ----------------
@@ -113,44 +129,100 @@ test('超出时间窗口后重新计数（避免"很久崩一次"累积到上限
     assert.strictEqual(after.giveUp, false);
 });
 
-// ---------------- 通知文案 ----------------
+// ---------------- 通知文案（简化格式：只报最近的 warn / erro） ----------------
 
-test('崩溃通知包含启动方式、原因、重启延迟与最后日志', () => {
+/** 构造一条带颜色与时间戳的 bot 输出行（模拟真实终端输出） */
+const outLine = (level, text) =>
+    `\u001b[90m[2026-09-13 21:29:59]\u001b[39m \u001b[33m[${level}]\u001b[39m ${text} `;
+
+test('崩溃通知：固定标题 + 只列 warn/erro，且去掉时间戳与颜色', () => {
     const text = notify.formatCrashReport({
-        botArgs: ['webui'], mode: 'webui', timeText: '2026-09-13 21:30:00',
-        reason: '进程异常退出（exitCode=1）', uptimeText: '2 小时 5 分',
-        consecutive: 1, maxRestarts: 5, restartDelayMs: 30000,
-        tail: ['[21:29:59] [ERRO] boom']
+        tail: [
+            outLine('INFO', '正在连接数据库'),
+            outLine('SUCC', 'MongoDB 连接成功'),
+            outLine('WARN', '会话超时'),
+            outLine('ERRO', 'ETELEGRAM: 400 Bad Request: chat not found'),
+            outLine('INFO', '这条不该出现')
+        ]
     });
-    assert.match(text, /Bot 崩溃/);
-    assert.match(text, /30 秒后自动重启/);
-    assert.match(text, /node index\.js webui/, '要显示按哪种方式重启');
-    assert.match(text, /exitCode=1/);
-    assert.match(text, /boom/, '要带上最后日志');
-    assert.match(text, /连续崩溃：1\/5/);
+
+    assert.match(text, /⚠️ BOT出现意外崩溃，稍后尝试重启/, '使用约定的标题');
+    assert.match(text, /崩溃信息：/);
+    assert.match(text, /\[warn\] 会话超时/);
+    assert.match(text, /\[erro\] ETELEGRAM: 400 Bad Request: chat not found/);
+    // 只报问题：info / succ 不进报告
+    assert.ok(!/正在连接数据库/.test(text), 'info 不应出现');
+    assert.ok(!/MongoDB 连接成功/.test(text), 'succ 不应出现');
+    assert.ok(!/这条不该出现/.test(text), 'info 不应出现');
+    // 不保留日志时间戳（用户要求的格式是 [warn] XXX）
+    assert.ok(!/2026-09-13 21:29:59/.test(text), '不应带原始时间戳');
+    assert.ok(!/\u001b\[/.test(text), '不应残留 ANSI 颜色码');
 });
 
-test('重启失败与停止重试的通知文案', () => {
-    const failed = notify.formatRestartFailedReport({
-        botArgs: ['test'], mode: 'test', timeText: '2026-09-13 21:30:00',
-        reason: '进程异常退出（exitCode=1）', consecutive: 3, maxRestarts: 5, tail: []
-    });
-    assert.match(failed, /重启后未能就绪/);
-    assert.match(failed, /node index\.js test/);
+test('崩溃通知：没有 warn/erro 时给出明确说明而不是空白', () => {
+    const text = notify.formatCrashReport({ tail: [outLine('INFO', '一切正常')] });
+    assert.match(text, /⚠️ BOT出现意外崩溃/);
+    assert.match(text, /没有 warn \/ erro 日志/);
+});
 
+test('崩溃通知：同一错误连续刷屏只保留一条', () => {
+    const text = notify.formatCrashReport({
+        tail: [outLine('ERRO', 'boom'), outLine('ERRO', 'boom'), outLine('ERRO', 'boom')]
+    });
+    assert.strictEqual((text.match(/\[erro\] boom/g) || []).length, 1);
+});
+
+test('崩溃通知：最多列 reportTailLimit 条（默认 10），取最近的', () => {
+    const tail = [];
+    for (let i = 1; i <= 15; i++) tail.push(outLine('WARN', `warn-${i}`));
+    const text = notify.formatCrashReport({ tail, limit: 10 });
+    assert.ok(!/warn-1\b/.test(text), '应丢弃较早的条目');
+    assert.match(text, /warn-15/, '应保留最新的条目');
+    assert.strictEqual((text.match(/\[warn\]/g) || []).length, 10);
+});
+
+test('重启通知：成功 / 未就绪两种标题，带同样的 warn/erro 明细', () => {
+    const ok = notify.formatRestartReport({ ok: true, tail: [outLine('WARN', '小警告')] });
+    assert.match(ok, /♻️ BOT重启成功/);
+    assert.match(ok, /\[warn\] 小警告/);
+
+    const failed = notify.formatRestartReport({ ok: false, tail: [outLine('ERRO', '又崩了')] });
+    assert.match(failed, /🚨 BOT重启后仍未就绪/);
+    assert.match(failed, /\[erro\] 又崩了/);
+});
+
+test('停止重试通知：说明窗口、次数与如何重新启动', () => {
     const giveUp = notify.formatGiveUpReport({
         botArgs: ['webui'], mode: 'webui', consecutive: 6, maxRestarts: 5,
-        restartWindowMs: 600000, reason: 'boom'
+        restartWindowMs: 600000, tail: [outLine('ERRO', 'boom')]
     });
     assert.match(giveUp, /停止自动重启/);
     assert.match(giveUp, /10 分钟内崩溃 6 次/);
+    assert.match(giveUp, /\[erro\] boom/);
     assert.match(giveUp, /node watchdog\.js webui/, '要告诉用户怎么重新启动看门狗');
+});
+
+test('pickWarnErrorLines：解析各种级别写法，忽略非日志行', () => {
+    const picked = notify.pickWarnErrorLines([
+        '普通输出行',
+        outLine('WARN', 'a'),
+        '[2026-09-13 21:00:00] [ERRO] b',
+        '[2026-09-13 21:00:01] [ERROR] c',   // ERROR 全写也要认
+        ''
+    ]);
+    assert.deepStrictEqual(picked, ['[warn] a', '[erro] b', '[erro] c']);
 });
 
 test('缺少 token 时通知不抛错，而是返回错误说明', async () => {
     const res = await notify.sendToAdmins({ telegramToken: '', adminChatIds: [] }, 'hi');
     assert.strictEqual(res.sent, 0);
     assert.ok(res.errors.length > 0);
+});
+
+test('spawnNotifier：缺 token / 无文本时不启动进程（返回 null）', () => {
+    assert.strictEqual(notify.spawnNotifier({ text: 'x', token: '', adminChatIds: [1], root: process.cwd() }), null);
+    assert.strictEqual(notify.spawnNotifier({ text: '', token: 't', adminChatIds: [1], root: process.cwd() }), null);
+    assert.strictEqual(notify.spawnNotifier({ text: 'x', token: 't', adminChatIds: [], root: process.cwd() }), null);
 });
 
 // ---------------- 崩溃标记（bot 侧播报依赖它） ----------------
@@ -190,17 +262,13 @@ test('崩溃标记：内容损坏时不抛错，返回 null', () => {
     }
 });
 
-test('重启播报文案包含「已自动重启」与启动方式', () => {
+test('重启播报已移交看门狗：bot 侧只留痕，不再自行发送通知', () => {
     const crashNotify = require('../utils/crashNotify');
-    const text = crashNotify.formatRestartReport({
-        botArgs: ['webui'], mode: 'webui', timeText: '2026-09-13 21:30:00',
-        reason: '进程异常退出（exitCode=1）', uptimeText: '1 分 2 秒',
-        consecutive: 2, maxRestarts: 5, tail: ['[ERRO] boom']
-    });
-    assert.match(text, /已自动重启/);
-    assert.match(text, /node index\.js webui/);
-    assert.match(text, /连续崩溃：2\/5/);
-    assert.match(text, /boom/);
+    // bot 侧不再有 formatRestartReport（避免与看门狗重复发送）
+    assert.strictEqual(typeof crashNotify.formatRestartReport, 'undefined', 'bot 侧不应再组装重启通知');
+    const src = require('fs').readFileSync(path.join(__dirname, '..', 'utils', 'crashNotify.js'), 'utf8');
+    assert.match(src, /logOperation/, '仍要写一条 opLog 留痕');
+    assert.ok(!/notifyAdmins/.test(src), '不应再调用 notifyAdmins（通知统一由看门狗发）');
 });
 
 // ---------------- 孤儿进程防护（看门狗被硬杀时 bot 要自己退出） ----------------

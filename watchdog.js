@@ -27,28 +27,63 @@ const path = require('path');
 const { buildConfig, describeMode } = require('./watchdog/config');
 const notify = require('./watchdog/notify');
 const shutdown = require('./shutdown');
+const { RESTART_EXIT_CODE } = require('./shutdown');
 
 const cfg = buildConfig(process.argv.slice(2));
 
 // ---------------- 看门狗自己的日志（独立文件，不混进 bot 日志） ----------------
 
 let logStream = null;
+
+/**
+ * 看门狗终端输出是否该带颜色
+ *
+ * 注意：为了保留 bot 的完整输出（崩溃现场），子进程的 stdout/stderr 是 **pipe**，
+ * 于是 bot 里的 chalk 会认为"不是终端"而自动关闭颜色 —— 表现为"走看门狗后
+ * SUCC/ERRO/时间戳都没颜色了"。因此这里显式判断一次，并把结论通过 FORCE_COLOR
+ * 传给子进程（见 startChild）。
+ */
+function shouldUseColor() {
+    if (process.env.NO_COLOR) return false;
+    if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== '0') return true;
+    return !!process.stdout.isTTY;
+}
+
+const USE_COLOR = shouldUseColor();
+
+/** ANSI 上色（看门狗只依赖内置模块，不引 chalk） */
+function paint(code, text) {
+    return USE_COLOR ? `\u001b[${code}m${text}\u001b[39m` : text;
+}
+const LEVEL_PAINT = {
+    INFO: (t) => paint('96', t),   // 与 logger 的 info 一致（cyanBright）
+    SUCC: (t) => paint('32', t),   // green
+    WARN: (t) => paint('33', t),   // yellow
+    ERROR: (t) => paint('31', t)   // red
+};
+
 function ensureLogDir() {
     try {
         fs.mkdirSync(path.dirname(cfg.logFile), { recursive: true });
     } catch { }
 }
+
+/**
+ * 看门狗日志：控制台与 bot 日志同格式 `[时间] [级别] 内容`，并加 `[看门狗]` 便于区分；
+ * 写入 watchdog/watchdog.log 时**不带颜色**（文件里不需要转义码）。
+ */
 function wlog(level, message) {
     const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    const line = `[${ts}] [${level}] ${message}`;
+    const lv = LEVEL_PAINT[level] ? level : 'INFO';
+    const line = `${paint('90', `[${ts}]`)} ${paint('35', '[看门狗]')} ${LEVEL_PAINT[lv](`[${lv}]`)} ${message}`;
     // eslint-disable-next-line no-console
-    console.log(`\x1b[35m[看门狗]\x1b[0m ${line}`);
+    console.log(line);
     try {
         if (!logStream) {
             ensureLogDir();
             logStream = fs.createWriteStream(cfg.logFile, { flags: 'a' });
         }
-        logStream.write(line + '\n');
+        logStream.write(`[${ts}] [看门狗] [${lv}] ${message}\n`);
     } catch { }
 }
 
@@ -67,6 +102,8 @@ let exited = false;               // 看门狗自身是否正在退出
 let restartCount = 0;             // 当前窗口内重启次数
 let restartWindowStart = null;    // 当前统计窗口起始（null = 尚未开始）
 let lastCrash = null;             // 最近一次崩溃现场
+let restartReportSent = true;     // 是否已就本次重启发过"重启成功"（首次启动无需报告）
+let healthySince = 0;             // 子进程健康计时起点（用于确认"重启真的成功"）
 
 const recentOutput = [];          // 环形缓冲：最近 N 行输出（崩溃现场）
 function pushOutput(chunk) {
@@ -247,6 +284,12 @@ async function checkHealthTick() {
                 wlog('INFO', `健康探测恢复正常（此前连续失败 ${healthFailStreak} 次）`);
             }
             healthFailStreak = 0;
+
+            // 健康持续够久 → 确认"重启成功"，补发重启报告
+            if (!healthySince) healthySince = Date.now();
+            if (Date.now() - healthySince >= cfg.restartReportAfterMs) {
+                maybeSendRestartReport();
+            }
             return;
         }
 
@@ -296,14 +339,20 @@ function nextRestartState(count, windowStart, now, cfg) {
 }
 
 /**
- * 子进程退出后是否应当重启（纯函数）
- * 看门狗主动要求退出（人工关闭 / 自己在退出）→ 不重启，否则一律视为崩溃。
- * @param {{intentionalStop:boolean, exited:boolean}} state
- * @returns {'stop'|'restart'}
+ * 子进程退出后应当怎么处理（纯函数）
+ *
+ *   - 退出码 = RESTART_EXIT_CODE(75)：`/restart` 指令要求重启
+ *     → **立即**按原启动方式拉起（不等 30 秒，因为这是用户主动要求的）；
+ *   - 看门狗主动要求退出（人工关闭 / 自己在退出）→ `stop`，不再拉起；
+ *   - 其余一律视为意外崩溃 → `crash`（记录 + 通知 + 等 30 秒后重启）。
+ *
+ * @param {{exitCode:number|null, signal:string|null, intentionalStop:boolean, exited:boolean}} state
+ * @returns {'restart'|'crash'|'stop'}
  */
 function decideAfterExit(state) {
+    if (state.exitCode === RESTART_EXIT_CODE) return 'restart';
     if (state.intentionalStop || state.exited) return 'stop';
-    return 'restart';
+    return 'crash';
 }
 
 /** 窗口内计数：超过 maxRestarts 就停止自动重启 */
@@ -314,11 +363,50 @@ function registerRestart() {
     return restartCount;
 }
 
+/** 触发一次崩溃播报：起短命通知进程（不阻塞看门狗的后续计时） */
+function sendCrashReport(info) {
+    if (cfg.notifyMode === 'off') return;
+    const text = notify.formatCrashReport({ tail: info.tail, limit: cfg.reportTailLimit });
+    const child = notify.spawnNotifier({
+        text,
+        ttlMs: cfg.notifyTtlMs,
+        root: cfg.root,
+        token: cfg.telegramToken,
+        adminChatIds: cfg.adminChatIds,
+        onExit: (code) => wlog('INFO', `崩溃播报进程结束（exit=${code}）`)
+    });
+    if (!child) wlog('WARN', '崩溃播报未发出（缺少 token / 管理员，或启动失败）');
+}
+
+/**
+ * 确认重启成功 → 发「♻️ BOT重启成功」报告（同样走短命通知进程）
+ * 只在真正健康稳定后发，避免"起来又立刻崩"时误报成功。
+ */
+function maybeSendRestartReport() {
+    if (restartReportSent || !lastCrash) return;
+    restartReportSent = true;
+    if (cfg.notifyMode === 'off') return;
+
+    const text = notify.formatRestartReport({
+        ok: true,
+        tail: lastCrash.tail || [],
+        limit: cfg.reportTailLimit
+    });
+    const child = notify.spawnNotifier({
+        text,
+        ttlMs: cfg.notifyTtlMs,
+        root: cfg.root,
+        token: cfg.telegramToken,
+        adminChatIds: cfg.adminChatIds,
+        onExit: (code) => wlog('INFO', `重启播报进程结束（exit=${code}）`)
+    });
+    if (child) wlog('INFO', '已发送重启成功报告');
+}
+
 async function recordAndRestart(crash) {
-    // 软卡死：先让旧进程退干净，再走重启
-    if (crash.kind === 'unhealthy') {
-        await stopChildGracefully('软卡死重启');
-    }
+    // 旧进程必须彻底消失再播报 / 重启：崩溃后残留的进程可能还占着
+    // 健康端口或 polling 连接，不杀干净会让新实例起不来（或 Telegram 409）
+    await stopChildGracefully(`崩溃清理（${crash.kind}）`);
 
     lastCrash = crash;
     const n = registerRestart();
@@ -331,6 +419,7 @@ async function recordAndRestart(crash) {
         restartDelayMs: cfg.restartDelayMs,
         tail: tailLines()
     };
+    lastCrash = info;
 
     wlog('ERROR', `崩溃 #${n}/${cfg.maxRestarts}：${crash.reason}`);
     writeCrashMarker(info);
@@ -340,17 +429,20 @@ async function recordAndRestart(crash) {
         wlog('ERROR', `连续崩溃已达上限（${cfg.maxRestarts}），停止自动重启，请人工介入`);
         await notify.sendToAdmins(cfg, notify.formatGiveUpReport({
             ...info,
-            restartWindowMs: cfg.restartWindowMs
+            restartWindowMs: cfg.restartWindowMs,
+            limit: cfg.reportTailLimit
         }));
         exited = true;
         await shutdown.flushLogsQuietly();
         process.exit(1);
     }
 
-    // 即时通知（可选）
-    if (cfg.notifyMode === 'crash') {
-        await notify.sendToAdmins(cfg, notify.formatCrashReport(info)).catch(() => { });
+    // 崩溃播报：交给短命通知进程，**不等它发完**就继续走重启计时
+    // （两条计时互相独立：通知发不出去也不影响 30 秒后重启）
+    if (cfg.notifyMode !== 'after_restart') {
+        sendCrashReport(info);
     }
+    restartReportSent = false;
 
     wlog('INFO', `等待 ${cfg.restartDelayMs}ms 后重启（按原启动方式：node index.js${cfg.botArgs.length ? ' ' + cfg.botArgs.join(' ') : ''}）`);
     restartTimer = setTimeout(() => {
@@ -359,15 +451,27 @@ async function recordAndRestart(crash) {
     }, cfg.restartDelayMs);
 }
 
-/** 子进程退出：区分"看门狗主动停"和"真崩溃" */
+/** 子进程退出：区分「主动停」「要求重启」「真崩溃」 */
 function onChildExit(code, signal) {
     const ranMs = Date.now() - childStartedAt;
     const wasIntentional = intentionalStop;
     intentionalStop = false;
     child = null;
 
-    if (decideAfterExit({ intentionalStop: wasIntentional, exited }) === 'stop') {
+    const action = decideAfterExit({ exitCode: code, signal, intentionalStop: wasIntentional, exited });
+
+    if (action === 'stop') {
         wlog('INFO', `bot 已退出（code=${code}, signal=${signal}，运行 ${uptimeText(ranMs)}）`);
+        return;
+    }
+
+    if (action === 'restart') {
+        // /restart：用户主动要求重启，不当作崩溃、不发崩溃报告、不等 30 秒
+        wlog('INFO', `收到重启请求（exitCode=${code}），立即按原启动方式重启`);
+        if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+        restartReportSent = true; // 手动重启不需要"重启成功"报告
+        lastCrash = null;
+        startChild();
         return;
     }
 
@@ -396,14 +500,23 @@ function startChild() {
     child = spawn(process.execPath, args, {
         cwd: cfg.root,
         stdio: ['inherit', 'pipe', 'pipe'],
-        // BOT_PARENT_PID 让 bot 能发现"看门狗被硬杀"并自行退出，避免变成孤儿进程
-        // （Windows 上被杀方收不到任何信号，只能靠主动探测父进程；见 shutdown.watchParentProcess）
-        env: { ...process.env, BOT_PARENT_PID: String(process.pid) }
+        env: {
+            ...process.env,
+            // BOT_PARENT_PID 让 bot 能发现"看门狗被硬杀"并自行退出，避免变成孤儿进程
+            // （Windows 上被杀方收不到任何信号，只能靠主动探测父进程；见 shutdown.watchParentProcess）
+            BOT_PARENT_PID: String(process.pid),
+            // 因为 stdout 被 pipe，bot 里的 chalk 会误判"不是终端"而关掉颜色；
+            // 这里把看门狗的颜色能力显式传下去，保证 SUCC/ERRO/时间戳的颜色与直接启动一致
+            ...(USE_COLOR
+                ? { FORCE_COLOR: '1', NO_COLOR: undefined }
+                : (process.env.NO_COLOR ? { NO_COLOR: process.env.NO_COLOR } : { FORCE_COLOR: '0' }))
+        }
     });
     childStartedAt = Date.now();
     healthFailStreak = 0;
     healthFirstOk = false;
     lastUptime = null;
+    healthySince = 0;
 
     child.stdout.on('data', (c) => { process.stdout.write(c); pushOutput(c); });
     child.stderr.on('data', (c) => { process.stderr.write(c); pushOutput(c); });

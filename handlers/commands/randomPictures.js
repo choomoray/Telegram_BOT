@@ -6,6 +6,7 @@ const { getSettings } = require('../../db/settings');
 const { sendMediaGroup } = require('../../utils/sendMedia');
 const { logOperation } = require('../../utils/opLog');
 const { getNumberArg } = require('../../utils/commandArgs');
+const { safeApiCall } = require('../../utils/safeApiCall');
 
 async function handleRandomPicturesCommand(userId, msg) {
     const chatId = msg.chat.id;
@@ -39,10 +40,10 @@ async function handleRandomPicturesCommand(userId, msg) {
 
     let processingMsg;
     try {
-        processingMsg = await bot.sendMessage(chatId, '🎲 正在搜集图片中，请稍等...', {
+        processingMsg = await safeApiCall(() => bot.sendMessage(chatId, '🎲 正在搜集图片中，请稍等...', {
             reply_to_message_id: messageId,
             allow_sending_without_reply: true
-        });
+        }));
     } catch (err) {
         logger.error(`用户 ${userId} /random_pictures 发送处理中消息失败: ${err.message}`);
         return;
@@ -60,10 +61,10 @@ async function handleRandomPicturesCommand(userId, msg) {
                 ];
                 const messageDocs = await messageCol.aggregate(pipeline).toArray();
                 if (messageDocs.length === 0) {
-                    await bot.editMessageText('❌ 没有找到任何图片数据', {
+                    await safeApiCall(() => bot.editMessageText('❌ 没有找到任何图片数据', {
                         chat_id: chatId,
                         message_id: processingMsg.message_id
-                    });
+                    }), 1);
                     return;
                 }
 
@@ -118,21 +119,30 @@ async function handleRandomPicturesCommand(userId, msg) {
                 mediaItems = mediaDocs.map(doc => ({ file_id: doc.file_id }));
             }
 
+            // 去重：同一条 Telegram 媒体可能有多条 media 记录，
+            // 重复 file_id 会让 sendMediaGroup 直接 400 失败（表现为"有时能发有时不能"）
+            const seen = new Set();
+            mediaItems = mediaItems.filter(it => {
+                if (!it || !it.file_id || seen.has(it.file_id)) return false;
+                seen.add(it.file_id);
+                return true;
+            });
+
             if (mediaItems.length === 0) {
-                await bot.editMessageText('❌ 无法获取图片文件', {
+                await safeApiCall(() => bot.editMessageText('❌ 无法获取图片文件', {
                     chat_id: chatId,
                     message_id: processingMsg.message_id
-                });
+                }), 1);
                 return;
             }
 
-            await sendMediaGroup(chatId, mediaItems, 'photo', messageId);
+            await safeApiCall(() => sendMediaGroup(chatId, mediaItems, 'photo', messageId));
 
             try {
-                await bot.editMessageText(`✅ 已发送 ${mediaItems.length} 张图片`, {
+                await safeApiCall(() => bot.editMessageText(`✅ 已发送 ${mediaItems.length} 张图片`, {
                     chat_id: chatId,
                     message_id: processingMsg.message_id
-                });
+                }), 1);
             } catch (editErr) {
                 logger.warn(`编辑处理中消息失败: ${editErr.message}`);
             }

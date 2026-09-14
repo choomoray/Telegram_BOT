@@ -73,16 +73,24 @@ async function currentTagsOf(target) {
 }
 
 /**
- * 标签按钮键盘：上区=已有标签（点击移除），下区=标签库（点击添加），
+ * 标签按钮键盘
+ *
+ * 按钮只保留两类（用户要求：减少按钮数量）：
+ *   1. 已选标签（当前作用对象上已打上的，点击移除）
+ *   2. 置顶标签（pin > 0 的，点击添加/移除）
+ * 不再把整个标签库铺满按钮 —— 标签库很大时面板会变得又长又难找。
+ * 需要给不在此列的标签打标签时，直接在聊天里**输入标签名**（空格分隔可多个、`-标签` 移除）。
+ *
  * 底部 = 《✅ 完成》 + 《🔁 回复该消息》
  */
-async function renderTagKeyboard(target, page = 1) {
+async function renderTagKeyboard(target) {
     const tags = sortTags(await getTags());
     const current = await currentTagsOf(target);
-    return buildTagRegionKeyboard(current, tags, {
+    // 下区只留置顶标签
+    const pinned = tags.filter(t => t && t.pin > 0);
+    return buildTagRegionKeyboard(current, pinned, {
         prefix: 'sendtag',
-        pagePrefix: 'sendtag_page',
-        page,
+        page: 1,
         extraRows: [
             [{ text: '✅ 完成', callback_data: 'sendtag_done' }],
             [{ text: '🔁 回复该消息', callback_data: 'sendtag_reply' }]
@@ -90,44 +98,60 @@ async function renderTagKeyboard(target, page = 1) {
     });
 }
 
-/** 面板文本：提示语 + 已选标签 + 排队提示 */
-async function buildPanelText(session) {
+/**
+ * 面板文本：提示语 + 已选标签 + 排队提示
+ * @param {Object} session
+ * @param {string} [statusLine] - 本次操作的结果行（如「✅ 已添加：JK」），
+ *        用它在面板里就地反馈，省掉单独发一条确认消息
+ */
+async function buildPanelText(session, statusLine = '') {
     const target = session.active;
     const current = await currentTagsOf(target);
-    const tagLine = current.length ? `\n\n📌 已选标签：${current.join('、')}` : '\n\n📌 已选标签：（无）';
+    const tagLine = current.length ? `📌 已选标签：${current.join('、')}` : '📌 已选标签：（无）';
     const queueLine = session.queue && session.queue.length
-        ? `\n\n⏳ 还有 ${session.queue.length} 个媒体等待打标签（点《✅ 完成》后自动切换）`
+        ? `⏳ 还有 ${session.queue.length} 个媒体等待打标签（点《✅ 完成》后自动切换）`
         : '';
-    return `${(target && target.baseText) || '✅ 已发送'}${tagLine}${queueLine}`;
+    const blocks = [(target && target.baseText) || '✅ 已发送'];
+    if (statusLine) blocks.push(statusLine);
+    blocks.push(tagLine);
+    if (queueLine) blocks.push(queueLine);
+    return blocks.join('\n\n');
 }
 
-/** 刷新当前打标签面板（每次标签操作后调用） */
-async function refreshPanel(userId, page = 1) {
-    const session = getSession(userId);
-    if (!session || !session.active) return;
-    if (!session.panelMsgId) {
-        await sendPanel(userId, page);
-        return;
-    }
-    const text = await buildPanelText(session);
-    const keyboard = await renderTagKeyboard(session.active, page);
-    await bot.editMessageText(text, {
-        chat_id: userId,
-        message_id: session.panelMsgId,
-        reply_markup: keyboard
-    }).catch(async (err) => {
-        // 面板被删除 / 过旧无法编辑时补发一条
-        logger.warn(`刷新打标签面板失败，改为新发一条: ${err.message}`);
-        await sendPanel(userId, page);
+/** 删除旧面板消息（失败无所谓：可能已被用户删掉或过旧不可删） */
+async function deletePanelMessage(userId, messageId) {
+    if (!messageId) return;
+    await bot.deleteMessage(userId, messageId).catch((err) => {
+        logger.warn(`删除旧打标签面板失败（继续发新的）: ${err.message}`);
     });
 }
 
+/**
+ * 刷新打标签面板：**只保留一个按钮界面**
+ *
+ * 之所以不再用 editMessageText 原地刷新：面板刷新后总是排在会话列表底部（新消息下方），
+ * 而用户要对照的媒体在很上面，编辑原地消息会让"媒体被顶上去、按钮留在下面"，
+ * 不利于边看边确认。因此改为：**删掉旧面板 → 发一条新面板**，
+ * 新面板落在最新位置，且始终只有一个。
+ *
+ * @param {number} userId
+ * @param {string} [statusLine] - 本次操作结果（就地展示在面板里）
+ */
+async function refreshPanel(userId, statusLine = '') {
+    const session = getSession(userId);
+    if (!session || !session.active) return;
+    const oldPanelId = session.panelMsgId;
+    session.panelMsgId = null;
+    if (oldPanelId) await deletePanelMessage(userId, oldPanelId);
+    await sendPanel(userId, statusLine);
+}
+
 /** 发送一条新的打标签面板（并把面板消息 ID 记入会话） */
-async function sendPanel(userId, page = 1) {
+async function sendPanel(userId, statusLine = '') {
     const session = getSession(userId);
     if (!session || !session.active) return null;
-    const text = await buildPanelText(session);
-    const keyboard = await renderTagKeyboard(session.active, page);
+    const text = await buildPanelText(session, statusLine);
+    const keyboard = await renderTagKeyboard(session.active);
     try {
         const sent = await bot.sendMessage(userId, text, { reply_markup: keyboard });
         session.panelMsgId = sent.message_id;
@@ -150,11 +174,7 @@ async function showActivePanel(userId, text) {
         return { shownAsPanel: false };
     }
     session.active.baseText = text;
-    if (session.panelMsgId) {
-        await refreshPanel(userId);
-    } else {
-        await sendPanel(userId);
-    }
+    await refreshPanel(userId);
     return { shownAsPanel: true };
 }
 
@@ -381,13 +401,9 @@ async function handleTagText(msg, session) {
     }).catch(() => { });
 
     updateUserActivity(userId);
-    await refreshPanel(userId);
-    const currentTags = await currentTagsOf(target);
-    const currentText = currentTags.length ? `\n📌 当前标签：${currentTags.join('、')}` : '\n📌 当前标签：（无）';
-    await bot.sendMessage(userId, `✅ ${parts.join('；')}${currentText}`, {
-        reply_to_message_id: msg.message_id,
-        allow_sending_without_reply: true
-    }).catch(() => { });
+    // 就地反馈：把本次结果写进面板文本并刷新（删旧发新），
+    // 不再单独发一条确认消息 —— 避免"标签成功消息 + 按钮界面"两条并存
+    await refreshPanel(userId, `✅ ${parts.join('；')}`);
     logger.info(`用户 ${userId} 打标签（文本输入）: ${parts.join('；')} -> group=${target.groupId}`);
     return true;
 }
@@ -454,11 +470,10 @@ async function handleTagCallback(query) {
         return;
     }
 
-    // ---- 翻页 ----
+    // ---- 翻页：按钮已改为"只显示已选 + 置顶"（数量有限，不再分页） ----
+    // 旧消息上的翻页按钮可能还在，收到后只做一次无害的刷新
     if (data.startsWith('sendtag_page:')) {
-        const page = parseInt(data.split(':')[1], 10) || 1;
-        await bot.answerCallbackQuery(query.id).catch(() => { });
-        await refreshPanel(userId, page);
+        await bot.answerCallbackQuery(query.id, { text: '标签按钮已改为只显示已选与置顶标签' }).catch(() => { });
         return;
     }
 
@@ -490,7 +505,7 @@ async function handleTagCallback(query) {
             counts: { tags: 1, messages: target.fileUniqueId ? 1 : undefined },
             detail: { tags: [tag], mode: 'button', via: 'send_reply_session' }
         }).catch(() => { });
-        await refreshPanel(userId);
+        await refreshPanel(userId, `✅ 标签「${tag}」已${applied ? '移除' : '添加'}`);
         logger.info(`用户 ${userId} 打标签（按钮）: ${applied ? '移除' : '添加'} ${tag} -> group=${target.groupId}${target.fileUniqueId ? `, file=${target.fileUniqueId}` : ''}`);
         return;
     }
