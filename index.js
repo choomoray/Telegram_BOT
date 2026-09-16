@@ -1,11 +1,11 @@
 // index.js
 const logger = require('./logger');
 const config = require('./config');
-const { connectDB, getClient, getDb } = require('./database');
+const { connectDB, getClient, getDb, startDbGuard } = require('./database');
 const { initCollections } = require('./db/index');
 const { loadSettings } = require('./db/settings');
 const { logOperation } = require('./utils/opLog');
-const { upsertChannelGroup, getChannelGroupById } = require('./db/channelGroup');
+const { upsertChannelGroup, getChannelGroupById, updateChannelGroup } = require('./db/channelGroup');
 const { startHealthServer } = require('./healthServer');
 // 集中式停机状态 + 信号接管：require 即生效，覆盖整个启动期
 // （否则启动阶段卡在 connectDB 重试里时，Ctrl+C 会被静默吞掉，见 shutdown.js 注释）
@@ -43,7 +43,7 @@ const HEALTH_PORT = config.HEALTH_PORT || 9699;
 // 不再随启动自动跑（启动阶段本来就忙着连库/建索引，没必要额外发外网请求）。
 
 
-// test 模式（node index test）：在 webui 基础上，日志额外复制一份到 test-log（启动时重置）
+// test 模式（node index test）：在 webui 基础上，日志额外复制一份到 logs/test-log（启动时重置）
 const TEST_MODE = process.argv.includes('test');
 
 /**
@@ -75,7 +75,7 @@ async function start() {
         await cleanupOrphanGroupList().catch(err => logger.error(`清理空媒体组 group_list 失败: ${err.message}`));
         // 3. 加载动态设置
         await loadSettings(config);
-        // test 模式：初始化临时日志（重置 test-log/log.log、error.log，仅启动时初始化）
+        // test 模式：初始化临时日志（重置 logs/test-log/log.log、error.log，仅启动时初始化）
         if (TEST_MODE) {
             await logger.initTestLog().catch(err => logger.warn(`初始化 test 日志失败: ${err.message}`));
         }
@@ -84,6 +84,19 @@ async function start() {
         // 4. 启动机器人
         const bot = require('./bot');
         bot.startBotPolling();
+
+        // 4.1 [自愈] 全库修正 channel_group.type：以 Telegram 真实会话类型为准
+        //     （历史数据里讨论群可能被登记成频道 —— 会让 /send 列表图标失真、
+        //       "只发在群组里"的媒体被记成频道位置、回复文案写成"回复在频道"）。
+        //     不阻塞启动：失败/取不到类型都只记日志，正常路径会走缓存，开销很小。
+        require('./utils/chatKind').repairChannelGroupTypes()
+            .catch(err => logger.warn(`channel_group 类型修正失败: ${err.message}`));
+
+        // 4.2 [自愈] 运行期数据库守卫：代理换 IP 导致 Atlas 白名单失效时，
+        //      自动把当前出口 IP 以临时条目加进白名单（见 utils/atlasAccessList.js）。
+        //      仅在 ATLAS_AUTO_WHITELIST=1 时启动（心跳失败才动作，平时只多一次 ping）。
+        startDbGuard();
+
         const { handlePrivateMessage } = require('./handlers/messageHandlers');
         const { handleGroupMessage, handleGroupEditedMessage } = require('./handlers/groupMessageHandlers');
         const { handleCallbackQuery } = require('./handlers/callbackHandler');
@@ -115,16 +128,22 @@ async function start() {
         bot.on('my_chat_member', safeHandler(async (update) => {
             const { chat, new_chat_member } = update;
             if (new_chat_member.status === 'administrator') {
+                // 类型以 Telegram 给出的 chat.type 为准（超级群组 ≠ 频道，两者 id 都以 -100 开头）
+                const type = chat.type === 'channel' ? 'channel' : 'group';
                 const exists = await getChannelGroupById(chat.id);
                 if (!exists) {
                     await upsertChannelGroup({
                         id: chat.id,
                         name: chat.title || chat.username || `Chat${chat.id}`,
-                        type: chat.type === 'channel' ? 'channel' : 'group',
+                        type,
                         bind_id: null,
                         is_bound: false
                     });
                     logger.info(`机器人成为管理员，自动添加群组: ${chat.id} (${chat.title})`);
+                } else if (exists.type !== type) {
+                    // 历史数据里类型可能是错的（例如把讨论群登记成了频道）→ 顺手改正
+                    await updateChannelGroup(chat.id, { type });
+                    logger.warn(`channel_group 类型修正(以 Telegram 为准): id=${chat.id}, ${exists.type} → ${type}`);
                 }
             }
         }));
@@ -319,6 +338,12 @@ async function gracefulShutdown(signal) {
         }).catch(() => { });
 
         // 3. 关闭 MongoDB 连接（最多等待 3 秒）
+        //    先停掉数据库心跳守卫，避免关闭过程中又去 ping / 维护白名单
+        try {
+            require('./database').stopDbGuard();
+        } catch (err) {
+            logger.warn(`停止数据库守卫失败: ${err.message}`);
+        }
         const client = getClient();
         if (client) {
             try {

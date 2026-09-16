@@ -1,172 +1,195 @@
 <!DOCTYPE html>
 <html lang="zh-CN" data-theme="dark">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>媒体库 · 数据库控制台</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico">
-<link rel="stylesheet" href="/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>媒体库 · 数据库控制台</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/style.css">
 </head>
+
 <body>
 
-<!-- ================= 登录 ================= -->
-<div id="login-view" class="login-view">
-  <div class="login-card">
-    <div class="login-logo">🖼</div>
-    <h1>Telegram Bot 数据库控制台</h1>
-    <p class="login-hint">媒体库 · 清理中心 · 用户与标签 · AI 操作台</p>
-    <label class="field">
-      <input type="password" id="login-password" placeholder="访问密码" autocomplete="current-password">
-    </label>
-    <button id="login-btn" class="btn btn-primary btn-block">进入控制台</button>
-    <p id="login-error" class="login-error hidden"></p>
-    <p class="login-foot">密码在数据库 <code>settings</code> 集合（<code>_id = app_settings</code>）的 <code>webui_password</code> 字段</p>
+  <!-- ================= 登录 ================= -->
+  <div id="login-view" class="login-view">
+    <div class="login-card">
+      <div class="login-logo">🖼</div>
+      <h1>Telegram Bot 数据库控制台</h1>
+      <p class="login-hint">媒体库 · 清理中心 · 用户与标签 · AI 操作台</p>
+      <label class="field">
+        <input type="password" id="login-password" placeholder="访问密码" autocomplete="current-password">
+      </label>
+      <button id="login-btn" class="btn btn-primary btn-block">进入控制台</button>
+      <p id="login-error" class="login-error hidden"></p>
+      <p class="login-foot">密码在数据库 <code>settings</code> 集合（<code>_id = app_settings</code>）的
+        <code>webui_password</code> 字段
+      </p>
+    </div>
   </div>
-</div>
 
-<!-- ================= 应用 ================= -->
-<div id="app-view" class="app dock-collapsed hidden">
+  <!-- ================= 应用 ================= -->
+  <div id="app-view" class="app dock-collapsed hidden">
 
-  <!-- 左侧导航 -->
-  <aside class="rail">
-    <div class="brand">
-      <span class="brand-logo">🖼</span>
-      <span class="brand-text">
-        <b>数据库控制台</b>
-        <i>Telegram 媒体机器人</i>
-      </span>
-    </div>
-
-    <nav class="nav" id="nav">
-      <button class="nav-item is-active" data-view="overview"><span class="nav-ico">📊</span><span>概览</span></button>
-      <button class="nav-item" data-view="media"><span class="nav-ico">🖼</span><span>媒体库</span><em id="nav-count-media" class="nav-badge"></em></button>
-      <button class="nav-item" data-view="random" title="随机推荐：类型 / 标签 / 关键词 / 视频时长 / 范围（可清理·保留）/ 数量 任意组合，抽一批媒体出来看，点卡片进媒体组详情"><span class="nav-ico">🎲</span><span>随机推荐</span></button>
-      <button class="nav-item" data-view="clean"><span class="nav-ico">🧹</span><span>清理中心</span><em id="nav-count-clean" class="nav-badge warn"></em></button>
-      <button class="nav-item" data-view="tags"><span class="nav-ico">🏷</span><span>标签</span><em id="nav-count-tags" class="nav-badge"></em></button>
-      <button class="nav-item" data-view="users"><span class="nav-ico">👥</span><span>用户</span><em id="nav-count-users" class="nav-badge"></em></button>
-      <button class="nav-item" data-view="chats"><span class="nav-ico">📢</span><span>群组 / 频道</span></button>
-      <button class="nav-item" data-view="transport" title="搬运收录：增删改 + 收录链接活性检查，可跳转 Telegram"><span class="nav-ico">🚚</span><span>搬运收录</span></button>
-      <button class="nav-item" data-view="articles"><span class="nav-ico">📄</span><span>文章</span></button>
-      <button class="nav-item" data-view="collections"><span class="nav-ico">📚</span><span>合集 / 杂集</span></button>
-      <button class="nav-item" data-view="stats"><span class="nav-ico">📈</span><span>统计报表</span></button>
-      <button class="nav-item" data-view="raw" title="数据库：上栏选集合 / 排序 / 插入，中间各集合明细表（点行即切换浏览），下方浏览原始文档（「全部数据库」可跨集合浏览），支持修改与删除"><span class="nav-ico">🗄</span><span>数据库</span></button>
-      <button class="nav-item" data-view="logs"><span class="nav-ico">📡</span><span>实时日志</span><span id="log-dot" class="dot"></span></button>
-    </nav>
-
-    <div class="rail-foot">
-      <button id="palette-btn" class="btn btn-ghost btn-sm" title="AI 操作台（Ctrl/⌘ + K）">🧠 AI 翻译</button>
-      <div class="rail-foot-row">
-        <button id="theme-btn" class="btn btn-ghost btn-sm" title="主题：跟随系统 / 浅色 / 深色（点击切换）">🌗 跟随系统</button>
-        <button id="logout-btn" class="btn btn-ghost btn-sm">退出</button>
+    <!-- 左侧导航 -->
+    <aside class="rail">
+      <div class="brand">
+        <span class="brand-logo">🖼</span>
+        <span class="brand-text">
+          <b>数据库控制台</b>
+          <i>Telegram 媒体机器人</i>
+        </span>
       </div>
-    </div>
-  </aside>
 
-  <!-- 主区域 -->
-  <main class="main">
-    <header class="topbar">
-      <div class="titles">
-        <h1 id="page-title">概览</h1>
-        <p id="page-sub" class="dim">正在加载…</p>
-      </div>
-      <div class="topbar-actions">
-        <div class="search" id="search-wrap">
-          <span class="search-ico">🔍</span>
-          <input id="global-search" placeholder="搜索描述 / 标签，回车查询" autocomplete="off">
-          <button id="search-clear" class="search-clear" title="清空" tabindex="-1">✕</button>
+      <nav class="nav" id="nav">
+        <button class="nav-item is-active" data-view="overview"><span class="nav-ico">📊</span><span>概览</span></button>
+        <button class="nav-item" data-view="media"><span class="nav-ico">🖼</span><span>媒体库</span><em
+            id="nav-count-media" class="nav-badge"></em></button>
+        <button class="nav-item" data-view="random"
+          title="随机推荐：类型 / 标签 / 关键词 / 视频时长 / 范围（可清理·保留）/ 数量 任意组合，抽一批媒体出来看，点卡片进媒体组详情"><span
+            class="nav-ico">🎲</span><span>随机推荐</span></button>
+        <button class="nav-item" data-view="clean"><span class="nav-ico">🧹</span><span>清理中心</span><em
+            id="nav-count-clean" class="nav-badge warn"></em></button>
+        <button class="nav-item" data-view="tags"><span class="nav-ico">🏷</span><span>标签</span><em id="nav-count-tags"
+            class="nav-badge"></em></button>
+        <button class="nav-item" data-view="users"><span class="nav-ico">👥</span><span>用户</span><em
+            id="nav-count-users" class="nav-badge"></em></button>
+        <button class="nav-item" data-view="chats"><span class="nav-ico">📢</span><span>群组 / 频道</span></button>
+        <button class="nav-item" data-view="transport" title="搬运收录：增删改 + 收录链接活性检查，可跳转 Telegram"><span
+            class="nav-ico">🚚</span><span>搬运收录</span></button>
+        <button class="nav-item" data-view="articles"><span class="nav-ico">📄</span><span>文章</span></button>
+        <button class="nav-item" data-view="collections"><span class="nav-ico">📚</span><span>合集 / 杂集</span></button>
+        <button class="nav-item" data-view="stats"><span class="nav-ico">📈</span><span>统计报表</span></button>
+        <button class="nav-item" data-view="raw"
+          title="数据库：上栏选集合 / 排序 / 插入，中间各集合明细表（点行即切换浏览），下方浏览原始文档（「全部数据库」可跨集合浏览），支持修改与删除"><span
+            class="nav-ico">🗄</span><span>数据库</span></button>
+        <button class="nav-item" data-view="logs"><span class="nav-ico">📡</span><span>实时日志</span><span id="log-dot"
+            class="dot"></span></button>
+      </nav>
+
+      <div class="rail-foot">
+        <button id="palette-btn" class="btn btn-ghost btn-sm" title="AI 操作台（Ctrl/⌘ + K）">🧠 AI 翻译</button>
+        <div class="rail-foot-row">
+          <button id="theme-btn" class="btn btn-ghost btn-sm" title="主题：跟随系统 / 浅色 / 深色（点击切换）">🌗 跟随系统</button>
+          <button id="logout-btn" class="btn btn-ghost btn-sm">退出</button>
         </div>
-        <button id="refresh-btn" class="btn btn-sm" title="刷新（R）">↻ 刷新</button>
-        <label class="switch" title="每 5 秒自动刷新当前页面">
-          <input type="checkbox" id="auto-refresh"><span>自动</span>
-        </label>
       </div>
-    </header>
+    </aside>
 
-    <div id="view" class="view"><div class="loading">正在加载…</div></div>
-  </main>
-
-  <!-- 右侧日志坞 -->
-  <aside class="dock" id="dock">
-    <button id="dock-toggle" class="dock-toggle" title="展开 / 收起实时日志">📡<span class="dock-toggle-label">日志</span><i id="dock-dot" class="dot"></i></button>
-    <div class="dock-body">
-      <header class="dock-head">
-        <span>实时日志</span>
-        <span id="log-status" class="dim"></span>
-        <span class="spacer"></span>
-        <button id="log-pause" class="btn btn-ghost btn-xs" title="暂停滚动">⏸</button>
-        <button id="log-clear" class="btn btn-ghost btn-xs" title="清空">🗑</button>
-        <button id="log-collapse" class="btn btn-ghost btn-xs" title="收起日志坞">⟩</button>
+    <!-- 主区域 -->
+    <main class="main">
+      <header class="topbar">
+        <div class="titles">
+          <h1 id="page-title">概览</h1>
+          <p id="page-sub" class="dim">正在加载…</p>
+        </div>
+        <div class="topbar-actions">
+          <div class="search" id="search-wrap">
+            <span class="search-ico">🔍</span>
+            <input id="global-search" placeholder="搜索描述 / 标签，回车查询" autocomplete="off">
+            <button id="search-clear" class="search-clear" title="清空" tabindex="-1">✕</button>
+          </div>
+          <button id="refresh-btn" class="btn btn-sm" title="刷新（R）">↻ 刷新</button>
+          <label class="switch" title="每 5 秒自动刷新当前页面">
+            <input type="checkbox" id="auto-refresh"><span>自动</span>
+          </label>
+        </div>
       </header>
-      <div id="log-list" class="log-list"></div>
+
+      <div id="view" class="view">
+        <div class="loading">正在加载…</div>
+      </div>
+    </main>
+
+    <!-- 右侧日志坞 -->
+    <aside class="dock" id="dock">
+      <button id="dock-toggle" class="dock-toggle" title="展开 / 收起实时日志">📡<span class="dock-toggle-label">日志</span><i
+          id="dock-dot" class="dot"></i></button>
+      <div class="dock-body">
+        <header class="dock-head">
+          <span>实时日志</span>
+          <span id="log-status" class="dim"></span>
+          <span class="spacer"></span>
+          <button id="log-pause" class="btn btn-ghost btn-xs" title="暂停滚动">⏸</button>
+          <button id="log-clear" class="btn btn-ghost btn-xs" title="清空">🗑</button>
+          <button id="log-collapse" class="btn btn-ghost btn-xs" title="收起日志坞">⟩</button>
+        </header>
+        <div id="log-list" class="log-list"></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- 媒体组详情 -->
+  <dialog id="detail-dialog" class="dialog">
+    <div class="dialog-head">
+      <h2 id="detail-title">媒体组</h2>
+      <button class="btn btn-ghost btn-sm" data-close>✕</button>
     </div>
-  </aside>
-</div>
+    <div id="detail-body" class="dialog-body"></div>
+    <div id="detail-foot" class="dialog-foot"></div>
+  </dialog>
 
-<!-- 媒体组详情 -->
-<dialog id="detail-dialog" class="dialog">
-  <div class="dialog-head">
-    <h2 id="detail-title">媒体组</h2>
-    <button class="btn btn-ghost btn-sm" data-close>✕</button>
-  </div>
-  <div id="detail-body" class="dialog-body"></div>
-  <div id="detail-foot" class="dialog-foot"></div>
-</dialog>
+  <!-- 确认框 -->
+  <dialog id="confirm-dialog" class="dialog dialog-sm">
+    <div class="dialog-head">
+      <h2 id="confirm-title">确认</h2><button class="btn btn-ghost btn-sm" data-close>✕</button>
+    </div>
+    <div id="confirm-body" class="dialog-body"></div>
+    <div class="dialog-foot">
+      <button id="confirm-cancel" class="btn btn-ghost">取消</button>
+      <button id="confirm-ok" class="btn btn-danger">确认</button>
+    </div>
+  </dialog>
 
-<!-- 确认框 -->
-<dialog id="confirm-dialog" class="dialog dialog-sm">
-  <div class="dialog-head"><h2 id="confirm-title">确认</h2><button class="btn btn-ghost btn-sm" data-close>✕</button></div>
-  <div id="confirm-body" class="dialog-body"></div>
-  <div class="dialog-foot">
-    <button id="confirm-cancel" class="btn btn-ghost">取消</button>
-    <button id="confirm-ok" class="btn btn-danger">确认</button>
-  </div>
-</dialog>
+  <!-- 通用表单对话框（用户 / 群组 新增与修改） -->
+  <dialog id="form-dialog" class="dialog dialog-sm">
+    <div class="dialog-head">
+      <h2 id="form-title">编辑</h2><button class="btn btn-ghost btn-sm" data-close>✕</button>
+    </div>
+    <div id="form-body" class="dialog-body"></div>
+    <div class="dialog-foot">
+      <button id="form-cancel" class="btn btn-ghost">取消</button>
+      <button id="form-ok" class="btn btn-primary">保存</button>
+    </div>
+  </dialog>
 
-<!-- 通用表单对话框（用户 / 群组 新增与修改） -->
-<dialog id="form-dialog" class="dialog dialog-sm">
-  <div class="dialog-head"><h2 id="form-title">编辑</h2><button class="btn btn-ghost btn-sm" data-close>✕</button></div>
-  <div id="form-body" class="dialog-body"></div>
-  <div class="dialog-foot">
-    <button id="form-cancel" class="btn btn-ghost">取消</button>
-    <button id="form-ok" class="btn btn-primary">保存</button>
-  </div>
-</dialog>
-
-<!-- AI 操作台（命令面板） -->
-<div id="palette" class="palette hidden">
-  <div class="palette-mask" data-close></div>
-  <div class="palette-box">
-    <header class="palette-head">
-      <span class="palette-title">🧠 AI 翻译 · 自然语言操作数据库</span>
-      <span class="dim">AI 只翻译，执行前需你确认</span>
-      <span class="spacer"></span>
-      <button id="palette-close" class="btn btn-ghost btn-sm" data-close>✕</button>
-    </header>
-    <div class="palette-body">
-      <textarea id="palette-prompt" rows="2" placeholder="例如：找出带 JK 标签的媒体 / 这个月收录了多少媒体 / 把用户 12345 设为白名单"></textarea>
-      <div class="chips" id="palette-examples">
-        <button class="chip" data-action="palette-example" data-text="查一下被标记超过 5 次的媒体组">被标记超过 5 次的组</button>
-        <button class="chip" data-action="palette-example" data-text="列出最老的空描述可清理组">最老的可清理组</button>
-        <button class="chip" data-action="palette-example" data-text="找出带 JK 标签的媒体">带 JK 标签的媒体</button>
-        <button class="chip" data-action="palette-example" data-text="这个月的操作日志按月统计">本月操作日志</button>
-        <button class="chip" data-action="palette-example" data-text="时长超过 10 分钟的视频">超长视频</button>
-        <button class="chip" data-action="palette-example" data-text="看看有哪些频道以及绑定的群">频道与绑定</button>
-      </div>
-      <div class="palette-row">
-        <button id="palette-translate" class="btn btn-ai btn-sm">翻译为操作</button>
-        <span class="dim" id="palette-hint">Ctrl/⌘ + Enter 翻译 · AI 不直接改库</span>
-      </div>
-      <div id="palette-explain" class="palette-explain hidden"></div>
-      <textarea id="palette-json" class="mono hidden" rows="6" spellcheck="false" placeholder="操作 JSON（可编辑）"></textarea>
-      <div class="palette-row" id="palette-exec-row" hidden>
-        <button id="palette-exec" class="btn btn-primary btn-sm">执行操作</button>
-        <span class="dim">删除类操作会二次确认；「查询」结果会渲染到「原始数据」视图</span>
+  <!-- AI 操作台（命令面板） -->
+  <div id="palette" class="palette hidden">
+    <div class="palette-mask" data-close></div>
+    <div class="palette-box">
+      <header class="palette-head">
+        <span class="palette-title">🧠 AI 翻译 · 自然语言操作数据库</span>
+        <span class="dim">AI 只翻译，执行前需你确认</span>
+        <span class="spacer"></span>
+        <button id="palette-close" class="btn btn-ghost btn-sm" data-close>✕</button>
+      </header>
+      <div class="palette-body">
+        <textarea id="palette-prompt" rows="2" placeholder="例如：找出带 JK 标签的媒体 / 这个月收录了多少媒体 / 把用户 12345 设为白名单"></textarea>
+        <div class="chips" id="palette-examples">
+          <button class="chip" data-action="palette-example" data-text="查一下被标记超过 5 次的媒体组">被标记超过 5 次的组</button>
+          <button class="chip" data-action="palette-example" data-text="列出最老的空描述可清理组">最老的可清理组</button>
+          <button class="chip" data-action="palette-example" data-text="找出带 JK 标签的媒体">带 JK 标签的媒体</button>
+          <button class="chip" data-action="palette-example" data-text="这个月的操作日志按月统计">本月操作日志</button>
+          <button class="chip" data-action="palette-example" data-text="时长超过 10 分钟的视频">超长视频</button>
+          <button class="chip" data-action="palette-example" data-text="看看有哪些频道以及绑定的群">频道与绑定</button>
+        </div>
+        <div class="palette-row">
+          <button id="palette-translate" class="btn btn-ai btn-sm">翻译为操作</button>
+          <span class="dim" id="palette-hint">Ctrl/⌘ + Enter 翻译 · AI 不直接改库</span>
+        </div>
+        <div id="palette-explain" class="palette-explain hidden"></div>
+        <textarea id="palette-json" class="mono hidden" rows="6" spellcheck="false"
+          placeholder="操作 JSON（可编辑）"></textarea>
+        <div class="palette-row" id="palette-exec-row" hidden>
+          <button id="palette-exec" class="btn btn-primary btn-sm">执行操作</button>
+          <span class="dim">删除类操作会二次确认；「查询」结果会渲染到「原始数据」视图</span>
+        </div>
       </div>
     </div>
   </div>
-</div>
 
-<div id="toast" class="toast hidden"></div>
-<script src="/app.js"></script>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
 </body>
+
 </html>

@@ -37,12 +37,13 @@ test('index.html 包含既有测试依赖的文案', () => {
 
 test('index.html：导航里有「随机推荐」入口', () => {
   assert.match(html, /data-view="random"/, '随机推荐视图入口');
-  assert.match(html, /<span class="nav-ico">🎲<\/span><span>随机推荐<\/span>/);
+  // 属性可能被格式化换行（<span\n class="nav-ico">），用 \s+ 容错
+  assert.match(html, /<span\s+class="nav-ico">🎲<\/span><span>随机推荐<\/span>/);
 });
 
 test('index.html：导航里「数据库 / 原始数据」已改名为「数据库」', () => {
   assert.match(html, /data-view="raw"/, '数据库视图入口还在');
-  assert.match(html, /<span class="nav-ico">🗄<\/span><span>数据库<\/span>/, '导航文案为「数据库」');
+  assert.match(html, /<span\s+class="nav-ico">🗄<\/span><span>数据库<\/span>/, '导航文案为「数据库」');
   assert.ok(!html.includes('数据库 / 原始数据'), '旧名字已去掉');
 });
 

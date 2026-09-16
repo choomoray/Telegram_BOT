@@ -29,6 +29,7 @@ installLoggerStub(root);
 
 const replyMode = require('../handlers/modes/messageReplyMode');
 const handleMessageReplyMode = require('../handlers/modes/messageReplyMode');
+const chatKind = require('../utils/chatKind');
 const { setUserState, getRawUserState } = require('../states');
 const { COLLECTIONS } = require('../db/getCollection');
 
@@ -387,4 +388,47 @@ test('media 双位置指向同一聊天（数据异常）时不误判为频道�
     assert.strictEqual(getRawUserState(USER).step, 'ready', '同一个位置不算双位置，不该弹选择按钮');
     assert.strictEqual(getRawUserState(USER).targetChatId, GROUP_CHAT);
     assert.ok(!findButton(edits, 'mreply_loc:group'));
+});
+
+// ---------------- 位置名骗人：只发在群组里、却被记成频道位置（用户反馈） ----------------
+
+test('只发在群组里的媒体（位置被错记成 channel）→ 文案按实际会话显示「👥 群组」', async () => {
+    resetStore();
+    chatKind.clearChatKindCache();
+    // 历史脏数据：讨论群在 channel_group 里被登记成 channel，于是回复它时
+    // buildMediaLocation 把"只发在群组里"的媒体写成了 channel 位置
+    store.set(COLLECTIONS.CHANNEL_GROUP, [
+        { _id: 'cg1', id: GROUP_CHAT, name: '讨论群', type: 'channel', bind_id: null, is_bound: false }
+    ]);
+    store.set(COLLECTIONS.MESSAGE, [{
+        _id: 's7', group_id: GROUP_ID, file_unique_id: FILE_ID, text: '群里的描述',
+        chat_id: GROUP_CHAT, message_id: 960, media_type: 'document', tags: []
+    }]);
+    store.set(COLLECTIONS.MEDIA, [{
+        _id: 'm7', group_id: GROUP_ID, subgroup: 1, file_unique_id: FILE_ID, media_type: 'document',
+        file_id: 'AgACRF1',
+        group: null,
+        channel: { chat_id: GROUP_CHAT, message_id: 960 }   // ← 位置名是 channel，实际是群
+    }]);
+    store.set(COLLECTIONS.GROUP_LIST, [{ _id: 'g7', group_id: GROUP_ID, is_group: 1, is_delete: 0, mark: 0 }]);
+
+    // Telegram 真实类型：这是个超级群组（不是频道）
+    bot.getChat = async (chatId) => ({ id: Number(chatId), type: 'supergroup' });
+
+    startReplyMode();
+    const { sent, edits } = trackBot();
+
+    await locate();
+
+    const st = getRawUserState(USER);
+    assert.strictEqual(st.step, 'ready');
+    assert.strictEqual(st.targetChatId, GROUP_CHAT, '回复位置本来就是群（只是位置名写错了）');
+    assert.ok(edits.some(e => (e.text || '').includes('已选择回复在👥 群组')),
+        `文案必须显示群组，实际编辑内容：${edits.map(e => e.text).join(' | ')}`);
+    assert.ok(!edits.some(e => (e.text || '').includes('已选择回复在📢 频道')), '不能再说"回复在频道"');
+    assert.ok(sent.some(s => s.chatId === GROUP_CHAT && s.text.includes('正在回复该消息')), '提示消息发在群里');
+
+    delete bot.getChat;
+    chatKind.clearChatKindCache();
+    resetStore();
 });

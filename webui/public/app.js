@@ -33,7 +33,7 @@
     photo: { icon: '🖼', label: '图片' },
     video: { icon: '🎬', label: '视频' },
     audio: { icon: '🎵', label: '音频' },
-    document: { icon: '📄', label: '文件' },
+    document: { icon: '💾', label: '文件' },
     // /send、/reply 发出的纯文本也会收录成一条 media（media_type='text'）
     text: { icon: '📝', label: '文本' }
   };
@@ -1056,11 +1056,11 @@
       <div class="media-body">
         <div class="media-text ${item.text ? '' : 'is-empty'}">${text}</div>
         ${compact
-          ? `<div class="media-meta">
+        ? `<div class="media-meta">
           <span>${typeIcons}</span>
           <span>${fmtNum(item.mediaCount)} 个媒体</span>
         </div>`
-          : `<div class="media-badges">
+        : `<div class="media-badges">
           <span class="tag ${item.cleanable ? 'warn' : 'ok'}">${item.cleanable ? '可清理' : '保留'}</span>
           ${typeTags}
         </div>

@@ -34,7 +34,6 @@
 
    ```bash
    node index.js          # 正常模式
-   node index.js --test   # 测试模式（使用测试数据库 TEST_MONGODB_URI）
    node index.js test     # test-log 模式（额外生成 AI 可读临时日志，随 webui 启动）
    ```
 
@@ -67,7 +66,7 @@
    npm run start:test     # 或 node index.js test
    ```
 
-   在 webui 模式基础上，日志除正常写入 `logs/<年>/<月>/<周>/<日>.log` 外，额外复制一份到 `test-log/`（与 logs 平级，仅含 `log.log`、`error.log` 两个扁平文件），**供 AI 读取分析**。`test-log` 在**每次以 test 启动时初始化**（清空上次内容），关闭时不清理由 test 模式产生的数据。
+   在 webui 模式基础上，日志除正常写入 `logs/<年>/<月>/<周>/<日>.log` 外，额外复制一份到 `logs/test-log/`（仅含 `log.log`、`error.log` 两个扁平文件），**供 AI 读取分析**。`logs/test-log` 在**每次以 test 启动时初始化**（清空上次内容），关闭时不清理由 test 模式产生的数据。
 
 7. **（可选，推荐）看门狗模式（崩溃自动重启 + 通知管理员）：**
 
@@ -199,14 +198,14 @@ connectDB() ──► initCollections() ──► loadSettings() ──► 创�
 
 **事件注册详情：**
 
-| 事件 | 处理器 | 触发时机 |
-|------|--------|----------|
-| `message` | `handlePrivateMessage` / `handleGroupMessage` | 收到新消息 |
-| `edited_message` | `handleGroupEditedMessage` | 消息被编辑 |
-| `callback_query` | `handleCallbackQuery` | 点击内联按钮 |
-| `chat_member` | 自动处理用户加入/离开 | 群组成员变更 |
-| `my_chat_member` | 自动注册 Bot 加入的群组 | Bot 被添加为管理员 |
-| `chat_join_request` | 自动审批入群请求 | 用户申请加群 |
+| 事件                | 处理器                                        | 触发时机           |
+| ------------------- | --------------------------------------------- | ------------------ |
+| `message`           | `handlePrivateMessage` / `handleGroupMessage` | 收到新消息         |
+| `edited_message`    | `handleGroupEditedMessage`                    | 消息被编辑         |
+| `callback_query`    | `handleCallbackQuery`                         | 点击内联按钮       |
+| `chat_member`       | 自动处理用户加入/离开                         | 群组成员变更       |
+| `my_chat_member`    | 自动注册 Bot 加入的群组                       | Bot 被添加为管理员 |
+| `chat_join_request` | 自动审批入群请求                              | 用户申请加群       |
 
 **实现机制：**
 - 数据库就绪前收到的消息会被暂存到 `pendingMessages` 数组，就绪后批量处理
@@ -251,16 +250,14 @@ const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, {
 - 支持 `#` 注释行和 `KEY=VALUE` 格式
 - 自动去除值的前后引号
 - `ADMIN_CHAT_ID` 被解析为 `number[]` 数组
-- `--test` 命令行参数通过 `process.argv.includes('--test')` 检测
 
 **导出的关键配置：**
 
-| 配置项 | 类型 | 说明 |
-|--------|------|------|
-| `TELEGRAM_BOT_TOKEN` | string | Bot Token |
-| `MONGODB_URI` | string | 主数据库连接串 |
-| `TEST_MONGODB_URI` | string | 测试数据库连接串 |
-| `ADMIN_CHAT_IDS` | number[] | 管理员用户 ID 列表 |
+| 配置项               | 类型     | 说明               |
+| -------------------- | -------- | ------------------ |
+| `TELEGRAM_BOT_TOKEN` | string   | Bot Token          |
+| `MONGODB_URI`        | string   | 数据库连接串       |
+| `ADMIN_CHAT_IDS`     | number[] | 管理员用户 ID 列表 |
 
 ---
 
@@ -275,9 +272,9 @@ const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, {
   - 重试次数：6 次
   - 每次间隔递增：5s → 10s → 15s → 20s → 25s
   - 总计最长等待约 30 秒
-- 测试模式（`--test` 标志）下：
-  - 数据库名添加 `_test` 后缀
-  - 使用 `TEST_MONGODB_URI` 连接
+- 只有一个（生产）数据库：`DB_NAME`（`telegram_bot`）。
+  历史上曾有 `--test` 专用测试库模式（`_test` 后缀 + `TEST_MONGODB_URI`），已移除；
+  `node index test` 只影响日志（额外写一份到 `logs/test-log/`），仍连同一个库。
 - 导出 `getDb()` / `getClient()` / `getDatabaseName()` 供全局访问
 - 连接关闭绑定到 SIGINT 信号处理
 
@@ -299,8 +296,8 @@ const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, {
 - 日志按 **年/月/周分级目录 + 按天拆文件** 存储：`logs/<年>/<月>/<ISO周>/<YYYY-MM-DD>.log`
   （如 `logs/2026/08/2026-W36/2026-08-31.log`，ISO 周号周一为一周开始；所有级别合在当天文件，
   每行自带 `[INFO]`/`[ERRO]` 级别标记）
-- **test 模式**（`node index test`）：日志额外复制一份到 `test-log/log.log`、`test-log/error.log`
-  （与 logs 平级的扁平临时日志，启动时重置，便于本次运行统一查看）
+- **test 模式**（`node index test`）：日志额外复制一份到 `logs/test-log/log.log`、`logs/test-log/error.log`
+  （logs 目录内的扁平临时日志，启动时重置，便于本次运行统一查看）
 - **关闭清理**：收到关闭信号时立即删除"定时删除"的群组提示消息与消息回复模式遗留的"正在回复该消息"提示，
   并刷盘日志队列保证日志不丢失
 - 日志目录在首次写入时自动创建
@@ -313,15 +310,15 @@ const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, {
 
 **核心函数：**
 
-| 函数 | 功能 | 实现要点 |
-|------|------|----------|
-| `extractMediaFromMessage(msg)` | 从消息中提取媒体信息 | 检测 photo/video/audio/document 类型，返回标准化媒体对象；**文档/音频额外给出 `mediaName`**（文档取 `file_name`，音频优先 `file_name`、其次「标题 - 艺术家」），图片/视频不取。**不再自动为音频拼描述**：没有 caption 就是没有描述，严格按用户发送的内容收录 |
-| `recordTextMedia({sentMsg, ...})` | 收录一条纯文本 | 写 `media_type='text'`：内容进 `media_name`、`entities` 进 `media_entities`（保留 Telegram 格式） |
-| `sendMediaAsReply(chatId, replyId, media)` | 回复发送单个媒体 | 按 media_type 调用不同的 send 方法，附带原文链接按钮 |
-| `sendMediaGroupAsReply(chatId, replyId, items, size)` | 批量发送媒体组 | 按 subgroup 分组发送，每批最多 10 条；**注释先行带上**：描述即使原本不在第一条，也先把第一条注释内联带上（发送那一刻产生的副本 —— 尤其是频道帖被 Telegram 自动转发到关联讨论群 —— 才会带上描述），发完再编辑还原到原本的媒体并清掉第一条（`albumCaptionCarry` / `clearAlbumCaption`）；**文本媒体不进相册，按原文顺序单独作为文本消息发出**（带 entities 保留格式） |
-| `clearMediaGroupState(userId, send, state)` | 清理收集状态并发送 | 将 `mediaCollection` 中的暂存媒体分批发出后清空 |
-| `sendMediaSubgroup(chatId, groupId, subgroup)` | 发送指定子组 | 直接查询数据库获取指定 subgroup 的媒体列表；遇到文本媒体先冲刷相册再单独发文本 |
-| `sendMediaGroup(chatId, groupId)` | 发送完整媒体组 | 遍历所有 subgroup 逐批发送 |
+| 函数                                                  | 功能                 | 实现要点                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extractMediaFromMessage(msg)`                        | 从消息中提取媒体信息 | 检测 photo/video/audio/document 类型，返回标准化媒体对象；**文档/音频额外给出 `mediaName`**（文档取 `file_name`，音频优先 `file_name`、其次「标题 - 艺术家」），图片/视频不取。**不再自动为音频拼描述**：没有 caption 就是没有描述，严格按用户发送的内容收录                                                                                                        |
+| `recordTextMedia({sentMsg, ...})`                     | 收录一条纯文本       | 写 `media_type='text'`：内容进 `media_name`、`entities` 进 `media_entities`（保留 Telegram 格式）                                                                                                                                                                                                                                                                   |
+| `sendMediaAsReply(chatId, replyId, media)`            | 回复发送单个媒体     | 按 media_type 调用不同的 send 方法，附带原文链接按钮                                                                                                                                                                                                                                                                                                                |
+| `sendMediaGroupAsReply(chatId, replyId, items, size)` | 批量发送媒体组       | 按 subgroup 分组发送，每批最多 10 条；**注释先行带上**：描述即使原本不在第一条，也先把第一条注释内联带上（发送那一刻产生的副本 —— 尤其是频道帖被 Telegram 自动转发到关联讨论群 —— 才会带上描述），发完再编辑还原到原本的媒体并清掉第一条（`albumCaptionCarry` / `clearAlbumCaption`）；**文本媒体不进相册，按原文顺序单独作为文本消息发出**（带 entities 保留格式） |
+| `clearMediaGroupState(userId, send, state)`           | 清理收集状态并发送   | 将 `mediaCollection` 中的暂存媒体分批发出后清空                                                                                                                                                                                                                                                                                                                     |
+| `sendMediaSubgroup(chatId, groupId, subgroup)`        | 发送指定子组         | 直接查询数据库获取指定 subgroup 的媒体列表；遇到文本媒体先冲刷相册再单独发文本                                                                                                                                                                                                                                                                                      |
+| `sendMediaGroup(chatId, groupId)`                     | 发送完整媒体组       | 遍历所有 subgroup 逐批发送                                                                                                                                                                                                                                                                                                                                          |
 
 **媒体收集流程（mediaCollection）：**
 1. 用户进入 `media_group` / `media_hide` / `media_unhide` 模式
@@ -357,13 +354,13 @@ const states = new Map();  // key: userId (number), value: state object
 
 **状态管理函数：**
 
-| 函数 | 说明 |
-|------|------|
-| `getUserState(userId)` | 获取状态，超时自动清理 |
-| `getRawUserState(userId)` | 获取原始状态，不检测超时 |
-| `setUserState(userId, state)` | 设置/覆盖状态 |
-| `deleteUserState(userId)` | 删除状态 |
-| `updateUserActivity(userId)` | 更新最后活动时间 |
+| 函数                          | 说明                     |
+| ----------------------------- | ------------------------ |
+| `getUserState(userId)`        | 获取状态，超时自动清理   |
+| `getRawUserState(userId)`     | 获取原始状态，不检测超时 |
+| `setUserState(userId, state)` | 设置/覆盖状态            |
+| `deleteUserState(userId)`     | 删除状态                 |
+| `updateUserActivity(userId)`  | 更新最后活动时间         |
 
 > **注意：** 状态存储在内存中，Bot 重启后所有状态丢失。这是有意设计——用户状态不需要持久化。
 
@@ -475,13 +472,13 @@ function generateGroupIdFromMessage(msg) { ... }
 
 #### opLog.js — 操作日志（schema v2）
 
-| 导出 | 功能 |
-|------|------|
-| `logOperation(entry)` | **唯一写入入口**：规范化 `action`/`category`/`result`/`source`/`target`/`counts`/`detail`，写入 `date`+`time`，失败只记日志不抛错 |
-| `insertLog(type, userId, extra)` | 兼容旧编号的包装（旧调用无需改动，自动映射成动作键） |
-| `ACTIONS` / `CATEGORIES` / `ACTION_BY_TYPE` | 动作目录、大类名称、旧编号反查表 |
-| `getCatalog()` | 动作目录（WebUI `/api/oplogs` 与 `/api/stats` 返回给前端做标签展示） |
-| `actionLabel(action)` / `categoryLabel(category)` | 展示用中文名 |
+| 导出                                              | 功能                                                                                                                              |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `logOperation(entry)`                             | **唯一写入入口**：规范化 `action`/`category`/`result`/`source`/`target`/`counts`/`detail`，写入 `date`+`time`，失败只记日志不抛错 |
+| `insertLog(type, userId, extra)`                  | 兼容旧编号的包装（旧调用无需改动，自动映射成动作键）                                                                              |
+| `ACTIONS` / `CATEGORIES` / `ACTION_BY_TYPE`       | 动作目录、大类名称、旧编号反查表                                                                                                  |
+| `getCatalog()`                                    | 动作目录（WebUI `/api/oplogs` 与 `/api/stats` 返回给前端做标签展示）                                                              |
+| `actionLabel(action)` / `categoryLabel(category)` | 展示用中文名                                                                                                                      |
 
 详见 [db/log.js — 操作日志（schema v2）](#dblogjs--操作日志schema-v2)。
 
@@ -495,15 +492,15 @@ function generateGroupIdFromMessage(msg) { ... }
 
 `/transport` 列表、控制台「搬运收录」与每 6 小时的巡检任务共用：
 
-| 导出 | 功能 |
-|------|------|
-| `checkTransportLink(record)` | 实测单条：**优先按链接里的 `t.me/<username>` 探测**（机器人通常并不在搬运来源频道里，直接按 chat_id 查会得到 "chat not found"，早期实现因此把所有公开频道误报为失效）→ `ok`；公开用户名解析失败（频道已删除/改名/被封）→ `dead`；机器人能按 chat_id 访问但已被踢/退出 → `dead`；**私有/消息链接**（`t.me/c/…`）无权验证 → `unknown`（绝不判死）；429/网络/5xx → `unknown` |
-| `checkAllTransports({ records, concurrency, force, maxAgeMs, onResult })` | 并发检查（默认 4，带节流与 429 兜底）并写回数据库；返回 `{ total, checked, ok, dead, newlyDead, recovered, unknown, skipped }` |
-| `formatDeadReport(deadList)` | 失效清单文本（名称 / chat_id / 链接 / 原因），通知与菜单共用 |
-| `notifyAdmins(text)` | 发送给 `ADMIN_CHAT_ID`（逗号分隔的多个管理员） |
-| `transportLinkUrl(record)` | 见 `utils/tgLink.js`（重新导出） |
-| `publicUsernameOf(url)` / `rateLimitRetryAfter(err)` | 从链接里取公开用户名；从 429 错误里取建议重试秒数 |
-| `isDeadError(err)` / `isTransientError(err)` | 区分"链接失效"与"临时故障"（**429/5xx/网络一律算临时**，绝不算失效） |
+| 导出                                                                      | 功能                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checkTransportLink(record)`                                              | 实测单条：**优先按链接里的 `t.me/<username>` 探测**（机器人通常并不在搬运来源频道里，直接按 chat_id 查会得到 "chat not found"，早期实现因此把所有公开频道误报为失效）→ `ok`；公开用户名解析失败（频道已删除/改名/被封）→ `dead`；机器人能按 chat_id 访问但已被踢/退出 → `dead`；**私有/消息链接**（`t.me/c/…`）无权验证 → `unknown`（绝不判死）；429/网络/5xx → `unknown` |
+| `checkAllTransports({ records, concurrency, force, maxAgeMs, onResult })` | 并发检查（默认 4，带节流与 429 兜底）并写回数据库；返回 `{ total, checked, ok, dead, newlyDead, recovered, unknown, skipped }`                                                                                                                                                                                                                                            |
+| `formatDeadReport(deadList)`                                              | 失效清单文本（名称 / chat_id / 链接 / 原因），通知与菜单共用                                                                                                                                                                                                                                                                                                              |
+| `notifyAdmins(text)`                                                      | 发送给 `ADMIN_CHAT_ID`（逗号分隔的多个管理员）                                                                                                                                                                                                                                                                                                                            |
+| `transportLinkUrl(record)`                                                | 见 `utils/tgLink.js`（重新导出）                                                                                                                                                                                                                                                                                                                                          |
+| `publicUsernameOf(url)` / `rateLimitRetryAfter(err)`                      | 从链接里取公开用户名；从 429 错误里取建议重试秒数                                                                                                                                                                                                                                                                                                                         |
+| `isDeadError(err)` / `isTransientError(err)`                              | 区分"链接失效"与"临时故障"（**429/5xx/网络一律算临时**，绝不算失效）                                                                                                                                                                                                                                                                                                      |
 
 **检查触发点：** ① 用户执行 `/transport` 进入列表时触发一次（带 10 分钟节流与并发去重）；② 菜单/明细里的「🔍 检查链接活性」（全量）与「检查该链接活性」（单条）；③ 新增收录 / 改链接 / 改 chat_id 后立即实测并回显结论；④ WebUI 进入「搬运收录」视图时触发一次（同样节流）。结果记为 `transport_check` 操作日志。
 
@@ -517,11 +514,11 @@ function generateGroupIdFromMessage(msg) { ... }
 
 `/edit` 之外的三条定位路径共用（私聊消息链接 / 转发来源、群组里被回复的频道转发副本）：
 
-| 导出 | 功能 |
-|------|------|
-| `parseMessageLink(text)` | 解析消息链接（纯函数）：`t.me/c/<内部ID>/<消息ID>` → `chatId=-100<内部ID>`；`t.me/<公开用户名>/<消息ID>` → 只给用户名（需 `getChat` 解析）；邀请链接等非消息链接返回 null |
-| `resolveUsernameChatId(username, bot)` | 公开用户名 → chat_id（`getChat('@name')`，机器人无权访问时返回 null） |
-| `resolveMessageOrigin(msg, bot)` | 从一条消息解析原始位置：`forward_origin`（频道帖带 `message_id`）→ 旧版 `forward_from_chat` + `forward_from_message_id` → 文本/说明里的消息链接 |
+| 导出                                   | 功能                                                                                                                                                                      |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parseMessageLink(text)`               | 解析消息链接（纯函数）：`t.me/c/<内部ID>/<消息ID>` → `chatId=-100<内部ID>`；`t.me/<公开用户名>/<消息ID>` → 只给用户名（需 `getChat` 解析）；邀请链接等非消息链接返回 null |
+| `resolveUsernameChatId(username, bot)` | 公开用户名 → chat_id（`getChat('@name')`，机器人无权访问时返回 null）                                                                                                     |
+| `resolveMessageOrigin(msg, bot)`       | 从一条消息解析原始位置：`forward_origin`（频道帖带 `message_id`）→ 旧版 `forward_from_chat` + `forward_from_message_id` → 文本/说明里的消息链接                           |
 
 > **Telegram 限制：** 从**群组**转发的消息（`MessageOriginChat`）**不带原消息 ID**，无法定位 —— 这时请改用消息链接。
 
@@ -535,12 +532,12 @@ Telegram 的富文本是「纯文本 + entities」（加粗 / 斜体 / 下划线
 offset/length 单位是 UTF-16 code unit（与 JS 字符串下标一致）。**保留格式的唯一正确做法是把用户消息里的 entities 原样带上**，
 不要用 `parse_mode` 去解析原文（用户写的 `<3`、`*星号*` 会被吃掉甚至报错）——与 `/send`、`/reply` 的文本转发同一套思路（`utils/forwardText.js`）。
 
-| 导出 | 功能 |
-|------|------|
-| `normalizeEntities(entities)` | 校验 / 规范化：丢掉 offset/length 非法的项，按位置排序，不改动入参 |
-| `shiftEntities(entities, start, length)` | 已知截取位置时按**精确下标**平移 / 裁剪（正文与命令前缀字符重合也不会错位，如 `/edit@SexFavoritesBOT BOT`） |
-| `projectEntities(entities, rawText, newText)` | 正文被**截取**后（去 `/edit@Bot ` 前缀、去首尾空白、去 `#X` 后缀）平移 / 裁剪 entities；命令自身的 `bot_command` 被丢掉，越界项裁掉或丢弃；`newText` 不是 `rawText` 子串时返回空数组（宁可丢格式，也不给出错位的实体） |
-| `captionEntities(entities)` | 过滤出 caption 允许的类型（`bold/italic/underline/strikethrough/spoiler/code/pre/text_link/text_mention/custom_emoji/blockquote`）；`mention`/`hashtag`/`url`/`bot_command` 等自动识别类型在 caption 里会被 Telegram 拒绝，过滤掉即可（客户端仍会自动渲染成链接） |
+| 导出                                          | 功能                                                                                                                                                                                                                                                              |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `normalizeEntities(entities)`                 | 校验 / 规范化：丢掉 offset/length 非法的项，按位置排序，不改动入参                                                                                                                                                                                                |
+| `shiftEntities(entities, start, length)`      | 已知截取位置时按**精确下标**平移 / 裁剪（正文与命令前缀字符重合也不会错位，如 `/edit@SexFavoritesBOT BOT`）                                                                                                                                                       |
+| `projectEntities(entities, rawText, newText)` | 正文被**截取**后（去 `/edit@Bot ` 前缀、去首尾空白、去 `#X` 后缀）平移 / 裁剪 entities；命令自身的 `bot_command` 被丢掉，越界项裁掉或丢弃；`newText` 不是 `rawText` 子串时返回空数组（宁可丢格式，也不给出错位的实体）                                            |
+| `captionEntities(entities)`                   | 过滤出 caption 允许的类型（`bold/italic/underline/strikethrough/spoiler/code/pre/text_link/text_mention/custom_emoji/blockquote`）；`mention`/`hashtag`/`url`/`bot_command` 等自动识别类型在 caption 里会被 Telegram 拒绝，过滤掉即可（客户端仍会自动渲染成链接） |
 
 > **编辑正文时的两条路径**（`utils/editTarget.js`）：有 entities → `editMessageText({ entities })` /
 > `editMessageCaption({ caption_entities })`（不用 parse_mode）；没有 entities → 退回原来的「HTML 解析 → 纯文本」；
@@ -549,14 +546,14 @@ offset/length 单位是 UTF-16 code unit（与 JS 字符串下标一致）。**�
 #### tagUi.js — 标签按钮键盘（两区版面）
 `/send` 打标签面板与 `/tag` 标签模式共用：
 
-| 导出 | 功能 |
-|------|------|
-| `buildTagKeyboard(tags, opts)` | 单区列表：每行 4 个、每页 40 个 + 翻页按钮；`marker` 可给按钮加 `✅`/`+` 前缀 |
-| `buildTagRegionKeyboard(applied, library, opts)` | **两区版面**（上区已有标签 / 下区标签库，见下） |
-| `splitTagInput(text)` | 手动输入解析（空格 / `、` / `,` 分隔，去重保留首现）；只返回**要添加**的标签，`-标签` 前缀会被忽略 |
-| `parseTagInput(text)` | 手动输入完整解析：一次可写多个（空格 / `、` / `,` 分隔），前缀 `-` 表示**移除** → `{ add: [...], remove: [...] }`（规则见下表） |
-| `matchTagsInText(text, tags)` | 文本中识别已存在的标签（大小写不敏感）。**纯英文/数字标签按整词匹配**（`hello` 不会在 `hello` 里匹配出 `h`/`e`/`he`/`el`，需要片段请自行加标签）；含中文等非 ASCII 字符的标签仍按子串匹配 |
-| `paginate(items, page)` | 分页切片（每页 40 个） |
+| 导出                                             | 功能                                                                                                                                                                                      |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `buildTagKeyboard(tags, opts)`                   | 单区列表：每行 4 个、每页 40 个 + 翻页按钮；`marker` 可给按钮加 `✅`/`+` 前缀                                                                                                              |
+| `buildTagRegionKeyboard(applied, library, opts)` | **两区版面**（上区已有标签 / 下区标签库，见下）                                                                                                                                           |
+| `splitTagInput(text)`                            | 手动输入解析（空格 / `、` / `,` 分隔，去重保留首现）；只返回**要添加**的标签，`-标签` 前缀会被忽略                                                                                        |
+| `parseTagInput(text)`                            | 手动输入完整解析：一次可写多个（空格 / `、` / `,` 分隔），前缀 `-` 表示**移除** → `{ add: [...], remove: [...] }`（规则见下表）                                                           |
+| `matchTagsInText(text, tags)`                    | 文本中识别已存在的标签（大小写不敏感）。**纯英文/数字标签按整词匹配**（`hello` 不会在 `hello` 里匹配出 `h`/`e`/`he`/`el`，需要片段请自行加标签）；含中文等非 ASCII 字符的标签仍按子串匹配 |
+| `paginate(items, page)`                          | 分页切片（每页 40 个）                                                                                                                                                                    |
 
 **两区版面**（`/send` 发送成功后的打标签面板、`/tag` → 修改消息标签 → 🏷️ 添加标签）：
 
@@ -576,14 +573,14 @@ offset/length 单位是 UTF-16 code unit（与 JS 字符串下标一致）。**�
 
 **手动输入规则**（`parseTagInput`，机器人端与控制台**同一套**，适用于任意添加标签处 —— `/tag` 修改消息标签、`/send` 发送成功后弹出的打标签面板、控制台媒体详情的标签输入框）：
 
-| 输入 | 效果 |
-|------|------|
-| `xx yy` | 添加 `XX`、`YY`（空格 / `、` / `,` / `，` 都能分隔，换行也算） |
-| `xx -yy` | 添加 `XX`，移除 `YY` |
-| `-xx -yy` | 只移除 `XX`、`YY` |
-| `xx -xx` | 同名同时出现 → **以移除为准**（不会又加又删） |
-| `jk-2 a-b` | 标签名中间的 `-` 不是前缀，照常当标签名 |
-| `－xx` / `−xx` | 中文输入法的全角减号同样识别为移除 |
+| 输入           | 效果                                                           |
+| -------------- | -------------------------------------------------------------- |
+| `xx yy`        | 添加 `XX`、`YY`（空格 / `、` / `,` / `，` 都能分隔，换行也算） |
+| `xx -yy`       | 添加 `XX`，移除 `YY`                                           |
+| `-xx -yy`      | 只移除 `XX`、`YY`                                              |
+| `xx -xx`       | 同名同时出现 → **以移除为准**（不会又加又删）                  |
+| `jk-2 a-b`     | 标签名中间的 `-` 不是前缀，照常当标签名                        |
+| `－xx` / `−xx` | 中文输入法的全角减号同样识别为移除                             |
 
 - 各榜单内部去重（大小写不敏感、保留首现）；标签名统一大写后才落库
 - `/tag` 的 ➕ 添加面板：无前缀 = 添加、`-` 前缀 = 移除；🗑️ 删除面板：两者都算移除（面板语义优先）
@@ -594,16 +591,16 @@ offset/length 单位是 UTF-16 code unit（与 JS 字符串下标一致）。**�
 
 `/send`、消息回复、编辑描述等写库成功后的打标签流程实现，**与模式解耦**（不切换、不退出原模式）：
 
-| 导出 | 功能 |
-|------|------|
-| `recordAndTag(userId, { groupId, items })` | 批量收录 message + 自动匹配标签 + 依次送入打标签队列；返回 `boolean[]`（`true` = 该条提示语由面板承载，调用方不再发普通提示） |
-| `recordMessageWithAutoTags(item)` | 单条收录（只有带描述才写 `message`）+ 自动补充文本中已存在的标签 |
-| `enqueueTagTarget(userId, target)` | 入队（队列为空时立即激活并弹出面板）；同一目标不重复入队 |
-| `advanceToNext(userId)` | 点《✅ 完成》后切换队列中的下一个；队列为空则结束本次打标签 |
-| `showActivePanel(userId, text)` | 用成功提示刷新当前面板（无活动目标时退化为普通提示消息） |
-| `handleTagText(msg, session)` | **纯文本 = 打标签**：解析空格/`、` 分隔的多个标签，`-标签` 表示移除，不存在的自动创建 |
-| `handleTagCallback(query)` | `sendtag:*`（上区移除 / 下区添加）、`sendtag_page:*`（翻页）、`sendtag_done`（完成）、`sendtag_reply`（进入回复模式） |
-| `isTagging(userId)` / `getTagSession(userId)` / `clearTagSession(userId)` | 会话查询与清理（限流入口、`/exit`、超时、切换模式时调用） |
+| 导出                                                                      | 功能                                                                                                                          |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `recordAndTag(userId, { groupId, items })`                                | 批量收录 message + 自动匹配标签 + 依次送入打标签队列；返回 `boolean[]`（`true` = 该条提示语由面板承载，调用方不再发普通提示） |
+| `recordMessageWithAutoTags(item)`                                         | 单条收录（只有带描述才写 `message`）+ 自动补充文本中已存在的标签                                                              |
+| `enqueueTagTarget(userId, target)`                                        | 入队（队列为空时立即激活并弹出面板）；同一目标不重复入队                                                                      |
+| `advanceToNext(userId)`                                                   | 点《✅ 完成》后切换队列中的下一个；队列为空则结束本次打标签                                                                    |
+| `showActivePanel(userId, text)`                                           | 用成功提示刷新当前面板（无活动目标时退化为普通提示消息）                                                                      |
+| `handleTagText(msg, session)`                                             | **纯文本 = 打标签**：解析空格/`、` 分隔的多个标签，`-标签` 表示移除，不存在的自动创建                                         |
+| `handleTagCallback(query)`                                                | `sendtag:*`（上区移除 / 下区添加）、`sendtag_page:*`（翻页）、`sendtag_done`（完成）、`sendtag_reply`（进入回复模式）         |
+| `isTagging(userId)` / `getTagSession(userId)` / `clearTagSession(userId)` | 会话查询与清理（限流入口、`/exit`、超时、切换模式时调用）                                                                     |
 
 > 会话只存在于内存（与其它模式状态一致），不随模式状态清理而消失；有 2 小时空闲上限。
 > `handlers/messageHandlers.js` 在分发模式之前先判断会话：**有活动目标时纯文本一律作为标签输入**
@@ -646,23 +643,23 @@ module.exports = {
 
 在 `connectDB()` 后调用，为每个集合创建必要索引：
 
-| 集合 | 索引 | 用途 |
-|------|------|------|
-| `message` | `file_unique_id` (唯一) | 去重 |
-| `message` | `group_id` | 按组查询 |
-| `message` | `{media_type, text}` | 全文搜索 |
-| `media` | `file_unique_id` (唯一) | 去重 |
-| `media` | `{group_id, message_id}` | 按组查询 |
-| `media` | `media_type` | 类型筛选 |
-| `media` | `video_time` | 视频时长筛选 |
-| `group_list` | `group_id` (唯一) | 组汇总 |
-| `channel_group` | `id` (唯一) | 群组标识 |
-| `users` | `id` (唯一) | 用户标识 |
-| `users` | `group` | 所在群组查询 |
-| `users` | `{state, white}` | 权限筛选 |
-| `log` | `time` (倒序) | 时间排序 |
-| `transport` | `chat_id` (唯一) | 搬运记录 |
-| `tags` | `name` (唯一) | 标签库（大写标签名） |
+| 集合            | 索引                     | 用途                 |
+| --------------- | ------------------------ | -------------------- |
+| `message`       | `file_unique_id` (唯一)  | 去重                 |
+| `message`       | `group_id`               | 按组查询             |
+| `message`       | `{media_type, text}`     | 全文搜索             |
+| `media`         | `file_unique_id` (唯一)  | 去重                 |
+| `media`         | `{group_id, message_id}` | 按组查询             |
+| `media`         | `media_type`             | 类型筛选             |
+| `media`         | `video_time`             | 视频时长筛选         |
+| `group_list`    | `group_id` (唯一)        | 组汇总               |
+| `channel_group` | `id` (唯一)              | 群组标识             |
+| `users`         | `id` (唯一)              | 用户标识             |
+| `users`         | `group`                  | 所在群组查询         |
+| `users`         | `{state, white}`         | 权限筛选             |
+| `log`           | `time` (倒序)            | 时间排序             |
+| `transport`     | `chat_id` (唯一)         | 搬运记录             |
+| `tags`          | `name` (唯一)            | 标签库（大写标签名） |
 
 #### db/settings.js — 全局设置（含缓存）
 
@@ -675,16 +672,16 @@ module.exports = {
 
 **可配置项：**
 
-| 键 | 类型 | 默认值 | 说明 |
-|----|------|--------|------|
-| `search_random` | boolean | false | 是否随机搜索结果 |
-| `random_pictures` | boolean | false | 随机图片功能开关 |
-| `random_pictures_num` | number | 9 | 随机图片数量 |
-| `random_videos` | boolean | false | 随机视频功能开关 |
-| `random_videos_time` | string | "<1min" | 视频时长筛选条件 |
-| `random_videos_num_text` | number | 15 | 随机视频文字列表数 |
-| `random_videos_num_video` | number | 10 | 随机视频实际发送数 |
-| `media_group_num` | number | 10 | 媒体合并默认数量 |
+| 键                        | 类型    | 默认值  | 说明               |
+| ------------------------- | ------- | ------- | ------------------ |
+| `search_random`           | boolean | false   | 是否随机搜索结果   |
+| `random_pictures`         | boolean | false   | 随机图片功能开关   |
+| `random_pictures_num`     | number  | 9       | 随机图片数量       |
+| `random_videos`           | boolean | false   | 随机视频功能开关   |
+| `random_videos_time`      | string  | "<1min" | 视频时长筛选条件   |
+| `random_videos_num_text`  | number  | 15      | 随机视频文字列表数 |
+| `random_videos_num_video` | number  | 10      | 随机视频实际发送数 |
+| `media_group_num`         | number  | 10      | 媒体合并默认数量   |
 
 > 标签已迁移至**独立 `tags` 集合**（`db/tags.js`），不再存储于 settings：每标签一条 `{name, pin, count}`——`pin`=置顶位置（0 不置顶；>0 为按钮网格位置，每行 4 个、1 为左上第一个按钮），`count`=使用次数。
 
@@ -692,17 +689,17 @@ module.exports = {
 
 核心数据操作：
 
-| 函数 | 功能 |
-|------|------|
-| `insertMedia(mediaRecord)` | 插入新的媒体记录（支持 `group`/`channel` 双位置字段、`media_name`、`media_entities`） |
-| `findMediaByFileUniqueId(fileUniqueId)` | 按 file_unique_id 精确查询 |
-| `findMediaByGroupId(groupId)` | 按 group_id 查询所有媒体 |
-| `getMaxSubgroup(groupId)` | 获取指定组的最大子组编号 |
-| `deleteMediaByFileUniqueId(fileUniqueId)` | 按 file_unique_id 删除 |
-| `findMediaByPosition(chatId, messageId)` | 按「聊天 + 消息 ID」反查媒体（群组位置 / 频道位置 / 旧数据顶层位置，以及文本媒体的 `text:<chatId>:<messageId>`）——回复 `/edit`、消息链接、转发来源定位共用 |
-| `updateTextMediaContent(fileUniqueId, text)` | 改写文本媒体的正文（`media_name`，并清掉与新正文错位的旧 `media_entities`） |
-| `updateMediaPassword(fileUniqueId, pwd)` | 更新媒体密码 |
-| `buildMediaLocation(chatId, messageId, chatType)` | 按聊天类型构建媒体位置（频道 → `channel`，群组 → `group`） |
+| 函数                                              | 功能                                                                                                                                                       |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `insertMedia(mediaRecord)`                        | 插入新的媒体记录（支持 `group`/`channel` 双位置字段、`media_name`、`media_entities`）                                                                      |
+| `findMediaByFileUniqueId(fileUniqueId)`           | 按 file_unique_id 精确查询                                                                                                                                 |
+| `findMediaByGroupId(groupId)`                     | 按 group_id 查询所有媒体                                                                                                                                   |
+| `getMaxSubgroup(groupId)`                         | 获取指定组的最大子组编号                                                                                                                                   |
+| `deleteMediaByFileUniqueId(fileUniqueId)`         | 按 file_unique_id 删除                                                                                                                                     |
+| `findMediaByPosition(chatId, messageId)`          | 按「聊天 + 消息 ID」反查媒体（群组位置 / 频道位置 / 旧数据顶层位置，以及文本媒体的 `text:<chatId>:<messageId>`）——回复 `/edit`、消息链接、转发来源定位共用 |
+| `updateTextMediaContent(fileUniqueId, text)`      | 改写文本媒体的正文（`media_name`，并清掉与新正文错位的旧 `media_entities`）                                                                                |
+| `updateMediaPassword(fileUniqueId, pwd)`          | 更新媒体密码                                                                                                                                               |
+| `buildMediaLocation(chatId, messageId, chatType)` | 按聊天类型构建媒体位置（频道 → `channel`，群组 → `group`）                                                                                                 |
 
 > **双位置字段：** `group: { chat_id, message_id }`（群组位置）与 `channel: { chat_id, message_id }`（频道位置）。
 > 频道转发媒体两项都有；给空媒体补注释时可据此获得双位置信息。
@@ -714,14 +711,14 @@ module.exports = {
 
 #### db/message.js — 消息记录
 
-| 函数 | 功能 |
-|------|------|
-| `upsertMessage(messageRecord)` | 插入或更新消息记录（支持 `tags`、`channel_forward` 字段） |
-| `findMessageByFileUniqueId(fileUniqueId)` | 按 file_unique_id 查询 |
-| `deleteMessageByFileUniqueId(fileUniqueId)` | 删除消息 |
-| `findMessagesByGroupId(groupId)` | 按组查询所有消息 |
-| `addTagToGroup(groupId, tag)` / `removeTagFromGroup(groupId, tag)` | 给媒体组所有消息添加/移除标签 |
-| `getGroupTags(groupId)` | 获取媒体组全部标签（并集） |
+| 函数                                                               | 功能                                                      |
+| ------------------------------------------------------------------ | --------------------------------------------------------- |
+| `upsertMessage(messageRecord)`                                     | 插入或更新消息记录（支持 `tags`、`channel_forward` 字段） |
+| `findMessageByFileUniqueId(fileUniqueId)`                          | 按 file_unique_id 查询                                    |
+| `deleteMessageByFileUniqueId(fileUniqueId)`                        | 删除消息                                                  |
+| `findMessagesByGroupId(groupId)`                                   | 按组查询所有消息                                          |
+| `addTagToGroup(groupId, tag)` / `removeTagFromGroup(groupId, tag)` | 给媒体组所有消息添加/移除标签                             |
+| `getGroupTags(groupId)`                                            | 获取媒体组全部标签（并集）                                |
 
 > **channel_forward 字段：** `{ is_channel: true, channel_chat_id, channel_message_id, group_chat_id, group_message_id }`，
 > 标记消息为频道转发并记录群组中该消息的位置，回复时可选频道或群组。
@@ -732,36 +729,36 @@ module.exports = {
 
 日志文档结构（面向月表 / 年终统计设计）：
 
-| 字段 | 说明 |
-|------|------|
-| `action` | 稳定动作键（如 `media_save`、`send_media`、`reply_media`、`query_keyword`、`media_clean_execute`、`tag_add`、`user_ban`、`chat_bind`、`setting_update`、`bot_start`…） |
-| `actionLabel` | 动作中文名（冗余存储，改文案不影响历史数据） |
-| `category` | 大类：`media`/`send`/`reply`/`query`/`clean`/`tag`/`user`/`chat`/`setting`/`content`/`transport`/`webui`/`system` |
-| `result` / `error` | `ok` \| `fail`，失败时带错误信息（可统计失败率） |
-| `source` | 发生位置：`private`/`group`/`channel`/`webui`/`system` |
-| `date` / `time` | `date` 为 BSON 日期（`$year`/`$month`/`$dateToString` 聚合用），`time` 为毫秒时间戳（兼容旧数据） |
-| `userId` / `chatId` / `messageId` | 操作者与触发上下文 |
-| `target` | 操作对象 `{ type, id }`（`media`/`media_group`/`tag`/`user`/`chat`/`setting`/`article`/`collection`） |
-| `counts` | 产出量数值：`{ media, groups, users, tags, edits, queries, results, texts, chats, articles, collections … }` |
-| `detail` | 结构化细节：`{ query, mediaType, videoTime, tags, hasCaption, scope, via, status, name, before, after … }` |
-| `durationMs` | 可选耗时 |
-| `type` | 旧编号（0=启动,1=收录,2=修改,3=删除,11/12=随机,13=回复,14/15/21=合并/遮罩,16=帮助,17=查找,18=清理,19=删除模式,20=标记,22=查询,23=修改,24=设置,25=发送,26=标签,27=控制台登录,28=控制台数据操作,29-32=用户,33=群组频道,34/35=文章合集,36=搬运），继续保留以兼容历史统计 |
+| 字段                              | 说明                                                                                                                                                                                                                                                                  |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `action`                          | 稳定动作键（如 `media_save`、`send_media`、`reply_media`、`query_keyword`、`media_clean_execute`、`tag_add`、`user_ban`、`chat_bind`、`setting_update`、`bot_start`…）                                                                                                |
+| `actionLabel`                     | 动作中文名（冗余存储，改文案不影响历史数据）                                                                                                                                                                                                                          |
+| `category`                        | 大类：`media`/`send`/`reply`/`query`/`clean`/`tag`/`user`/`chat`/`setting`/`content`/`transport`/`webui`/`system`                                                                                                                                                     |
+| `result` / `error`                | `ok` \| `fail`，失败时带错误信息（可统计失败率）                                                                                                                                                                                                                      |
+| `source`                          | 发生位置：`private`/`group`/`channel`/`webui`/`system`                                                                                                                                                                                                                |
+| `date` / `time`                   | `date` 为 BSON 日期（`$year`/`$month`/`$dateToString` 聚合用），`time` 为毫秒时间戳（兼容旧数据）                                                                                                                                                                     |
+| `userId` / `chatId` / `messageId` | 操作者与触发上下文                                                                                                                                                                                                                                                    |
+| `target`                          | 操作对象 `{ type, id }`（`media`/`media_group`/`tag`/`user`/`chat`/`setting`/`article`/`collection`）                                                                                                                                                                 |
+| `counts`                          | 产出量数值：`{ media, groups, users, tags, edits, queries, results, texts, chats, articles, collections … }`                                                                                                                                                          |
+| `detail`                          | 结构化细节：`{ query, mediaType, videoTime, tags, hasCaption, scope, via, status, name, before, after … }`                                                                                                                                                            |
+| `durationMs`                      | 可选耗时                                                                                                                                                                                                                                                              |
+| `type`                            | 旧编号（0=启动,1=收录,2=修改,3=删除,11/12=随机,13=回复,14/15/21=合并/遮罩,16=帮助,17=查找,18=清理,19=删除模式,20=标记,22=查询,23=修改,24=设置,25=发送,26=标签,27=控制台登录,28=控制台数据操作,29-32=用户,33=群组频道,34/35=文章合集,36=搬运），继续保留以兼容历史统计 |
 
 **唯一写入入口：** `logOperation({ action, category, result, source, userId, chatId, target, counts, detail, error, durationMs })`
 —— 写入失败只记 `logger.error`，绝不影响业务流程。
 
 **已接线的动作（节选）：**
 
-| 大类 | 动作 |
-|------|------|
-| media | `media_save`（收录）/`media_save_duplicate`（重复命中）/`media_save_fail`（收录失败回滚）/`channel_forward`（频道转发归属，区分新收录与补位置）/`media_edit`（描述修改：私聊、群内两步、回复 `/edit`、控制台）`media_delete`（清空描述）/`media_delete_one`/`media_delete_group`/`mark`/`media_merge`/`media_hide`/`media_unhide`/`media_password` |
-| send / reply | `send_media`/`send_text`/`send_fail`/`reply_media`/`reply_fail`（含打包模式、目标频道/群组、媒体类型与时长合计） |
-| query | `query_keyword`（含命中条数）/`search`/`help`/`log_view`/`random_video`/`random_picture` |
-| clean | `media_clean_scan`（扫描）/`media_clean_execute`（实际删除的组数与媒体数） |
-| tag | `tag_add`/`tag_remove`/`tag_create`/`tag_rename`/`tag_delete`/`tag_pin`（自动识别打标签记 `tag_add` + `detail.auto=true`） |
-| user | `user_create`/`user_update`/`user_delete`/`user_ban`/`user_unban`/`user_whitelist_add`/`user_whitelist_remove`/`user_join`/`user_leave`/`user_join_request`（含审批结论与原因） |
-| chat / setting / content | `chat_create`/`chat_update`/`chat_delete`/`chat_bind`/`chat_unbind`/`setting_update`/`article_save`/`article_delete`/`collection_save`/`collection_delete` |
-| system / webui | `bot_start`（版本、数据库、运行模式）/`bot_stop`（信号、运行时长）/`webui_login`/`webui_login_fail`/`webui_db_execute`（控制台原始增删改） |
+| 大类                     | 动作                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| media                    | `media_save`（收录）/`media_save_duplicate`（重复命中）/`media_save_fail`（收录失败回滚）/`channel_forward`（频道转发归属，区分新收录与补位置）/`media_edit`（描述修改：私聊、群内两步、回复 `/edit`、控制台）`media_delete`（清空描述）/`media_delete_one`/`media_delete_group`/`mark`/`media_merge`/`media_hide`/`media_unhide`/`media_password` |
+| send / reply             | `send_media`/`send_text`/`send_fail`/`reply_media`/`reply_fail`（含打包模式、目标频道/群组、媒体类型与时长合计）                                                                                                                                                                                                                                   |
+| query                    | `query_keyword`（含命中条数）/`search`/`help`/`log_view`/`random_video`/`random_picture`                                                                                                                                                                                                                                                           |
+| clean                    | `media_clean_scan`（扫描）/`media_clean_execute`（实际删除的组数与媒体数）                                                                                                                                                                                                                                                                         |
+| tag                      | `tag_add`/`tag_remove`/`tag_create`/`tag_rename`/`tag_delete`/`tag_pin`（自动识别打标签记 `tag_add` + `detail.auto=true`）                                                                                                                                                                                                                         |
+| user                     | `user_create`/`user_update`/`user_delete`/`user_ban`/`user_unban`/`user_whitelist_add`/`user_whitelist_remove`/`user_join`/`user_leave`/`user_join_request`（含审批结论与原因）                                                                                                                                                                    |
+| chat / setting / content | `chat_create`/`chat_update`/`chat_delete`/`chat_bind`/`chat_unbind`/`setting_update`/`article_save`/`article_delete`/`collection_save`/`collection_delete`                                                                                                                                                                                         |
+| system / webui           | `bot_start`（版本、数据库、运行模式）/`bot_stop`（信号、运行时长）/`webui_login`/`webui_login_fail`/`webui_db_execute`（控制台原始增删改）                                                                                                                                                                                                         |
 
 **查看统计的两种方式：**
 - 机器人内 `/log`：近 7 天明细（大类 → 动作）+ 本月 / 本年汇总 + 活跃时段条形图（时间口径按北京时间，兼容无 `action` 的历史数据）
@@ -771,18 +768,18 @@ module.exports = {
 
 #### db/groupList.js — 媒体组汇总
 
-| 函数 | 功能 |
-|------|------|
-| `upsertGroupList(groupId, increment)` | 原子增加 `is_group` 计数（$inc） |
-| `syncGroupDeleteByText(groupId)` | **按组内是否还有文本重算 `is_delete`**（唯一判定入口，见下） |
-| `setGroupDelete(groupId, timestamp)` | 直接设置删除标记（仅 `syncGroupDeleteByText` 与回滚使用） |
-| `findGroupList(groupId)` | 查询组信息 |
-| `deleteGroupList(groupId)` | 删除组记录 |
-| `syncGroupTags(groupId)` | **按组内所有 `message.tags` 重算 `group_list.tags`**（汇总，无标签则删字段） |
-| `applyTagChangeToGroupTags(groupId, tag, delta)` | 单个标签增量同步到 `group_list.tags`（$addToSet / $pull） |
-| `syncAllGroupTags()` | 全库重算 `group_list.tags`（标签改名、删除后同步；需要时手动调用，**启动时不再自动跑**） |
-| `removeMediaGroupIfEmpty(groupId)` | **删除媒体后的组状态统一入口**：以 `media` 实际记录数为准——组内已无媒体 → 删 `group_list`（并清残留 `message`）；仍有媒体 → 把 `is_group` 重算为真实数量 |
-| `cleanupOrphanGroupList()` | 启动时清理历史遗留的"没有任何媒体的 `group_list` 项"（及其孤儿 `message`），幂等 |
+| 函数                                             | 功能                                                                                                                                                     |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `upsertGroupList(groupId, increment)`            | 原子增加 `is_group` 计数（$inc）                                                                                                                         |
+| `syncGroupDeleteByText(groupId)`                 | **按组内是否还有文本重算 `is_delete`**（唯一判定入口，见下）                                                                                             |
+| `setGroupDelete(groupId, timestamp)`             | 直接设置删除标记（仅 `syncGroupDeleteByText` 与回滚使用）                                                                                                |
+| `findGroupList(groupId)`                         | 查询组信息                                                                                                                                               |
+| `deleteGroupList(groupId)`                       | 删除组记录                                                                                                                                               |
+| `syncGroupTags(groupId)`                         | **按组内所有 `message.tags` 重算 `group_list.tags`**（汇总，无标签则删字段）                                                                             |
+| `applyTagChangeToGroupTags(groupId, tag, delta)` | 单个标签增量同步到 `group_list.tags`（$addToSet / $pull）                                                                                                |
+| `syncAllGroupTags()`                             | 全库重算 `group_list.tags`（标签改名、删除后同步；需要时手动调用，**启动时不再自动跑**）                                                                 |
+| `removeMediaGroupIfEmpty(groupId)`               | **删除媒体后的组状态统一入口**：以 `media` 实际记录数为准——组内已无媒体 → 删 `group_list`（并清残留 `message`）；仍有媒体 → 把 `is_group` 重算为真实数量 |
+| `cleanupOrphanGroupList()`                       | 启动时清理历史遗留的"没有任何媒体的 `group_list` 项"（及其孤儿 `message`），幂等                                                                         |
 
 > **`group_list.is_group` 只是计数快照，不是判断依据：** 删除路径不再用 `is_group === 1` 判断
 > "最后一个媒体"，也不再用 `$inc: -1` 递减，而是调用 `removeMediaGroupIfEmpty()` 按 `media`
@@ -833,13 +830,13 @@ module.exports = {
 
 #### db/channelGroup.js — 频道/群组
 
-| 函数 | 功能 |
-|------|------|
-| `upsertChannelGroup(channelGroup)` | 插入或更新 |
-| `getAllChannelGroups()` | 获取所有管理的群组/频道 |
-| `getChannelGroupById(id)` | 按 chat_id 查询 |
-| `updateChannelGroup(id, updates)` | 单字段更新 |
-| `deleteChannelGroup(id)` | 删除记录 |
+| 函数                               | 功能                    |
+| ---------------------------------- | ----------------------- |
+| `upsertChannelGroup(channelGroup)` | 插入或更新              |
+| `getAllChannelGroups()`            | 获取所有管理的群组/频道 |
+| `getChannelGroupById(id)`          | 按 chat_id 查询         |
+| `updateChannelGroup(id, updates)`  | 单字段更新              |
+| `deleteChannelGroup(id)`           | 删除记录                |
 
 #### db/users.js — 用户管理
 
@@ -856,17 +853,17 @@ module.exports = {
 
 #### db/transport.js — 搬运链接
 
-| 函数 | 功能 |
-|------|------|
-| `upsertTransport(transport)` | 插入或更新搬运记录（更新会作废旧活性结论） |
-| `getAllTransports()` | 获取所有搬运源（按搬运次数降序） |
-| `getTransportByChatId(chatId)` | 按 chat_id 查询 |
-| `deleteTransport(chatId)` | 删除搬运记录 |
-| `createTransport({ chat_id, chat_name, url, num })` | 新建收录记录（控制台用，重复 chat_id 返回 `{ ok:false, error }`） |
-| `updateTransport(chatId, { chat_name, url, num })` | 修改收录记录（改链接后清空 `alive`/`last_check_*`，等待重查） |
+| 函数                                                                        | 功能                                                                                |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `upsertTransport(transport)`                                                | 插入或更新搬运记录（更新会作废旧活性结论）                                          |
+| `getAllTransports()`                                                        | 获取所有搬运源（按搬运次数降序）                                                    |
+| `getTransportByChatId(chatId)`                                              | 按 chat_id 查询                                                                     |
+| `deleteTransport(chatId)`                                                   | 删除搬运记录                                                                        |
+| `createTransport({ chat_id, chat_name, url, num })`                         | 新建收录记录（控制台用，重复 chat_id 返回 `{ ok:false, error }`）                   |
+| `updateTransport(chatId, { chat_name, url, num })`                          | 修改收录记录（改链接后清空 `alive`/`last_check_*`，等待重查）                       |
 | `updateTransportStatus(chatId, { status, error, chatName, previousAlive })` | 写回活性检查结论（`alive`：true/false/未知保持原值 + `last_check_at/status/error`） |
-| `getTransportHealth()` | 活性巡检用列表（等价于 `getAllTransports`） |
-| `extractChatInfo(url, bot)` | 从 t.me 链接解析出群组 chat_id 和名称 |
+| `getTransportHealth()`                                                      | 活性巡检用列表（等价于 `getAllTransports`）                                         |
+| `extractChatInfo(url, bot)`                                                 | 从 t.me 链接解析出群组 chat_id 和名称                                               |
 
 > **活性字段：** `alive`（true=有效 / false=失效 / null=未检查）、`last_check_at`、`last_check_status`（ok/dead/unknown）、`last_check_error`。由 `utils/linkHealth.js` 写入，机器人、控制台与巡检任务共用同一份结论。
 
@@ -874,12 +871,12 @@ module.exports = {
 
 控制台「数据库」视图与概览卡片共用（15 秒缓存，避免频繁打 Atlas）：
 
-| 函数 | 功能 |
-|------|------|
+| 函数                    | 功能                                                                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `getDbStats({ force })` | 整库 `dbStats` + 逐集合 `collStats`：集合名/中文名、`count`、`size`、`storageSize`、`indexSize`、`nindexes`、`avgObjSize`、整库 totals；按数据体积降序 |
-| `getDbStatsSummary()` | 概览卡片用的精简版（`objects`/`collections`/`storageSize`/`dataSize`/`indexSize`） |
-| `clearDbStatsCache()` | 手动失效缓存 |
-| `COLLECTION_LABELS` | 集合名 → 中文名映射 |
+| `getDbStatsSummary()`   | 概览卡片用的精简版（`objects`/`collections`/`storageSize`/`dataSize`/`indexSize`）                                                                     |
+| `clearDbStatsCache()`   | 手动失效缓存                                                                                                                                           |
+| `COLLECTION_LABELS`     | 集合名 → 中文名映射                                                                                                                                    |
 
 > **降级策略：** 若部署（部分共享集群 / 受限账号）不允许 `dbStats` 或 `collStats`，自动退回 `estimatedDocumentCount()` 只取文档数，并在返回值里给出 `available:false` + `reason`；前端据此显示原因而不是报错。实测 MongoDB Atlas 免费版（M0）该两条命令**可用**，因此大小/占用能正常显示。
 
@@ -887,13 +884,13 @@ module.exports = {
 
 通过 `insertLog(type, userId, extra)` 记录 25 种操作类型：
 
-| 类型 | 值 | 说明 |
-|------|----|------|
-| BOT_START | 0 | 机器人启动 |
-| MEDIA_SAVE | 1 | 媒体入库 |
-| MEDIA_EDIT | 2 | 媒体编辑 |
-| MEDIA_DELETE | 3 | 媒体删除 |
-| ... | ... | 共 25 种类型 |
+| 类型         | 值  | 说明         |
+| ------------ | --- | ------------ |
+| BOT_START    | 0   | 机器人启动   |
+| MEDIA_SAVE   | 1   | 媒体入库     |
+| MEDIA_EDIT   | 2   | 媒体编辑     |
+| MEDIA_DELETE | 3   | 媒体删除     |
+| ...          | ... | 共 25 种类型 |
 
 ---
 
@@ -999,31 +996,31 @@ for (const file of commandFiles) {
 
 **命令列表：**
 
-| 命令 | 文件 | 功能 | 实现要点 |
-|------|------|------|----------|
-| `/clean` | clean.js | 数据库清理模式 | 扫描空数据的 group_list，批量删除 |
-| `/delete` | delete.js | 删除单一媒体 | 进入 delete 模式，等待用户发送媒体或链接 |
-| `/delete_group` | deleteGroup.js | 删除整个媒体组 | 进入 deleteGroup 模式，等待用户操作 |
-| `/edit` | edit.js | 编辑消息文本 | 进入 edit 模式：① 发送要编辑的媒体（图片/视频/音频/文档）；② 或**发送消息链接**（`t.me/c/...`、`t.me/<用户名>/...`）**/ 转发该消息**（含转发来源）直接定位；③ 群组/频道中管理员**回复**一条消息（媒体**或机器人发出的文本消息**）并发送 `/edit [新描述]`（也支持 `/edit@机器人用户名 [新描述]`）可跳过定位直接修改（带文字一步完成；不带文字时群组内等管理员下一条文本；频道仅支持带文字）。媒体改 caption、文本消息改消息 `text`，**新正文一律带上管理员这条消息自己的 entities（严格保留加粗/斜体/链接等格式）**，库外消息只改 Telegram；文本消息不支持 `/null` 清空。修改后 1 分钟自动删除全部操作记录（机器人提示 + 管理员的命令消息） |
-| `/exit` | exit.js | 退出当前模式 | 调用 deleteUserState 清理状态 |
-| `/help` | help.js | 显示命令按钮 | 发送带所有命令的内联键盘 |
-| `/log` | log.js | 操作统计 | 从 log 集合聚合统计并展示 |
-| `/manage` | manage.js | 管理面板 | 进入 manage 模式，显示管理主菜单 |
-| `/mark` | mark.js | 标记模式 | 单选题式标记：进入后**要么发送要标记的媒体**（照旧 `group_list.mark +1` 并写入 `mark` 历史集合），**要么点「📝 仅记录」**（只写一条 `mode='record'` 记录：不标记任何媒体/媒体组、不带 `group_id`），二者完成后都自动退出标记模式 |
-| `/send` | send.js | 发送模式 | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录；**发文本同样收录**为 `media_type='text'`（内容进 `media_name`、`entities` 进 `media_entities`，可被搜索/查看，见 `media.recordTextMedia`）；成功后**自动进入打标签**（按钮/手动输入，文本自动识别勾选；手动输入空格分隔可写多个，`-标签` 表示移除）。打标签面板为**两区版面**：上区=已有标签（点击移除），下区=标签库（置顶在前，点击添加）；打标签**不退出本模式**，用户可继续发送媒体，点《✅ 完成》或一键"回复该消息"才结束（详见 mode 系统下的「打标签会话」） |
-| `/tag` | tag.js | 标签模式 | 修改消息标签（预览媒体组后添加/删除，按钮翻页+手动输入：空格分隔可写多个，`-标签` 表示移除；**添加标签**为两区版面：上区=已有标签（点击移除）、下区=标签库（置顶在前，点击添加）；标签按 message 独立——只作用于定位的那条媒体，定位界面会把组内所有带文本 message 的标签分别列出）；编辑标签（添加/改名/删除/固定置顶位置，同步 message） |
-| `/media_group [N]` | mediaGroup.js | 媒体合并模式 | 进入 mediaCollect 模式，type=media_group；N=每组个数（1~10，退出时按 N 个一组打包发送） |
-| `/media_hide [N]` | mediaHide.js | 媒体遮罩模式 | 进入 mediaCollect 模式，type=media_hide；N=每组个数（1~10） |
-| `/media_unhide [N]` | mediaUnhide.js | 去遮罩模式 | 进入 mediaCollect 模式，type=media_unhide；N=每组个数（1~10） |
-| `/message_reply [N]` | messageReply.js | 消息回复 | 进入 messageReply 模式，定位到频道转发媒体时**必须选择回复在群组还是频道**（就绪消息上带「🔄 更改为发送至…」一键切换按钮），**未指定时默认回复在群组**；回复位置取自 `message.channel_forward` **与 `media.group`/`media.channel` 两处**，空描述媒体（没有 message 记录）同样可定位回复；N>=2 时媒体按 N 个为一组打包为媒体组回复（满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出）。单条/整组回复成功后**自动进入打标签（不退出回复模式）**，可继续发媒体继续回复。**就绪后也可直接发文字回复**（保留 Telegram 文本格式，并按新的 subgroup 收录成 `media_type='text'`，见下） |
-| `/message_reply_group` | messageReplyGroup.js | 消息回复（群组） | 直接回复在群组中（频道转发消息用群组位置，非转发消息用消息自身位置） |
-| `/message_reply_channel` | messageReplyChannel.js | 消息回复（频道） | 直接回复在频道中（无频道位置时回退消息自身位置） |
-| `/password` | password.js | 媒体密码 | 进入 password 模式，设置/更新媒体访问密码 |
-| `/random_pictures [N]` | randomPictures.js | 随机图片 | 查询 media_type=photo 的随机结果，可指定数量 N（1~10） |
-| `/random_videos [N]` | randomVideos.js | 随机视频 | 可按时长筛选；可指定数量：N 1~10 直接发送 N 个视频媒体，N>=11 以标题列表展示 |
-| `/search` | search.js | 搜索模式 | 进入 search 模式，后续消息全部作为查询 |
-| `/setting` | setting.js | 全局设置 | 进入 setting 模式，显示设置面板内联键盘 |
-| `/transport` | transport.js | 搬运管理 | 进入 transport 模式，管理搬运链接的 CRUD；列表带**活性徽标**（✅ 有效 / ❌ 失效 / ❔ 未检查）与失效原因，进模式时自动补查过期记录，可「🔍 检查链接活性」全量实测；新增 / 改链接 / 改 chat_id 后立即实测并把结论直接回给用户 |
+| 命令                     | 文件                   | 功能             | 实现要点                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------ | ---------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/clean`                 | clean.js               | 数据库清理模式   | 扫描空数据的 group_list，批量删除                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `/delete`                | delete.js              | 删除单一媒体     | 进入 delete 模式，等待用户发送媒体或链接                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `/delete_group`          | deleteGroup.js         | 删除整个媒体组   | 进入 deleteGroup 模式，等待用户操作                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `/edit`                  | edit.js                | 编辑消息文本     | 进入 edit 模式：① 发送要编辑的媒体（图片/视频/音频/文档）；② 或**发送消息链接**（`t.me/c/...`、`t.me/<用户名>/...`）**/ 转发该消息**（含转发来源）直接定位；③ 群组/频道中管理员**回复**一条消息（媒体**或机器人发出的文本消息**）并发送 `/edit [新描述]`（也支持 `/edit@机器人用户名 [新描述]`）可跳过定位直接修改（带文字一步完成；不带文字时群组内等管理员下一条文本；频道仅支持带文字）。媒体改 caption、文本消息改消息 `text`，**新正文一律带上管理员这条消息自己的 entities（严格保留加粗/斜体/链接等格式）**，库外消息只改 Telegram；文本消息不支持 `/null` 清空。修改后 1 分钟自动删除全部操作记录（机器人提示 + 管理员的命令消息） |
+| `/exit`                  | exit.js                | 退出当前模式     | 调用 deleteUserState 清理状态                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `/help`                  | help.js                | 显示命令按钮     | 发送带所有命令的内联键盘                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `/log`                   | log.js                 | 操作统计         | 从 log 集合聚合统计并展示                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `/manage`                | manage.js              | 管理面板         | 进入 manage 模式，显示管理主菜单                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `/mark`                  | mark.js                | 标记模式         | 单选题式标记：进入后**要么发送要标记的媒体**（照旧 `group_list.mark +1` 并写入 `mark` 历史集合），**要么点「📝 仅记录」**（只写一条 `mode='record'` 记录：不标记任何媒体/媒体组、不带 `group_id`），二者完成后都自动退出标记模式                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `/send`                  | send.js                | 发送模式         | 选择目标群组/频道（分页按钮），发送消息/媒体/媒体组并收录；**发文本同样收录**为 `media_type='text'`（内容进 `media_name`、`entities` 进 `media_entities`，可被搜索/查看，见 `media.recordTextMedia`）；成功后**自动进入打标签**（按钮/手动输入，文本自动识别勾选；手动输入空格分隔可写多个，`-标签` 表示移除）。打标签面板为**两区版面**：上区=已有标签（点击移除），下区=标签库（置顶在前，点击添加）；打标签**不退出本模式**，用户可继续发送媒体，点《✅ 完成》或一键"回复该消息"才结束（详见 mode 系统下的「打标签会话」）                                                                                                               |
+| `/tag`                   | tag.js                 | 标签模式         | 修改消息标签（预览媒体组后添加/删除，按钮翻页+手动输入：空格分隔可写多个，`-标签` 表示移除；**添加标签**为两区版面：上区=已有标签（点击移除）、下区=标签库（置顶在前，点击添加）；标签按 message 独立——只作用于定位的那条媒体，定位界面会把组内所有带文本 message 的标签分别列出）；编辑标签（添加/改名/删除/固定置顶位置，同步 message）                                                                                                                                                                                                                                                                                                  |
+| `/media_group [N]`       | mediaGroup.js          | 媒体合并模式     | 进入 mediaCollect 模式，type=media_group；N=每组个数（1~10，退出时按 N 个一组打包发送）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `/media_hide [N]`        | mediaHide.js           | 媒体遮罩模式     | 进入 mediaCollect 模式，type=media_hide；N=每组个数（1~10）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `/media_unhide [N]`      | mediaUnhide.js         | 去遮罩模式       | 进入 mediaCollect 模式，type=media_unhide；N=每组个数（1~10）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `/message_reply [N]`     | messageReply.js        | 消息回复         | 进入 messageReply 模式，定位到频道转发媒体时**必须选择回复在群组还是频道**（就绪消息上带「🔄 更改为发送至…」一键切换按钮），**未指定时默认回复在群组**；回复位置取自 `message.channel_forward` **与 `media.group`/`media.channel` 两处**，空描述媒体（没有 message 记录）同样可定位回复；N>=2 时媒体按 N 个为一组打包为媒体组回复（满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出）。单条/整组回复成功后**自动进入打标签（不退出回复模式）**，可继续发媒体继续回复。**就绪后也可直接发文字回复**（保留 Telegram 文本格式，并按新的 subgroup 收录成 `media_type='text'`，见下）                                     |
+| `/message_reply_group`   | messageReplyGroup.js   | 消息回复（群组） | 直接回复在群组中（频道转发消息用群组位置，非转发消息用消息自身位置）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `/message_reply_channel` | messageReplyChannel.js | 消息回复（频道） | 直接回复在频道中（无频道位置时回退消息自身位置）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `/password`              | password.js            | 媒体密码         | 进入 password 模式，设置/更新媒体访问密码                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `/random_pictures [N]`   | randomPictures.js      | 随机图片         | 查询 media_type=photo 的随机结果，可指定数量 N（1~10）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `/random_videos [N]`     | randomVideos.js        | 随机视频         | 可按时长筛选；可指定数量：N 1~10 直接发送 N 个视频媒体，N>=11 以标题列表展示                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `/search`                | search.js              | 搜索模式         | 进入 search 模式，后续消息全部作为查询                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `/setting`               | setting.js             | 全局设置         | 进入 setting 模式，显示设置面板内联键盘                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `/transport`             | transport.js           | 搬运管理         | 进入 transport 模式，管理搬运链接的 CRUD；列表带**活性徽标**（✅ 有效 / ❌ 失效 / ❔ 未检查）与失效原因，进模式时自动补查过期记录，可「🔍 检查链接活性」全量实测；新增 / 改链接 / 改 chat_id 后立即实测并把结论直接回给用户                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 #### handlers/modes/ — 模式系统
 
@@ -1047,16 +1044,16 @@ function handleModeMessage(userId, msgText, msg, userName) {
 `/send`、消息回复、编辑描述等写库成功后会**自动进入打标签会话**，但会话**不切换、不退出**用户原有模式
 （`send` 仍是 `send`、`message_reply` 仍是 `message_reply`），因此不影响原模式继续工作：
 
-| 行为 | 说明 |
-|------|------|
-| 自动进入 | 带描述的发送/回复成功后收录 `message`（标签作用对象 = 该条新的 `file_unique_id`），自动识别文本中已存在的标签并弹出打标签面板；无描述媒体不写 `message`，也不进入打标签 |
-| 纯文本 = 打标签 | 会话进行中用户发来的**纯文本**视为标签操作（空格 / `、` / `,` 分隔可一次多个，`-标签` 表示移除；不存在的标签自动创建），**不发送、不查询**；直到点《✅ 完成》才结束 |
-| 面板刷新方式 | **点按钮 → 只就地 `editMessageText` 刷新按钮与文本**（不重发消息、面板位置不动、聊天记录不刷屏）；**用户发消息改标签 → 删掉旧面板 + 发一条新面板**（用户消息在下方、旧面板被顶在上方看不到刷新结果，所以这一步才需要重发），见 `utils/tagSession.refreshPanel(userId, statusLine, { resend })` |
-| 媒体照常 | 会话进行中发送媒体仍由当前模式正常处理（继续发送 / 继续回复），成功后同样进入打标签队列 |
-| 队列 | 当前标签还没打完又来一个需要打标签的媒体 → 先入队（提示"已加入打标签队列（第 N 个）"），**点《✅ 完成》后才把面板切换到下一个**；队列为空时结束会话（模式保留，可继续发送/回复） |
-| 面板按钮 | `sendtag:*` 上/下区标签切换（上区点击移除、下区点击添加）、`sendtag_page:*` 翻页、《✅ 完成》`sendtag_done`、《🔁 回复该消息》`sendtag_reply`（结束打标签并自动进入消息回复模式） |
-| 同步 `group_list.tags` | 每次标签变更后按组内 `message.tags` 并集重算 `group_list.tags`（见 `db/groupList.js`） |
-| 清理时机 | `/exit`、模式超时退出、进入其它指令/模式（`cleanPreviousMode`）时一并清空会话；会话本身有 2 小时空闲上限 |
+| 行为                   | 说明                                                                                                                                                                                                                                                                                           |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 自动进入               | 带描述的发送/回复成功后收录 `message`（标签作用对象 = 该条新的 `file_unique_id`），自动识别文本中已存在的标签并弹出打标签面板；无描述媒体不写 `message`，也不进入打标签                                                                                                                        |
+| 纯文本 = 打标签        | 会话进行中用户发来的**纯文本**视为标签操作（空格 / `、` / `,` 分隔可一次多个，`-标签` 表示移除；不存在的标签自动创建），**不发送、不查询**；直到点《✅ 完成》才结束                                                                                                                             |
+| 面板刷新方式           | **点按钮 → 只就地 `editMessageText` 刷新按钮与文本**（不重发消息、面板位置不动、聊天记录不刷屏）；**用户发消息改标签 → 删掉旧面板 + 发一条新面板**（用户消息在下方、旧面板被顶在上方看不到刷新结果，所以这一步才需要重发），见 `utils/tagSession.refreshPanel(userId, statusLine, { resend })` |
+| 媒体照常               | 会话进行中发送媒体仍由当前模式正常处理（继续发送 / 继续回复），成功后同样进入打标签队列                                                                                                                                                                                                        |
+| 队列                   | 当前标签还没打完又来一个需要打标签的媒体 → 先入队（提示"已加入打标签队列（第 N 个）"），**点《✅ 完成》后才把面板切换到下一个**；队列为空时结束会话（模式保留，可继续发送/回复）                                                                                                                |
+| 面板按钮               | `sendtag:*` 上/下区标签切换（上区点击移除、下区点击添加）、`sendtag_page:*` 翻页、《✅ 完成》`sendtag_done`、《🔁 回复该消息》`sendtag_reply`（结束打标签并自动进入消息回复模式）                                                                                                                |
+| 同步 `group_list.tags` | 每次标签变更后按组内 `message.tags` 并集重算 `group_list.tags`（见 `db/groupList.js`）                                                                                                                                                                                                         |
+| 清理时机               | `/exit`、模式超时退出、进入其它指令/模式（`cleanPreviousMode`）时一并清空会话；会话本身有 2 小时空闲上限                                                                                                                                                                                       |
 
 **manage/ — 管理面板**
 
@@ -1098,17 +1095,17 @@ const dynamicPrefixes = ['manage_', 'set_', 'pwd_'];
 
 **各回调处理器：**
 
-| 回调 | 功能 |
-|------|------|
-| `mediaCallback.js` | 显示指定媒体（按编号从缓存中获取） |
-| `directCallback.js` | 快捷查看（直接从查询结果获取） |
-| `directConfirmCallback.js` | 确认快捷查看 |
-| `pageCallback.js` | 翻页操作（上一页/下一页/指定页） |
-| `toggleCallback.js` | 切换查询设置（显示模式/排序方式） |
-| `randomShowCallback.js` | 随机结果显示切换 |
-| `cleanCallback.js` | 清理模式确认/取消 |
-| `cleanContinueCallback.js` | 清理完成后继续/退出 |
-| `execCmd.js` | 执行指定命令 |
+| 回调                       | 功能                               |
+| -------------------------- | ---------------------------------- |
+| `mediaCallback.js`         | 显示指定媒体（按编号从缓存中获取） |
+| `directCallback.js`        | 快捷查看（直接从查询结果获取）     |
+| `directConfirmCallback.js` | 确认快捷查看                       |
+| `pageCallback.js`          | 翻页操作（上一页/下一页/指定页）   |
+| `toggleCallback.js`        | 切换查询设置（显示模式/排序方式）  |
+| `randomShowCallback.js`    | 随机结果显示切换                   |
+| `cleanCallback.js`         | 清理模式确认/取消                  |
+| `cleanContinueCallback.js` | 清理完成后继续/退出                |
+| `execCmd.js`               | 执行指定命令                       |
 
 ---
 
@@ -1157,22 +1154,22 @@ db.settings.updateOne(
 > 而 CSS 多列（`columns`）是"先把第一列填满再填第二列"，顺序会先上下再左右 —— 故不使用。
 > 重排时机：视图渲染后、缩略图按真实比例定高后、窗口缩放后（防抖 120ms）。
 
-| 视图 | 内容 |
-|------|------|
-| 📊 概览 | 媒体 / 有描述 / 可清理组 / 用户 / 标签 / 聊天 / 日志 统计卡片、**数据库占用卡片（storageSize + 文档数 + 索引占用，取不到时标注"当前套餐不可读取大小"）**、媒体类型分布、最近操作、最新媒体组（可点开详情）、快捷入口 |
-| 🖼 媒体库 | 以 `group_list` 为单位的媒体组卡片：**图片与视频封面缩略图**（封面 = **该组第一条带文本 `message` 对应的媒体**，没有带文本媒体时回退 `media` 里最早一条；文本媒体 `media_type='text'` 不当封面；卡片封面与卡片描述因此始终是同一条媒体）、**服务端代理 Telegram `getFile`**（**悬停即弹出完整比例大图预览、缩略图本身也切到不裁切**）、**预览图右下角带文件类型角标**（🖼 图片 / 🎬 视频 / 🎵 音频 / 📄 文件 / 📝 文本）、**瀑布流（多列错落）布局**——与「随机推荐」同一套：**封面按图片原始比例完整显示、不裁切不变形**，列数**按容器宽度自适应**（列宽约 228px），因此在主区域和「标签详情」弹窗里**卡片一样大**、不会因为弹窗窄而变小（窄屏收窄列宽，手机上也排得下 2 列）、描述摘要（没有 message 时用 `media_name`（文件名 / 文本内容）兜底，仍然没有才标为「可清理」）、标签、类型/组数/位置；筛选「全部 / 有描述 / 可清理」+ 顶部搜索（**同时匹配 `message.text` 与 `media.media_name`**，因此只发过文件、没写描述的媒体也能按文件名搜到）+ **标签筛选**（从「标签」视图点进来，可用胶囊清除）+ 分页 + **「每组显示」40 / 80（默认）/ 120 / 200**；点开为详情对话框 |
-| 🎲 随机推荐 | 比机器人上的两个随机更自由：**数据来源**下拉常驻在「▾ 更多筛选」按钮前面（折叠也可见：message 库 = 有描述/标签的记录，默认；media 库 = 全部收录媒体）；**筛选条件面板默认折叠**（只留「类型」一行，点「▾ 更多筛选 / ▴ 收起筛选」展开收起，收起时用一句「已启用：…」摘要提示生效中的隐藏条件）；**类型**（图片/视频/音频/文件，多选）、**标签**（可多选，含任一 / 需同时含全部）、**关键词**（匹配描述）、**视频时长**（1 分钟内 / 3 分钟内 / 1-5 / 5-30 / 30 分钟以上 / 1 小时以上）、**范围**（全部 / 保留 / 可清理）、**数量**（20 / 40（默认）/ 80 / 150）任意组合，点「🎲 换一批」即重抽；结果区是**瀑布流（多列错落）**布局，**列数随窗口宽度阶梯变化**（手机 2 列 → 平板 3 列 → 小笔记本 4 列 → 桌面 5 列 → 大屏 6 列封顶），**封面按图片原始比例完整显示、不裁切不变形**，描述 / 标签 / 类型角标等文字信息仍在图片下方（卡片**不显示「保留 / 可清理」**——那是媒体库的清理语义，随机推荐里没有意义）；点卡片直接进该媒体组详情改描述/标签，「↗」在 Telegram 打开 |
-| 📋 媒体详情 | 左右两栏（左 = 媒体缩略图条，右 = 描述与标签 + 定位信息）**各自独立滚动**（每栏一根滚动条、高度只由自己内容决定，容器 `align-items: start` 互不拉平；窄屏单栏恢复整体滚动）；左栏媒体条是**瀑布流**（封面按图片原始比例完整显示、不裁切，列宽 132px、窄屏 104px —— 与「标签详情」的媒体**完全同一尺度**）、**一键「↗ 跳转 Telegram 查看」**、**在线改描述**（保存会同步 Telegram caption，超 48 小时只改库并提示）、**点选媒体后改标签**（点缩略图或描述块选中该媒体：已有标签高亮、点 ✕ 直接移除；没有标签则高亮「➕ 添加标签」；未选中时标签区置灰不可点。原「整组操作」已移除，标签按 message 独立）、一键「标记为可清理 / 保留」（改写 `group_list.is_delete`） |
-| 🧹 清理中心 | 按「一周前 / 一个月前 / 全部」给出**精确**的待清理组数与媒体数（`POST /api/clean` 预览），确认后执行与机器人 `/clean` 相同的删除逻辑；下方为可清理组预览 |
-| 🏷 标签 | 顶栏三个按钮：**➕ 添加标签**（表单新建，自动大写、重名拒绝）、**🗑️ 删除标签**（进入删除模式后点卡片二次确认删除，会同步清理所有 message）、**⭐ 置顶排序**（进入排序模式后**直接拖动卡片排序**，保存即按顺序写入置顶位置 1..N）；卡片显示置顶位置、使用次数、计数，**点击卡片进入标签详情**——详情顶栏显示置顶状态（`📍 已置顶（位置 N）` / `⭐ 未置顶`），**点一下即切换**置顶/取消置顶，正文**直接列出该标签下的媒体组（与「媒体详情」左栏**同一尺度**的紧凑瀑布流卡片：列宽 132px / 窄屏 104px 与 `.detail-strip--flow` 完全一致，同一个窗口下两处媒体一样大；卡片内容相应精简成「封面 + 描述 + 一行类型 / 媒体数」——132px 放不下徽标、标签胶囊、定位信息与 group_id，也不再有「点击进详情」提示与封面类型角标，点卡片直接打开媒体详情）**，底部可跳转到媒体库筛选全部；顶部搜索可过滤标签名 |
-| 👥 用户 | 用户表（名称 / ID / 状态 / 白名单 / 所在群组数 / 最近活跃），筛选「全部 / 白名单 / 已封禁」+ 搜索（名称或纯数字 ID）+ 分页；**支持新增 / 编辑（名称、状态、白名单、所在群组）/ 删除** |
-| 📢 群组 / 频道 | `channel_group` 记录与频道↔群组绑定关系（含绑定对象名称解析）；**支持新增 / 编辑 / 删除，绑定为双向写入**（改绑会清理旧对端，删除会解除对端绑定） |
-| 🚚 搬运收录 | `transport` 记录表：**活性徽标**（✅ 有效 / ❌ 失效 / ❔ 未检查）、名称、`chat_id`、**一键「↗ Telegram」跳转**、搬运次数、最近检查时间与失败原因；筛选「全部 / 有效 / 失效 / 未检查」+ 搜索（名称 / 链接 / chat_id）+ 分页；**支持新增 / 编辑 / 删除**，并可按行「🔄 检查活性」或「🔍 全部检查活性」（检查结果写回数据库，与机器人共用同一份结论） |
-| 📄 文章 | `article` 卡片：标题（可点开链接）、子文章列表、更新时间、子文章数；**支持文章与子文章的增 / 改 / 删**（删除文章会级联删除子文章） |
-| 📚 合集 / 杂集 | `collection`（合集）与 `misc`（杂集）卡片：名称、子项列表（可点开链接）、子项数；按类型筛选 + 搜索；**支持合集/杂集与子项的增 / 改 / 删**（删除会级联删除子项） |
-| 📈 统计报表 | **统一按年统计**（顶栏右上角 `◀ 2026 年 ▶` 切换年份，无月报/年报页签）：操作总数、媒体产出、媒体组产出、活跃天数、失败次数（带环比）、**每日操作量 GitHub 全年方格图**（独占整条：7 行 = 周一…周日、每列一周，列宽自适应撑满卡片、窄屏横向滚动；整年每格一天，列顶标注月份，颜色随操作量分 5 档加深，悬停看当天媒体数）、动作明细 Top15、大类分布、活跃用户、**活跃时间**（北京时间 24 小时分布，0 次的小时用底色短桩区分，高峰柱标绿并在柱顶标出次数），以及可筛选（大类 / 结果 / 关键词）的操作日志明细表 —— 面向"年终统计"设计；底部明细表**撑满剩余高度**（表格内部滚动，不再悬在页面中间）。历史日志只有旧编号（`type`）时也都有可读中文名（如 23 → 「修改文本」），不再出现 `legacy_type_23` 之类的占位名 |
-| 🗄 数据库 | **集合浏览与集合明细整合为一个视图**：上栏 = 集合选择 / 排序 / 插入 / AI 翻译 / 🔄 重新统计 + 库信息；中部为整库汇总卡（集合数 / 文档总数 / 存储占用 / 数据体积 / 索引占用）；下方为**各集合明细表**（文档数、数据体积、磁盘占用、索引占用、索引数，按体积排序，**点任意一行即切换下方浏览的集合**，当前集合行高亮）。套件不允许 `dbStats`/`collStats` 时自动降级为仅文档数并给出原因。再下方为**原始文档浏览**：选中集合后分页浏览、文档 JSON 就地修改与删除、插入模板（「全部数据库」选项只作为占位，不再重复列一遍集合列表） |
-| 📡 实时日志 | SSE 日志全屏视图，级别筛选（信息 / 成功 / 警告 / 错误）、暂停与清空 |
+| 视图          | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 📊 概览        | 媒体 / 有描述 / 可清理组 / 用户 / 标签 / 聊天 / 日志 统计卡片、**数据库占用卡片（storageSize + 文档数 + 索引占用，取不到时标注"当前套餐不可读取大小"）**、媒体类型分布、最近操作、最新媒体组（可点开详情）、快捷入口                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 🖼 媒体库      | 以 `group_list` 为单位的媒体组卡片：**图片与视频封面缩略图**（封面 = **该组第一条带文本 `message` 对应的媒体**，没有带文本媒体时回退 `media` 里最早一条；文本媒体 `media_type='text'` 不当封面；卡片封面与卡片描述因此始终是同一条媒体）、**服务端代理 Telegram `getFile`**（**悬停即弹出完整比例大图预览、缩略图本身也切到不裁切**）、**预览图右下角带文件类型角标**（🖼 图片 / 🎬 视频 / 🎵 音频 / 📄 文件 / 📝 文本）、**瀑布流（多列错落）布局**——与「随机推荐」同一套：**封面按图片原始比例完整显示、不裁切不变形**，列数**按容器宽度自适应**（列宽约 228px），因此在主区域和「标签详情」弹窗里**卡片一样大**、不会因为弹窗窄而变小（窄屏收窄列宽，手机上也排得下 2 列）、描述摘要（没有 message 时用 `media_name`（文件名 / 文本内容）兜底，仍然没有才标为「可清理」）、标签、类型/组数/位置；筛选「全部 / 有描述 / 可清理」+ 顶部搜索（**同时匹配 `message.text` 与 `media.media_name`**，因此只发过文件、没写描述的媒体也能按文件名搜到）+ **标签筛选**（从「标签」视图点进来，可用胶囊清除）+ 分页 + **「每组显示」40 / 80（默认）/ 120 / 200**；点开为详情对话框 |
+| 🎲 随机推荐    | 比机器人上的两个随机更自由：**数据来源**下拉常驻在「▾ 更多筛选」按钮前面（折叠也可见：message 库 = 有描述/标签的记录，默认；media 库 = 全部收录媒体）；**筛选条件面板默认折叠**（只留「类型」一行，点「▾ 更多筛选 / ▴ 收起筛选」展开收起，收起时用一句「已启用：…」摘要提示生效中的隐藏条件）；**类型**（图片/视频/音频/文件，多选）、**标签**（可多选，含任一 / 需同时含全部）、**关键词**（匹配描述）、**视频时长**（1 分钟内 / 3 分钟内 / 1-5 / 5-30 / 30 分钟以上 / 1 小时以上）、**范围**（全部 / 保留 / 可清理）、**数量**（20 / 40（默认）/ 80 / 150）任意组合，点「🎲 换一批」即重抽；结果区是**瀑布流（多列错落）**布局，**列数随窗口宽度阶梯变化**（手机 2 列 → 平板 3 列 → 小笔记本 4 列 → 桌面 5 列 → 大屏 6 列封顶），**封面按图片原始比例完整显示、不裁切不变形**，描述 / 标签 / 类型角标等文字信息仍在图片下方（卡片**不显示「保留 / 可清理」**——那是媒体库的清理语义，随机推荐里没有意义）；点卡片直接进该媒体组详情改描述/标签，「↗」在 Telegram 打开                                                                                                 |
+| 📋 媒体详情    | 左右两栏（左 = 媒体缩略图条，右 = 描述与标签 + 定位信息）**各自独立滚动**（每栏一根滚动条、高度只由自己内容决定，容器 `align-items: start` 互不拉平；窄屏单栏恢复整体滚动）；左栏媒体条是**瀑布流**（封面按图片原始比例完整显示、不裁切，列宽 132px、窄屏 104px —— 与「标签详情」的媒体**完全同一尺度**）、**一键「↗ 跳转 Telegram 查看」**、**在线改描述**（保存会同步 Telegram caption，超 48 小时只改库并提示）、**点选媒体后改标签**（点缩略图或描述块选中该媒体：已有标签高亮、点 ✕ 直接移除；没有标签则高亮「➕ 添加标签」；未选中时标签区置灰不可点。原「整组操作」已移除，标签按 message 独立）、一键「标记为可清理 / 保留」（改写 `group_list.is_delete`）                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 🧹 清理中心    | 按「一周前 / 一个月前 / 全部」给出**精确**的待清理组数与媒体数（`POST /api/clean` 预览），确认后执行与机器人 `/clean` 相同的删除逻辑；下方为可清理组预览                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 🏷 标签        | 顶栏三个按钮：**➕ 添加标签**（表单新建，自动大写、重名拒绝）、**🗑️ 删除标签**（进入删除模式后点卡片二次确认删除，会同步清理所有 message）、**⭐ 置顶排序**（进入排序模式后**直接拖动卡片排序**，保存即按顺序写入置顶位置 1..N）；卡片显示置顶位置、使用次数、计数，**点击卡片进入标签详情**——详情顶栏显示置顶状态（`📍 已置顶（位置 N）` / `⭐ 未置顶`），**点一下即切换**置顶/取消置顶，正文**直接列出该标签下的媒体组（与「媒体详情」左栏**同一尺度**的紧凑瀑布流卡片：列宽 132px / 窄屏 104px 与 `.detail-strip--flow` 完全一致，同一个窗口下两处媒体一样大；卡片内容相应精简成「封面 + 描述 + 一行类型 / 媒体数」——132px 放不下徽标、标签胶囊、定位信息与 group_id，也不再有「点击进详情」提示与封面类型角标，点卡片直接打开媒体详情）**，底部可跳转到媒体库筛选全部；顶部搜索可过滤标签名                                                                                                                                                                                                                                                                            |
+| 👥 用户        | 用户表（名称 / ID / 状态 / 白名单 / 所在群组数 / 最近活跃），筛选「全部 / 白名单 / 已封禁」+ 搜索（名称或纯数字 ID）+ 分页；**支持新增 / 编辑（名称、状态、白名单、所在群组）/ 删除**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 📢 群组 / 频道 | `channel_group` 记录与频道↔群组绑定关系（含绑定对象名称解析）；**支持新增 / 编辑 / 删除，绑定为双向写入**（改绑会清理旧对端，删除会解除对端绑定）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 🚚 搬运收录    | `transport` 记录表：**活性徽标**（✅ 有效 / ❌ 失效 / ❔ 未检查）、名称、`chat_id`、**一键「↗ Telegram」跳转**、搬运次数、最近检查时间与失败原因；筛选「全部 / 有效 / 失效 / 未检查」+ 搜索（名称 / 链接 / chat_id）+ 分页；**支持新增 / 编辑 / 删除**，并可按行「🔄 检查活性」或「🔍 全部检查活性」（检查结果写回数据库，与机器人共用同一份结论）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 📄 文章        | `article` 卡片：标题（可点开链接）、子文章列表、更新时间、子文章数；**支持文章与子文章的增 / 改 / 删**（删除文章会级联删除子文章）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 📚 合集 / 杂集 | `collection`（合集）与 `misc`（杂集）卡片：名称、子项列表（可点开链接）、子项数；按类型筛选 + 搜索；**支持合集/杂集与子项的增 / 改 / 删**（删除会级联删除子项）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 📈 统计报表    | **统一按年统计**（顶栏右上角 `◀ 2026 年 ▶` 切换年份，无月报/年报页签）：操作总数、媒体产出、媒体组产出、活跃天数、失败次数（带环比）、**每日操作量 GitHub 全年方格图**（独占整条：7 行 = 周一…周日、每列一周，列宽自适应撑满卡片、窄屏横向滚动；整年每格一天，列顶标注月份，颜色随操作量分 5 档加深，悬停看当天媒体数）、动作明细 Top15、大类分布、活跃用户、**活跃时间**（北京时间 24 小时分布，0 次的小时用底色短桩区分，高峰柱标绿并在柱顶标出次数），以及可筛选（大类 / 结果 / 关键词）的操作日志明细表 —— 面向"年终统计"设计；底部明细表**撑满剩余高度**（表格内部滚动，不再悬在页面中间）。历史日志只有旧编号（`type`）时也都有可读中文名（如 23 → 「修改文本」），不再出现 `legacy_type_23` 之类的占位名                                                                                                                                                                                                                                                                                                                                                       |
+| 🗄 数据库      | **集合浏览与集合明细整合为一个视图**：上栏 = 集合选择 / 排序 / 插入 / AI 翻译 / 🔄 重新统计 + 库信息；中部为整库汇总卡（集合数 / 文档总数 / 存储占用 / 数据体积 / 索引占用）；下方为**各集合明细表**（文档数、数据体积、磁盘占用、索引占用、索引数，按体积排序，**点任意一行即切换下方浏览的集合**，当前集合行高亮）。套件不允许 `dbStats`/`collStats` 时自动降级为仅文档数并给出原因。再下方为**原始文档浏览**：选中集合后分页浏览、文档 JSON 就地修改与删除、插入模板（「全部数据库」选项只作为占位，不再重复列一遍集合列表）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 📡 实时日志    | SSE 日志全屏视图，级别筛选（信息 / 成功 / 警告 / 错误）、暂停与清空                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 **AI 操作台（Ctrl/⌘ + K 或左下角「AI 翻译」）：**
 - 输入自然语言，或点面板里的示例胶囊快速套用；点【翻译为操作】
@@ -1192,44 +1189,44 @@ db.settings.updateOne(
 
 **API 一览：**
 
-| 接口 | 说明 |
-|------|------|
-| `POST /api/login` | 登录，返回 token |
-| `GET /api/db/collections` | 可操作集合白名单 |
-| `POST /api/db/query` | 查询（`collection` 为 `__all__` 时跨集合浏览，每集合前 100 条；否则分页） |
-| `POST /api/db/execute` | 执行操作（`{ operation, confirm }`，delete 必须 confirm 且 filter 非空） |
-| `POST /api/ai/plan` | AI 将自然语言翻译为完整操作计划（支持选中文档，不执行） |
-| `GET /api/logs/stream` | SSE 实时日志流（token 经 query 传递） |
-| `GET /api/overview` | 概览统计（各集合计数、媒体类型分布、最近操作、最新媒体组） |
-| `GET /api/media` | 媒体组列表（`scope=all\|cleanable\|kept`、`tag` 按标签筛选、`q` 按描述搜索、`page` / `pageSize` 分页，**`pageSize` 上限 200**、越界按 200 截断），带封面预览与描述/标签；**封面 = 该组第一条带文本 `message` 对应的媒体**（无带文本媒体时回退 `media` 最早一条） |
-| `GET /api/media/detail` | 单个媒体组详情（`groupId`）：媒体条目 + 描述与标签 + `group_list` 状态 |
-| `GET /api/random` | **随机推荐**：`source=message\|media`（数据来源，默认 `message` = 只抽有描述记录的媒体并按其 `file_unique_id` 补 media 信息；`media` = 全部收录媒体）、`types`（photo/video/audio/document，逗号分隔）、`tags` + `tagMode=any\|all`、`q`（匹配描述）、`duration`（all/<1min/<3min/1-5min/5-30min/>30min/>1h）、`scope=all\|kept\|cleanable`、`count=1..150`（默认 40）任意组合，随机抽一批媒体（带缩略图信息、描述、标签、位置以及 Telegram 跳转所需字段） |
-| `POST /api/clean` | 清理空数据（`{ scope: week\|month\|all, confirm }`；不带 `confirm` 只返回待清理数量） |
-| `GET /api/tags` | 标签库（含 `message` 中的实际使用次数） |
-| `GET /api/users` | 用户列表（`scope=all\|white\|banned`、`q` 名称或 ID、分页） |
-| `GET /api/groups` | 管理的群组/频道及绑定关系 |
-| `GET /api/thumb` | 图片/视频封面缩略图代理（服务端调用 Telegram `getFile`，图片用自身 `file_id`，视频/文档/音频用收录时保存的 `thumb_file_id`；token 经 query 传递，内存缓存） |
-| `POST /api/media/tags` | 给单条 media（`fileUniqueId`）或整个媒体组（`groupId`）增删标签（`{ add, remove }`），自动建标签并维护 `tags.count` |
-| `POST /api/media/description` | 修改媒体描述（`{ fileUniqueId, text, editTelegram }`）：落库 + 重算 `is_delete` + 重算标签 + 同步 Telegram caption（失败只回报不回滚） |
-| `GET /api/oplogs` | 操作日志列表（按 `category`/`action`/`result`/`userId`/时间范围/关键词筛选，分页；兼容只有 `type` 的历史数据） |
-| `GET /api/stats` | 月报 / 年报（`period=month|year&year=&month=`）：汇总、环比、每日趋势、动作/大类/用户分布、失败统计 |
-| `POST /api/users/create` \| `update` \| `delete` | 用户增 / 改（名称、状态、白名单、所在群组）/ 删（需 `confirm: true`） |
-| `POST /api/groups/create` \| `update` \| `delete` | 群组/频道增 / 改（含绑定，双向写入）/ 删（需 `confirm: true`，同时解除对端绑定） |
-| `GET /api/transport` | 搬运收录列表（`status=all\|alive\|dead\|unchecked`、`q` 名称/链接/chat_id、分页），返回 ✅/❌/❔ 活性状态、可点击 `link` 与四类计数 |
-| `POST /api/transport/create` \| `update` \| `delete` | 收录记录增 / 改（名称、链接、次数；改链接会作废旧活性结论）/ 删（需 `confirm: true`） |
-| `POST /api/transport/check` | 活性检查：带 `chat_id` 检查单条并写回结论；不带则全量检查，返回 `summary`（有效 / 失效 / 未知 / 新失效列表） |
-| `GET /api/articles` | 文章列表（`q` 标题/链接、分页、`withSubs=1` 附带子文章） |
-| `POST /api/articles/create` \| `update` \| `delete` | 文章增（自增 id）/ 改（标题、链接）/ 删（级联删除子文章，需 `confirm: true`） |
-| `POST /api/articles/sub/create` \| `update` \| `delete` | 子文章增 / 改 / 删（自动刷新父文章 `updated_at`） |
-| `GET /api/collections` | 合集/杂集列表（`type=all\|collection\|misc`、`q` 名称、`withSubs=1` 附带子项） |
-| `POST /api/collections/create` \| `update` \| `delete` | 合集/杂集增 / 改（名称、类型）/ 删（级联删除子项，需 `confirm: true`） |
-| `POST /api/collections/sub/create` \| `update` \| `delete` | 子项增 / 改 / 删（自动刷新父合集 `updated_at`） |
-| `GET /api/db-stats` | 数据库存储统计（整库 `dbStats` + 各集合 `collStats`，15 秒缓存；`force=1` 强制重算，取不到时返回 `available:false` + 原因） |
-| `POST /api/tags/create` | 新建标签（自动大写、≤20 字符、重名 409） |
-| `POST /api/tags/delete` | 删除标签（需 `confirm: true`，同步从所有 `message.tags` 移除） |
-| `POST /api/tags/rename` | 标签改名（`{ name, to }`，自动大写；同步改写所有 `message.tags`，重名 409 / 不存在 404） |
-| `POST /api/tags/pin` | 设置 / 取消置顶（`{ name, pin }`，`pin=0` 取消，上限 40） |
-| `POST /api/tags/reorder` | 按 `{ names: [...] }` 顺序批量写置顶位置 1..N（控制台拖拽排序保存用） |
+| 接口                                                       | 说明                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/login`                                          | 登录，返回 token                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `GET /api/db/collections`                                  | 可操作集合白名单                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `POST /api/db/query`                                       | 查询（`collection` 为 `__all__` 时跨集合浏览，每集合前 100 条；否则分页）                                                                                                                                                                                                                                                                                                                                                                                  |
+| `POST /api/db/execute`                                     | 执行操作（`{ operation, confirm }`，delete 必须 confirm 且 filter 非空）                                                                                                                                                                                                                                                                                                                                                                                   |
+| `POST /api/ai/plan`                                        | AI 将自然语言翻译为完整操作计划（支持选中文档，不执行）                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `GET /api/logs/stream`                                     | SSE 实时日志流（token 经 query 传递）                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `GET /api/overview`                                        | 概览统计（各集合计数、媒体类型分布、最近操作、最新媒体组）                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `GET /api/media`                                           | 媒体组列表（`scope=all\|cleanable\|kept`、`tag` 按标签筛选、`q` 按描述搜索、`page` / `pageSize` 分页，**`pageSize` 上限 200**、越界按 200 截断），带封面预览与描述/标签；**封面 = 该组第一条带文本 `message` 对应的媒体**（无带文本媒体时回退 `media` 最早一条）                                                                                                                                                                                           |
+| `GET /api/media/detail`                                    | 单个媒体组详情（`groupId`）：媒体条目 + 描述与标签 + `group_list` 状态                                                                                                                                                                                                                                                                                                                                                                                     |
+| `GET /api/random`                                          | **随机推荐**：`source=message\|media`（数据来源，默认 `message` = 只抽有描述记录的媒体并按其 `file_unique_id` 补 media 信息；`media` = 全部收录媒体）、`types`（photo/video/audio/document，逗号分隔）、`tags` + `tagMode=any\|all`、`q`（匹配描述）、`duration`（all/<1min/<3min/1-5min/5-30min/>30min/>1h）、`scope=all\|kept\|cleanable`、`count=1..150`（默认 40）任意组合，随机抽一批媒体（带缩略图信息、描述、标签、位置以及 Telegram 跳转所需字段） |
+| `POST /api/clean`                                          | 清理空数据（`{ scope: week\|month\|all, confirm }`；不带 `confirm` 只返回待清理数量）                                                                                                                                                                                                                                                                                                                                                                      |
+| `GET /api/tags`                                            | 标签库（含 `message` 中的实际使用次数）                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `GET /api/users`                                           | 用户列表（`scope=all\|white\|banned`、`q` 名称或 ID、分页）                                                                                                                                                                                                                                                                                                                                                                                                |
+| `GET /api/groups`                                          | 管理的群组/频道及绑定关系                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `GET /api/thumb`                                           | 图片/视频封面缩略图代理（服务端调用 Telegram `getFile`，图片用自身 `file_id`，视频/文档/音频用收录时保存的 `thumb_file_id`；token 经 query 传递，内存缓存）                                                                                                                                                                                                                                                                                                |
+| `POST /api/media/tags`                                     | 给单条 media（`fileUniqueId`）或整个媒体组（`groupId`）增删标签（`{ add, remove }`），自动建标签并维护 `tags.count`                                                                                                                                                                                                                                                                                                                                        |
+| `POST /api/media/description`                              | 修改媒体描述（`{ fileUniqueId, text, editTelegram }`）：落库 + 重算 `is_delete` + 重算标签 + 同步 Telegram caption（失败只回报不回滚）                                                                                                                                                                                                                                                                                                                     |
+| `GET /api/oplogs`                                          | 操作日志列表（按 `category`/`action`/`result`/`userId`/时间范围/关键词筛选，分页；兼容只有 `type` 的历史数据）                                                                                                                                                                                                                                                                                                                                             |
+| `GET /api/stats`                                           | 月报 / 年报（`period=month                                                                                                                                                                                                                                                                                                                                                                                                                                 | year&year=&month=`）：汇总、环比、每日趋势、动作/大类/用户分布、失败统计 |
+| `POST /api/users/create` \| `update` \| `delete`           | 用户增 / 改（名称、状态、白名单、所在群组）/ 删（需 `confirm: true`）                                                                                                                                                                                                                                                                                                                                                                                      |
+| `POST /api/groups/create` \| `update` \| `delete`          | 群组/频道增 / 改（含绑定，双向写入）/ 删（需 `confirm: true`，同时解除对端绑定）                                                                                                                                                                                                                                                                                                                                                                           |
+| `GET /api/transport`                                       | 搬运收录列表（`status=all\|alive\|dead\|unchecked`、`q` 名称/链接/chat_id、分页），返回 ✅/❌/❔ 活性状态、可点击 `link` 与四类计数                                                                                                                                                                                                                                                                                                                           |
+| `POST /api/transport/create` \| `update` \| `delete`       | 收录记录增 / 改（名称、链接、次数；改链接会作废旧活性结论）/ 删（需 `confirm: true`）                                                                                                                                                                                                                                                                                                                                                                      |
+| `POST /api/transport/check`                                | 活性检查：带 `chat_id` 检查单条并写回结论；不带则全量检查，返回 `summary`（有效 / 失效 / 未知 / 新失效列表）                                                                                                                                                                                                                                                                                                                                               |
+| `GET /api/articles`                                        | 文章列表（`q` 标题/链接、分页、`withSubs=1` 附带子文章）                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `POST /api/articles/create` \| `update` \| `delete`        | 文章增（自增 id）/ 改（标题、链接）/ 删（级联删除子文章，需 `confirm: true`）                                                                                                                                                                                                                                                                                                                                                                              |
+| `POST /api/articles/sub/create` \| `update` \| `delete`    | 子文章增 / 改 / 删（自动刷新父文章 `updated_at`）                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `GET /api/collections`                                     | 合集/杂集列表（`type=all\|collection\|misc`、`q` 名称、`withSubs=1` 附带子项）                                                                                                                                                                                                                                                                                                                                                                             |
+| `POST /api/collections/create` \| `update` \| `delete`     | 合集/杂集增 / 改（名称、类型）/ 删（级联删除子项，需 `confirm: true`）                                                                                                                                                                                                                                                                                                                                                                                     |
+| `POST /api/collections/sub/create` \| `update` \| `delete` | 子项增 / 改 / 删（自动刷新父合集 `updated_at`）                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `GET /api/db-stats`                                        | 数据库存储统计（整库 `dbStats` + 各集合 `collStats`，15 秒缓存；`force=1` 强制重算，取不到时返回 `available:false` + 原因）                                                                                                                                                                                                                                                                                                                                |
+| `POST /api/tags/create`                                    | 新建标签（自动大写、≤20 字符、重名 409）                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `POST /api/tags/delete`                                    | 删除标签（需 `confirm: true`，同步从所有 `message.tags` 移除）                                                                                                                                                                                                                                                                                                                                                                                             |
+| `POST /api/tags/rename`                                    | 标签改名（`{ name, to }`，自动大写；同步改写所有 `message.tags`，重名 409 / 不存在 404）                                                                                                                                                                                                                                                                                                                                                                   |
+| `POST /api/tags/pin`                                       | 设置 / 取消置顶（`{ name, pin }`，`pin=0` 取消，上限 40）                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `POST /api/tags/reorder`                                   | 按 `{ names: [...] }` 顺序批量写置顶位置 1..N（控制台拖拽排序保存用）                                                                                                                                                                                                                                                                                                                                                                                      |
 
 **实现要点：**
 - 使用 Node 内置 `http` 模块，无新增 npm 依赖（DeepSeek 调用使用 Node 内置 fetch）
@@ -1339,13 +1336,12 @@ handleGroupEditedMessage()
 
 ## 环境变量
 
-| 变量 | 必填 | 说明 |
-|------|------|------|
-| `TELEGRAM_BOT_TOKEN` | 是 | BotFather 获取的 Token |
-| `MONGODB_URI` | 是 | MongoDB Atlas 连接串 |
-| `TEST_MONGODB_URI` | 否 | 测试数据库连接串 |
-| `ADMIN_CHAT_ID` | 是 | 管理员 Telegram 用户 ID，多个用逗号分隔 |
-| `WEBUI_PORT` | 否 | Web UI 端口（默认 9700） |
+| 变量                 | 必填 | 说明                                    |
+| -------------------- | ---- | --------------------------------------- |
+| `TELEGRAM_BOT_TOKEN` | 是   | BotFather 获取的 Token                  |
+| `MONGODB_URI`        | 是   | MongoDB Atlas 连接串                    |
+| `ADMIN_CHAT_ID`      | 是   | 管理员 Telegram 用户 ID，多个用逗号分隔 |
+| `WEBUI_PORT`         | 否   | Web UI 端口（默认 9700）                |
 
 > Web UI 登录密码**不在 `.env`**：见数据库 `settings` 集合的 `webui_password` 字段（本表只列环境变量）。
 
@@ -1355,31 +1351,31 @@ handleGroupEditedMessage()
 
 ### 私聊命令（仅管理员可用）
 
-| 命令 | 功能 | 所属模块 |
-|------|------|----------|
-| `/media_group [N]` | 媒体合并模式（N=每组个数 1~10，退出时按 N 个一组打包发送） | modes/mediaCollectMode.js |
-| `/media_hide [N]` | 媒体遮罩模式（Spoiler，N=每组个数 1~10） | modes/mediaCollectMode.js |
-| `/media_unhide [N]` | 媒体去遮罩模式（N=每组个数 1~10） | modes/mediaCollectMode.js |
-| `/message_reply [N]` | 在群组/频道中回复指定消息（频道转发消息可先选择回复位置；N>=2 时媒体按 N 个一组打包为媒体组回复——满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出）；就绪后也可直接发文字回复 | modes/messageReplyMode.js |
-| `/message_reply_group [N]` | 在群组中回复指定消息（支持 N 打包） | modes/messageReplyMode.js |
-| `/message_reply_channel [N]` | 在频道中回复指定消息（支持 N 打包） | modes/messageReplyMode.js |
-| `/search` | 进入搜索模式 | modes/searchMode.js |
-| `/delete` | 删除单一媒体 | modes/deleteMode.js |
-| `/delete_group` | 删除整个媒体组 | modes/deleteGroupMode.js |
-| `/clean` | 数据库清理模式 | modes/cleanMode.js |
-| `/random_videos [N]` | 随机获取视频（N 1~10 直接发送视频媒体，N>=11 标题列表展示） | commands/randomVideos.js |
-| `/random_pictures [N]` | 随机获取图片（N 1~10 张） | commands/randomPictures.js |
-| `/mark` | 标记模式（单选题：发媒体正常标记 / 「📝 仅记录」只记录，完成即退出） | modes/markMode.js |
-| `/send` | 发送模式（选择群组/频道发送并收录；发送后先显示"正在发送中"再刷新为结果，可打标签——打标签面板为两区版面：上区=已有标签（点击移除）、下区=标签库（置顶在前、点击添加）；媒体组**描述先行带上**（发送时先内联带在第一条上，任何副本/自动转发都带描述），发完再还原到原本的媒体位置并对该媒体打标签；发文本同样收录为 `media_type='text'`） | modes/sendMode.js |
-| `/tag` | 标签模式（修改消息标签 / 编辑标签：添加、改名、删除、固定置顶位置，同步 message）。标签按 message 独立：新增/修改文本只打该条 message 的标签；修改消息标签时只作用于定位的那条媒体，并把组内所有带文本 message 的标签分别列出。**添加标签为两区版面**：上区=已有标签（点击移除），下区=标签库（置顶标签在最前，点击添加；已打上的非置顶标签不再重复显示，已打上的置顶标签仍保留在下区） | modes/tagMode.js |
-| `/edit` | 编辑消息正文（媒体改 caption、**机器人发出的文本消息改消息 text**；私聊可发媒体、**消息链接**或**转发来源**定位；群组/频道中管理员回复一条消息并发送 `/edit [新描述]` 可跳过定位直接修改，支持 `/edit@机器人用户名`，操作记录 1 分钟后自动删除；文本消息不能 `/null` 清空） | modes/editMode.js、handlers/groupReplyEdit.js、utils/messageLocator.js |
-| `/log` | 查看操作统计 | commands/log.js |
-| `/help` | 显示命令列表按钮 | commands/help.js |
-| `/setting` | 全局设置面板 | modes/settingMode.js |
-| `/transport` | 搬运链接管理（列表带活性徽标与失效原因，进入时自动补查过期记录；支持全量/单条活性检查，新增与改链接后立即实测） | modes/transportMode.js、utils/linkHealth.js |
-| `/password` | 媒体文件密码设置 | modes/passwordMode.js |
-| `/manage` | 管理面板（群组/用户/白名单） | modes/manage/ |
-| `/exit` | 退出当前模式 | commands/exit.js |
+| 命令                         | 功能                                                                                                                                                                                                                                                                                                                                                                                    | 所属模块                                                               |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `/media_group [N]`           | 媒体合并模式（N=每组个数 1~10，退出时按 N 个一组打包发送）                                                                                                                                                                                                                                                                                                                              | modes/mediaCollectMode.js                                              |
+| `/media_hide [N]`            | 媒体遮罩模式（Spoiler，N=每组个数 1~10）                                                                                                                                                                                                                                                                                                                                                | modes/mediaCollectMode.js                                              |
+| `/media_unhide [N]`          | 媒体去遮罩模式（N=每组个数 1~10）                                                                                                                                                                                                                                                                                                                                                       | modes/mediaCollectMode.js                                              |
+| `/message_reply [N]`         | 在群组/频道中回复指定消息（频道转发消息可先选择回复位置；N>=2 时媒体按 N 个一组打包为媒体组回复——满 N 个立即回复一组，不足 N 的余量等待补满下一组，退出/超时时才冲刷发出）；就绪后也可直接发文字回复                                                                                                                                                                                    | modes/messageReplyMode.js                                              |
+| `/message_reply_group [N]`   | 在群组中回复指定消息（支持 N 打包）                                                                                                                                                                                                                                                                                                                                                     | modes/messageReplyMode.js                                              |
+| `/message_reply_channel [N]` | 在频道中回复指定消息（支持 N 打包）                                                                                                                                                                                                                                                                                                                                                     | modes/messageReplyMode.js                                              |
+| `/search`                    | 进入搜索模式                                                                                                                                                                                                                                                                                                                                                                            | modes/searchMode.js                                                    |
+| `/delete`                    | 删除单一媒体                                                                                                                                                                                                                                                                                                                                                                            | modes/deleteMode.js                                                    |
+| `/delete_group`              | 删除整个媒体组                                                                                                                                                                                                                                                                                                                                                                          | modes/deleteGroupMode.js                                               |
+| `/clean`                     | 数据库清理模式                                                                                                                                                                                                                                                                                                                                                                          | modes/cleanMode.js                                                     |
+| `/random_videos [N]`         | 随机获取视频（N 1~10 直接发送视频媒体，N>=11 标题列表展示）                                                                                                                                                                                                                                                                                                                             | commands/randomVideos.js                                               |
+| `/random_pictures [N]`       | 随机获取图片（N 1~10 张）                                                                                                                                                                                                                                                                                                                                                               | commands/randomPictures.js                                             |
+| `/mark`                      | 标记模式（单选题：发媒体正常标记 / 「📝 仅记录」只记录，完成即退出）                                                                                                                                                                                                                                                                                                                     | modes/markMode.js                                                      |
+| `/send`                      | 发送模式（选择群组/频道发送并收录；发送后先显示"正在发送中"再刷新为结果，可打标签——打标签面板为两区版面：上区=已有标签（点击移除）、下区=标签库（置顶在前、点击添加）；媒体组**描述先行带上**（发送时先内联带在第一条上，任何副本/自动转发都带描述），发完再还原到原本的媒体位置并对该媒体打标签；发文本同样收录为 `media_type='text'`）                                                | modes/sendMode.js                                                      |
+| `/tag`                       | 标签模式（修改消息标签 / 编辑标签：添加、改名、删除、固定置顶位置，同步 message）。标签按 message 独立：新增/修改文本只打该条 message 的标签；修改消息标签时只作用于定位的那条媒体，并把组内所有带文本 message 的标签分别列出。**添加标签为两区版面**：上区=已有标签（点击移除），下区=标签库（置顶标签在最前，点击添加；已打上的非置顶标签不再重复显示，已打上的置顶标签仍保留在下区） | modes/tagMode.js                                                       |
+| `/edit`                      | 编辑消息正文（媒体改 caption、**机器人发出的文本消息改消息 text**；私聊可发媒体、**消息链接**或**转发来源**定位；群组/频道中管理员回复一条消息并发送 `/edit [新描述]` 可跳过定位直接修改，支持 `/edit@机器人用户名`，操作记录 1 分钟后自动删除；文本消息不能 `/null` 清空）                                                                                                             | modes/editMode.js、handlers/groupReplyEdit.js、utils/messageLocator.js |
+| `/log`                       | 查看操作统计                                                                                                                                                                                                                                                                                                                                                                            | commands/log.js                                                        |
+| `/help`                      | 显示命令列表按钮                                                                                                                                                                                                                                                                                                                                                                        | commands/help.js                                                       |
+| `/setting`                   | 全局设置面板                                                                                                                                                                                                                                                                                                                                                                            | modes/settingMode.js                                                   |
+| `/transport`                 | 搬运链接管理（列表带活性徽标与失效原因，进入时自动补查过期记录；支持全量/单条活性检查，新增与改链接后立即实测）                                                                                                                                                                                                                                                                         | modes/transportMode.js、utils/linkHealth.js                            |
+| `/password`                  | 媒体文件密码设置                                                                                                                                                                                                                                                                                                                                                                        | modes/passwordMode.js                                                  |
+| `/manage`                    | 管理面板（群组/用户/白名单）                                                                                                                                                                                                                                                                                                                                                            | modes/manage/                                                          |
+| `/exit`                      | 退出当前模式                                                                                                                                                                                                                                                                                                                                                                            | commands/exit.js                                                       |
 
 > **标签展示时机：** 媒体组标签（📌）不会出现在查询结果列表里，而是在**查看媒体时**展示——发送的媒体组注释下方；在"媒体过多询问是否发送/选择查看方式"的询问界面中，会在标签**上方**先展示该组的**媒体描述**（描述/标签缺一即省略对应行），且**标签与显示的文本配对**（显示哪条文本就配哪条的标签，各 message 标签独立共存），格式如下：
 >
@@ -1393,15 +1389,15 @@ handleGroupEditedMessage()
 
 ### 群组/频道自动功能
 
-| 功能 | 说明 |
-|------|------|
-| 媒体自动收录 | 群组/频道媒体自动入库（去重），带文本的媒体同步写入 message |
-| 频道转发双位置 | 频道转发至群组的媒体（含 `is_automatic_forward` 自动转发识别）在 message 记录新增 `channel_forward`、media 记录写入 `group`/`channel` 双位置，回复时可选回复在频道或群组；**`/send` 刚把同一批媒体发给频道时**（Telegram 会立刻自动转发到关联讨论群），库里可能还没落库 → 先按 `utils/inflight.js` 的登记短暂等落库完成再收录，**不另建"无描述、可清理"的影子媒体组**，只补一个群组位置 |
-| 编辑同步 | 消息编辑/删除后自动同步数据库 |
+| 功能                  | 说明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 媒体自动收录          | 群组/频道媒体自动入库（去重），带文本的媒体同步写入 message                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 频道转发双位置        | 频道转发至群组的媒体（含 `is_automatic_forward` 自动转发识别）在 message 记录新增 `channel_forward`、media 记录写入 `group`/`channel` 双位置，回复时可选回复在频道或群组；**`/send` 刚把同一批媒体发给频道时**（Telegram 会立刻自动转发到关联讨论群），库里可能还没落库 → 先按 `utils/inflight.js` 的登记短暂等落库完成再收录，**不另建"无描述、可清理"的影子媒体组**，只补一个群组位置                                                                                                                                                                                                          |
+| 编辑同步              | 消息编辑/删除后自动同步数据库                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | 回复 `/edit` 快捷编辑 | 管理员回复一条消息并发送 `/edit [新描述]`（支持 `/edit@机器人用户名`）可直接修改该消息：媒体改 Telegram caption、**机器人发出的文本消息改消息 text**（正文同步进 `media.media_name`）+ 同步数据库 + 按新文本重算该媒体标签；**新正文严格保留管理员发来的格式**（entities 原样带上，含 `/edit@Bot ` 前缀的偏移平移；没有格式时才退回 HTML/纯文本）；被回复的是**频道帖的自动转发副本**时按转发来源定位频道源消息再改；库里没有记录的消息也允许改（只改 Telegram）；文本消息不能 `/null` 清空；超 48 小时自动降级为仅更新数据库；**1 分钟后自动删除全部操作记录**（机器人提示 + 管理员的命令消息） |
-| 关键字查询 | 管理员在群组中发送文本自动搜索 |
-| 成员记录 | 加入/退出自动记录，可配置封禁策略 |
-| 入群审批 | 关联频道的用户自动通过加群申请 |
+| 关键字查询            | 管理员在群组中发送文本自动搜索                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 成员记录              | 加入/退出自动记录，可配置封禁策略                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 入群审批              | 关联频道的用户自动通过加群申请                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 ---
 
@@ -1409,17 +1405,17 @@ handleGroupEditedMessage()
 
 ### 集合总览
 
-| 集合 | 存储内容 | 文档数 |
-|------|----------|--------|
-| `message` | 消息元数据（文本、类型、标签、频道转发信息） | 与带文本媒体对应 |
-| `media` | 媒体文件记录（file_id、密码、group/channel 双位置） | 每条媒体一条记录 |
-| `group_list` | 媒体组汇总信息（`is_group` 计数、`is_delete` 标记、`mark` 次数、`tags` 组内标签并集） | 每组一条 |
-| `channel_group` | 管理的群组/频道 | 每个群组/频道一条 |
-| `users` | 用户信息及权限 | 每个用户一条 |
-| `log` | 操作审计日志 | 每次操作一条 |
-| `transport` | 搬运源链接 | 每个搬运源一条 |
-| `settings` | 全局设置（单文档） | 固定1条 |
-| `tags` | 标签库（`{name, pin, count}`：名称、置顶位置、使用次数） | 每个标签一条 |
+| 集合            | 存储内容                                                                              | 文档数            |
+| --------------- | ------------------------------------------------------------------------------------- | ----------------- |
+| `message`       | 消息元数据（文本、类型、标签、频道转发信息）                                          | 与带文本媒体对应  |
+| `media`         | 媒体文件记录（file_id、密码、group/channel 双位置）                                   | 每条媒体一条记录  |
+| `group_list`    | 媒体组汇总信息（`is_group` 计数、`is_delete` 标记、`mark` 次数、`tags` 组内标签并集） | 每组一条          |
+| `channel_group` | 管理的群组/频道                                                                       | 每个群组/频道一条 |
+| `users`         | 用户信息及权限                                                                        | 每个用户一条      |
+| `log`           | 操作审计日志                                                                          | 每次操作一条      |
+| `transport`     | 搬运源链接                                                                            | 每个搬运源一条    |
+| `settings`      | 全局设置（单文档）                                                                    | 固定1条           |
+| `tags`          | 标签库（`{name, pin, count}`：名称、置顶位置、使用次数）                              | 每个标签一条      |
 
 ---
 
@@ -1455,405 +1451,3 @@ handleGroupEditedMessage()
 3. 通过 → 自动批准入群
 
 ---
-
-## 版本历史
-
-### v0.5.31（当前）
-- **机器人发出的「文本消息」也能改描述**（此前 `/edit` 只认图片/视频/音频/文档，回复文本消息会得到
-  "⚠️ 请回复一条媒体消息再使用 /edit"）。文本消息就是 `media_type='text'`（见「文本媒体」一节）：
-  它的**正文是消息 `text`**、库里存在 `media.media_name`，与媒体 caption 不是一回事。现在：
-  - **群组/频道：回复该消息 + `/edit 新文本`**（支持 `/edit@机器人用户名`）一步直改；
-    不带文字时（仅群组）提示"请发送新的文本内容"，管理员下一条文本即新正文。
-    被回复的是**频道帖的自动转发副本**时，按转发来源（`forward_origin` / 旧版 `forward_from_chat`
-    + `forward_from_message_id`）定位**频道源消息**再改 —— 改频道源消息 Telegram 会自动同步到群里的副本。
-  - **私聊 `/edit`：发消息链接或含转发源的消息**即可定位，不必重新发送媒体：
-    `t.me/c/<内部ID>/<消息ID>`（私有频道/超级群，内部 ID 前补 `-100`）、
-    `t.me/<公开用户名>/<消息ID>`（用 `getChat` 解析 chat_id）、转发来的频道帖（带 `message_id`）。
-  - **严格保留管理员发送的文本格式**（`utils/textEntities.js`）：新正文一律带上**这条消息自己的
-    entities**（加粗 / 斜体 / 下划线 / 删除线 / 剧透 / 代码 / 链接 / 自定义 emoji …），
-    文本消息用 `entities`、媒体描述用 `caption_entities`，**不再用 `parse_mode` 解析原文**
-    （与 `/send`、`/reply` 的文本转发同一套思路：用户写的 `<3`、`*星号*` 不会被吃掉）。
-    正文是从命令消息里**截取**出来的（去掉 `/edit@Bot ` 前缀 / 首尾空白 / `#X` 后缀），
-    entities 的偏移量会跟着平移、越界的裁掉（`shiftEntities` 按**精确下标**平移，不按内容猜；
-    `projectEntities` 负责落库文本对齐），命令自身的 `bot_command` 自然被丢掉；
-    caption 装不下的自动识别类型（`mention`/`hashtag`/`url`/`bot_command`…）会先过滤掉
-    （客户端本来就会把它们渲染成链接）。**新正文没有格式时才退回**原来的「HTML 解析 → 纯文本」，
-    entities 被 Telegram 拒绝时也会丢掉 entities 用纯文本重试，保证正文一定写得进去。
-    文本媒体的格式一并写回 `media.media_name` + `media_entities`（查看媒体组重新发出时不丢格式）。
-  - **修改 = 改 Telegram 消息 `text`（有 entities 时原样带上，否则 HTML 解析失败自动降级纯文本）
-    + 把新正文写回 `media.media_name`（清掉与新正文错位的旧 `media_entities`）+
-    若该 `file_unique_id` 上存在 `message` 记录则同步它的 `text` 与标签；
-    超 48 小时 / 位置不是机器人发的，仍按老规矩降级为"仅更新数据库"。
-  - 库里**没有记录**的消息（消息链接/转发来源指向未收录消息、或群里的历史提示消息）也允许改：
-    只改 Telegram，提示里说明"媒体库中无该消息记录"。
-  - **文本消息不能清空**：Telegram 不允许把文本消息改成空文本，`/edit null`、私聊的「🗑 清空描述」
-    按钮与私聊两步里的 `/null` 都会被明确拒绝（保持状态让管理员重新输入）。
-  - 控制台同步：媒体详情里文本媒体的"描述"就是这条文本本身（编辑框预填 `media.name`），
-    保存走 `media_name` + `editMessageText`（不再凭空建 `message` 记录），清空同样被拒绝。
-- **新增 `utils/messageLocator.js`**：`parseMessageLink` / `resolveUsernameChatId` / `resolveMessageOrigin`
-  —— "消息链接 / 转发来源"定位的统一入口（纯函数 + getChat 解析）。
-  **新增 `utils/textMediaEdit.js`**：`applyTextMediaEdit` —— 文本媒体正文修改的统一落库入口。
-  **新增 `utils/textEntities.js`**：`normalizeEntities` / `shiftEntities` / `projectEntities` / `captionEntities`
-  —— 编辑时**严格保留用户发送的文本格式**（entities 精确平移裁剪 + caption 类型过滤）。
-  **`db/media.js` 新增** `findMediaByPosition(chatId, messageId)`（群组/频道/顶层位置 + 文本媒体位置 ID）
-  与 `updateTextMediaContent(fileUniqueId, text, entities)`。
-- 测试：新增 `tests/editTextMedia.test.js`（24 项：群组回复一步/两步、`/null` 拒绝、库外编辑、
-  消息链接、转发来源、公开用户名链接、auto 降级改 text、媒体两步清空回归、**entities 严格保留
-  （前缀精确平移 / 与机器人用户名重合 / 多余空白 / `#X` 后缀对齐 / caption_entities 过滤 /
-  被拒绝时降级纯文本 / 无 entities 时仍走 HTML）**、无法解析的群组转发、
-  `parseMessageLink` / `resolveMessageOrigin`）、
-  `tests/textEntities.test.js`（10 项纯函数），`tests/webui.test.js` 增加控制台改文本媒体描述的用例；
-  全量 **478 项通过**。
-
-### v0.5.30
-- **描述（注释）必须随相册一起发出去**（`media.js` + `handlers/modes/sendMode.js`）：Telegram 只有
-  **第一条**媒体带的注释会随相册一起发出，而**频道帖 → 关联讨论群**的自动转发是在**发送那一刻**
-  复制消息的。旧做法是"描述不在第一条 → 先不带注释发出，发完再 `editMessageCaption` 补上"，
-  转发副本因此永远没有描述（讨论群那份被收录成"空描述"，用户看到的就是
-  "发送时带描述，发到频道后描述没了"）。现在改成**注释先行带上**：发送时先把第一条注释内联带上
-  （任何副本都带描述），发完再还原到原本的媒体并清掉第一条（`albumCaptionCarry` / `clearAlbumCaption`）。
-- **频道帖自动转发"抢跑"不再另建影子媒体组**（`utils/inflight.js` + `handlers/groupMessageHandlers.js`）：
-  `/send` 把媒体组发给「频道 + 关联讨论群」时，Telegram 立刻自动转发，此刻机器人自己的发送/落库
-  还没结束 → 库里查不到 → 旧逻辑"照常收录"会另建一个**无描述、可清理**的影子组
-  （描述与位置都落在影子组上，删掉原组后媒体看起来"没有描述"甚至"数据不存在"）。
-  现在 `/send` 发送窗口内会在 `utils/inflight.js` 登记该文件，转发兜底发现"正在发送"就短暂等落库
-  完成再查，只补一个群组位置、不另建组。
-- **delete_group 后重新发送同一批媒体不再被静默忽略**（`handlers/modes/sendMode.js`）：
-  旧的"已发送守卫"是 5 分钟 TTL 的进程内 Map，媒体组一发出就把这批文件挡住 5 分钟 ——
-  用户 `delete_group` 删掉后立刻重新发送，终端只打一行"忽略重复消息"、媒体其实没发出去，
-  再删除就报"数据不存在"。现在守卫**只覆盖"正在发送（含落库）"的窗口**（flush 结束即解除，
-  见 `utils/inflight.js`），"是否已收录"一律以数据库为准。
-- **WebUI 瀑布流改为"先第一行从左到右"**（`webui/public/style.css` + `webui/public/app.js`）：四处瀑布流
-  （随机推荐 / 媒体库 / 标签详情 / 媒体详情左栏）由 CSS 多列（`columns`，先填满第一列再第二列，顺序会跳列）
-  改为 **CSS Grid + 8px 行标尺 + JS 行跨度**（`layoutFlowGrid`）：卡片 `align-self: start`，JS 量高后写
-  `grid-row-end: span N`，grid 自动放置永远是"先第一行从左到右、再往下" → **视觉顺序与列表顺序一致**。
-  重排时机：视图渲染后 / 缩略图按真实比例定高后 / 窗口缩放（防抖 120ms）。
-- **「BOT重启成功」报告改由主 bot 第一时间发**（`utils/crashNotify.js` + `index.js` + `watchdog.js`）：
-  看门狗把崩溃现场写进 `watchdog/crash-marker.json`，重启后的 bot 在**数据库连上、polling 就绪后立即**
-  自己发「♻️ BOT重启成功」（旧实现由看门狗等健康确认 30 秒 + 启动宽限期，用户往往几分钟后才收到，已删除）。
-- **崩溃 / 重启报告格式**（`watchdog/notify.js`）：标题**首尾各出现一次**，中间是「崩溃信息：」，
-  只列**最近 3 条** warn/erro（`WATCHDOG_REPORT_LINES` 默认 10 → 3）。
-- **打标签面板刷新方式**（`utils/tagSession.js` + `handlers/modes/tagMode.js`）：
-  **点按钮只就地 `editMessageText` 刷新按钮与文本**（不重发消息）；**用户发消息改标签时才删旧面板 + 发新面板**
-  （面板落到用户消息之后，按钮与文本状态立刻可见）。
-- **media 新增 `media_name`（文件/音乐名称）+ 搜索改双数据源**（`media.js` + `db/media.js` + `handlers/queryHandler.js`）：
-  收录文档 / 音频时记录 `file_name`（音频没有就用「标题 - 艺术家」），图片 / 视频不记录；
-  关键字查询**先在 message 查描述、再去 media 查名称**，两边都命中的按 `file_unique_id` 去重；
-  查询语法升级为 `关键字 +类型 -标签`（`+d` 文件 / `+a` 音频 / `+p` 图片 / `+v` 视频 / `+t` 文本，
-  三段都可省略，但同时出现必须按此顺序，否则不予查询并回语法提示）。
-  **音频不再自动生成描述**：没有 caption 就没有描述，严格按用户发送的内容收录
-  （**视频 / 图片的描述一律保留**，不受影响）。
-- **文本进库**（`/send`、`/reply` 的纯文本）：新增 `media_type='text'`，文本内容存 `media_name`、
-  `entities` 存 `media_entities`（**保留 Telegram 文本格式**），`file_unique_id` 用 `text:<chatId>:<messageId>`；
-  搜索可查到、查看媒体组时按原文顺序作为文本消息发出，`group_list.is_delete` 视为"有内容"不会被 `/clean` 清掉。
-  WebUI 同步支持：类型角标 / 类型分布 / 媒体库搜索都认识文本，文本不当封面、没有 message 时用文件名或文本内容兜底显示。
-- 测试：新增 `tests/textMediaSearch.test.js`（双数据源合并 / 类型标记 / 文本收录 / 相册排除文本 / 注释先行带上），
-  重写 `tests/queryParser.test.js`（三段落顺序校验）、`tests/uiStatic.test.js` + `tests/webuiViews.test.js`
-  （瀑布流 CSS 守卫改为断言 grid 行跨度）、`tests/watchdog.test.js`（新文案格式 + bot 侧发送），
-  `tests/recordMedia.test.js` 增加"删组后重新发送要真的入库""转发抢跑不建影子组""描述先行带上"用例；
-  全量 **443 项通过**。
-
-### v0.5.25
-- **随机推荐卡片去掉「保留 / 可清理」徽标**（`webui/public/app.js`）：随机推荐只是"随手一抽看内容"，
-  清理语义属于媒体库/清理中心，卡片上不再渲染 `.media-badges` 那一行；描述 / 标签 / 类型角标等其余信息不变。
-- 测试：`tests/webuiViews.test.js` 的瀑布流卡片用例增加断言（随机推荐卡片不含 `media-badges`、不出现「保留 / 可清理」）；
-  全量 **305 项通过**。
-
-### v0.5.24
-- **媒体详情改回"左右两栏各自独立滚动"**（`webui/public/style.css` + `webui/public/app.js`，取代 v0.5.16 的"两栏整体一起滚"）：
-  - 左栏（媒体）与右栏（描述与标签 + 定位信息）**各有一根滚动条**，互不影响；
-  - 两栏高度**只由自己的内容决定**：`.detail-main` 由 `align-items: stretch` 改为 **`align-items: start`**，
-    不再互相拉平；每栏 `max-height: min(56vh, 560px)`，内容少就短、超高才在栏内滚动；
-  - 媒体组详情里**对话框正文不再滚动**（新增 `.dialog-body.has-detail-main`，`overflow: hidden`），
-    避免出现"正文 + 左栏 + 右栏"三根滚动条；标签详情等网格视图仍按原样整体滚动（`.dialog-body` 默认 `overflow-y: auto`）；
-  - 窄屏（≤980px）单栏时取消两栏各自的滚动条，恢复整体滚动。
-- 测试：`tests/uiStatic.test.js` 的媒体详情滚动守卫改为断言"两栏各自 `overflow-y: auto` + 各自 `max-height` + 容器 `align-items: start` +
-  正文在媒体详情里不滚（标签详情仍滚）+ 窄屏恢复整体滚动"；全量 **305 项通过**。
-
-### v0.5.23
-- **Web UI 两处数量档位调整**（`webui/public/app.js` + `webui/server.js`）：
-  - **随机推荐「数量」**：档位由 `10 / 20 / 40 / 100` 改为 **`20 / 40（默认）/ 80 / 150`**；
-    默认抽取个数 20 → **40**（初始状态、「↺ 重置条件」、后端 `/api/random` 的 count 兜底值同步改为 40，
-    上限由 100 提到 **150**，否则选 150 会被后端截断）。
-  - **媒体库「每组显示」**：档位由 `12 / 24 / 48 / 100` 改为 **`20 / 40（默认）/ 80 / 120`**，默认 24 → **40**。
-- 测试：`tests/webuiViews.test.js` 新增「媒体库每组显示档位 20/40/80/120 + 默认 40 + 切档位立即按新数量重拉」用例，
-  并在随机推荐用例里断言数量档位为 `20/40/80/150`、默认选中 40（默认值不计入「已启用：…」摘要）；全量 **305 项通过**。
-
-### v0.5.22
-- **随机推荐瀑布流改为按屏幕宽度自动选列数**（`webui/public/style.css`）：原来固定 `columns: 3 232px`（列宽固定 → 宽屏也只有 3~5 列）。
-  现在改为**列数阶梯**，窗口越宽列越多：
-  | 窗口宽度 | 列数 |
-  |---|---|
-  | < 560px（手机） | 2 列 |
-  | ≥ 720px | 3 列 |
-  | ≥ 1024px | 4 列 |
-  | ≥ 1400px | 5 列 |
-  | ≥ 1800px（大屏） | 6 列（封顶，更宽不再加列以免封面过小） |
-
-  窄屏（≤420px）自动收窄列间距与卡片间距；列数封顶 6 列，避免超宽屏把封面压得过小。
-- 测试：`tests/uiStatic.test.js` 的瀑布流 CSS 守卫改为断言**列数阶梯**（断点从窄到宽、列数不递减、手机档 ≤2 列、大屏档 5~6 列）；
-  全量 **304 项通过**。
-
-### v0.5.21
-- **修复：回复时"还是不能选择回复至群组"**（`handlers/modes/messageReplyMode.js`）——查真实库发现位置解析只看 `message.channel_forward`，
-  而实际数据里大量媒体**根本没有 message 记录**（空描述媒体，`channel_forward` 无从写入）或 message 里 `channel_forward` 不完整，
-  双位置其实完整地存在 **`media.group` / `media.channel`** 上（诊断：最近 12 个媒体组里带位置的基本都是这种），
-  于是解析结果为空 → 不弹选择按钮 → 回退"消息自身位置"=频道，"选择回复至群组"彻底不可用。三处修复：
-  1. **位置解析改为"message + media"两处都看**（`deriveReplyLocations(messageDoc, mediaDoc)`）：
-     `channel_forward` 优先、缺失/不全时用 `media.group` / `media.channel` 补全，
-     并用 `message.chat_id === channel_chat_id` 兜底识别"频道侧收录时消息自身即频道位置"；
-     只有两个位置**互不相同**才算真正的双位置（避免把 `media.group`/`media.channel` 指向同一聊天的脏数据误判为转发）。
-  2. **空描述媒体（没有 message 记录）现在也能定位回复**：新增 `buildReplyTargetDoc()`，
-     用 `media` 双位置合成最小 messageDoc（群组位置优先作默认值），`/message_reply` 单条与媒体组两条定位路径都接入，
-     不再直接报"媒体不在消息数据库中，无法回复"。
-  3. 定位到**真正的频道转发媒体**时一律弹出「👥 回复在群组 / 📢 回复在频道」按钮（默认群组），
-     就绪消息上带「🔄 更改为发送至…」一键切换；普通群组媒体不弹按钮、直接回复在消息自身位置。
-  - `handleLocationCallback` 也带上 media 一起解析，并在目标位置不可用时给出明确提示而不是静默失败。
-- 测试：`tests/replyLocation.test.js` 扩到 9 例，新增「message 无 channel_forward、双位置只在 media 上仍弹按钮」
-  「空描述媒体（无 message 记录）也能定位并弹按钮、选群组后回复落在群组位置」「media 双位置指向同一聊天时不误判为频道转发」；
-  全量 **304 项通过**。
-
-### v0.5.20
-- **「🎲 随机推荐」改为瀑布流（masonry）布局：封面按图片原始比例完整显示、不再裁切**（`webui/public/app.js` + `webui/public/style.css`）：
-  - 结果区由等高网格（`grid` + 固定 `16/10` 裁切封面）改为**多列瀑布流**：`.media-grid--flow` 用 CSS `columns: 3 232px`
-    按列堆叠，卡片不再被拉成统一高度，形成错落效果；窄屏（≤640px）单列。
-  - 封面用新的 `.media-thumb--flow` / `.thumb-img--flow` 变体：`background-size: contain` + 里面那张"真图"参与文档流
-    （`.thumb-src` 在瀑布流里改为可见），**图片完整显示、不裁切、不变形**；高度由图片真实比例决定——
-    `window.__thumbLoad` 在缩略图加载完成后把 `aspect-ratio` 写到封面容器上（加载前先用 4/3 占位，避免布局跳动）。
-  - **文字信息（描述 / 标签 / 保留-可清理 / 类型 / 时长 /「↗ 在 Telegram 打开」）仍在图片下方**（`.media-body` 纵向排列）；
-    类型角标为避开图片下沿的操作入口，在瀑布流里挪到封面右上角。
-  - 媒体库、标签详情、媒体详情条**保持原来的裁切封面**（`thumbCover()` 默认行为不变，只有随机推荐传 `{ flow: true }`）。
-- 测试：`tests/webuiViews.test.js` 新增「随机推荐卡片是瀑布流变体（封面完整显示不裁切、文字仍在图片下方）」用例；
-  `tests/uiStatic.test.js` 新增 CSS 守卫（多列瀑布流、卡片 inline-block/不跨列、封面 contain 而非 cover、真图参与文档流、
-  文字区仍纵向）；全量 **301 项通过**。
-
-### v0.5.19
-- **修复：消息回复时不再询问/无法切换"回复在群组还是频道"，且默认落到了频道**（`handlers/modes/messageReplyMode.js`）：
-  - **默认回复位置改为群组**：`resolveReplyLocation(doc, null)` 以前会回落到"消息自身位置"——频道转发消息自身的 `chat_id` 就是**频道**，
-    于是未指定位置时默认回帖到频道；现在未指定位置时**优先取群组位置**（只有群组位置缺失时才用频道位置，非转发消息仍用消息自身位置）。
-  - **定位到频道转发消息（双位置）时一律先弹「👥 回复在群组 / 📢 回复在频道」按钮询问**，不再静默选一个位置；
-    只有单边位置（缺群组或频道位置）时才直接进入就绪、不弹空按钮。
-  - **位置偏好不再"粘住"导致不再询问**：就绪态收到媒体后重新进入就绪流程时会读取 `state.replyTarget`，
-    而该值此前会被旧的指令偏好/上一次选择提前填成 `'channel'`，使得后续媒体既不询问、默认也不是群组；
-    现在 `replyTarget` 只在**用户亲自点过位置按钮或切换按钮**后才写入（此时后续媒体沿用选择，符合直觉），
-    口令 `/message_reply_group`、`/message_reply_channel` 仍是"一次指定"的入口。
-  - 就绪消息上的 **「🔄 更改为发送至…」一键切换按钮**（群组 ⇄ 频道）在双位置时始终可用，点击即切换提示消息与回复目标。
-- 测试：新增 `tests/replyLocation.test.js`（6 例：双位置必须弹询问按钮、默认位置是群组、切换按钮可一键换边、
-  位置选择只在点过按钮后生效、只有单边位置时不弹空按钮、非转发消息不弹位置按钮）；全量 **299 项通过**。
-
-### v0.5.18
-- **修复：媒体库封面取错媒体**（`webui/server.js: pickPreviewMedia`）——原来封面是 `media` 里位置最早的一条，
-  但**空描述的媒体经常排在前面**（相册第一条不带注释很常见），于是出现"卡片封面与卡片描述不是同一条媒体"的错位。
-  现在改为：**封面 = 该组第一条带文本 `message` 对应的媒体**（即 `message` 里位置最早那条的 `file_unique_id` 对应的 `media`），
-  组内**没有任何带文本媒体**时回退为 `media` 里最早一条（保证仍有封面）。`GET /api/media/detail` 也返回同一套规则算出的
-  `preview`，列表与详情首图保持一致。
-- 测试：`tests/webui.test.js` 新增 2 例（封面跳过无描述的更早媒体取第一条带文本 message 的媒体，且详情 `preview` 与列表一致；
-  组内无带文本媒体时回退 `media` 最早一条）；全量 **293 项通过**。
-
-### v0.5.17
-- **修复：删除最后一个媒体后，已经没有任何媒体的 `group_list` 项没有被一同删除**（`handlers/modes/deleteMode.js` + `db/groupList.js`）：
-  - 旧实现用 `group_list.is_group === 1` 判断"是不是最后一个媒体"，否则 `$inc: { is_group: -1 }`，再检查是否归零。
-    只要这个计数与真实媒体数漂移（重复计数、历史数据、回滚失败等），删完最后一个媒体后 `is_group` 仍 > 0，
-    `group_list` 就永远留下来，变成"没有任何媒体的空组"；
-  - 新增 `db/groupList.js: removeMediaGroupIfEmpty(groupId)` 作为删除后的统一入口：**以 `media` 集合的真实记录数为准**——
-    组内已无 media → 删除 `group_list` 并清掉该组残留的 `message`（原本这些描述会变成按 `group_list` 查询永远查不到的孤儿记录）；
-    仍有 media → 把 `is_group` **重算为真实数量**（顺带修正漂移，也避免计数偏小时误删整个组）；
-  - `/delete` 删除后仍会重算 `is_delete` 与 `group_list.tags`（删掉的恰好是组内唯一带标签 / 唯一带描述的那条时能正确回落）。
-- **新增启动清理 `db/groupList.js: cleanupOrphanGroupList()`**（`index.js` 启动时执行）：把历史上遗留的
-  "没有任何媒体的 `group_list` 项"及其孤儿 `message` 一次性清掉，幂等；Web UI「数据库」视图的原始文档删除是底层直改工具、
-  不做级联，留下的空组会在这里被自动清理。
-- 测试：新增 `tests/deleteGroupList.test.js`（8 例：删最后一个媒体要删组、计数漂移偏大同样删组、计数漂移偏小不能误删整组并重算、
-  组内还有媒体时重算 `is_group` / `is_delete` / `tags`、`/delete_group` 全删、`removeMediaGroupIfEmpty` 两种分支、
-  `cleanupOrphanGroupList` 清理与幂等）；全量 **291 项通过**。
-
-### v0.5.16
-- **打标签会话与模式解耦（`utils/tagSession.js`，新文件）**：`/send`、消息回复、编辑描述写库成功后**自动进入打标签，但不再切换 / 退出原模式**——
-  - `send` 仍是 `send`、`message_reply` 仍是 `message_reply`，因此打标签期间**用户可继续发送媒体，bot 正常继续发送 / 继续回复**（新增媒体同样进入打标签队列）；
-  - 打标签期间用户输入的**纯文本（不含媒体的文字）= 打标签行为**（空格 / `、` 分隔可一次多个，`-标签` 表示移除，不存在的标签自动创建），不发送、不查询；**直到点击《✅ 完成》才结束打标签**；`/` 开头的指令仍照常执行（`/exit` 会一并清空会话）；
-  - **队列**：当前标签还没打完又来一个需要打标签的媒体 → 先入队（提示"已加入打标签队列（第 N 个）"），**用户点《完成》后才把面板切换到下一个**（当前行为默认；队列为空则结束本次打标签，模式保留）；
-  - 标签作用对象 = **回复成功后新收录的那条 message**（`file_unique_id`），标签按 message 独立；
-  - 面板按钮：上/下区标签切换、《✅ 完成》、《🔁 回复该消息》（结束打标签并自动进入消息回复模式）；`sendtag_*` 回调改由 `utils/tagSession.js` 处理。
-- **`group_list` 新增 `tags` 字段（媒体组标签汇总）**：内容 = 该媒体组内**所有 `message.tags` 的并集**（`message.tags` 仍是唯一权威来源，该字段只是便于"先查 group_list"的冗余汇总，无标签则不带该字段）。任何改变组内标签的写路径都会同步它：打标签会话、`/tag` 修改消息标签、编辑描述后的自动补标签、标签改名 / 删除（全库重算）。同步入口：`db/groupList.js: syncGroupTags` / `applyTagChangeToGroupTags` / `syncAllGroupTags`。**注：早期的「启动时全库补齐 `migrateGroupListTags()`」迁移已完成并移除**（历史数据已补齐，启动不再每次全库扫描；确实需要重算时手动调用 `syncAllGroupTags()`）。
-- **标签查询改为「先查 `group_list` 再查 `message`」**（`handlers/queryHandler.js: buildQuery` / `rankResults`）：
-  - 宽松标签 `-标签`：`message` 与 `group_list` **都查**，命中任一标签的媒体组（整组）与自身 `message.tags` 命中的单条**取并集**（兼容没有 `group_list.tags` 的老数据）；
-  - 严格标签 `--标签`：**只查 `group_list`** 同时含全部标签的媒体组，取其组内的 message 数据（不再看单条 message 自己的标签）；
-  - 命中媒体组后，组内**所有描述**都返回（媒体组包含多个描述时全部显示），带关键字时**关键字命中的描述排最前**（最符合查询的优先）。
-- 修复：`queryHandler.buildQuery` 里标签正则辅助函数与解构出的 `tags` 变量重名，导致宽松标签查询退化为 `$in: [{}]`（该路径此前无测试覆盖，本次一并修正）。
-- 测试：新增 `tests/tagSession.test.js`（11 例：发送 / 回复有描述→收录 + 进入打标签且模式不退出、无描述不进入、打标签期间继续回复媒体、纯文本打标签并同步 `group_list.tags`、《完成》切换队列 / 结束会话、宽松与严格标签查询、`group_list.tags` 并集汇总）；`tests/helpers/memoryDb.js` 补上 `$in` 内正则、`$all`、`$nin` 的匹配语义（原先未实现，"标签按 message 独立"的共享桩一直没被覆盖）；全量 **283 项通过**。
-
-### v0.5.15
-- **媒体详情对话框：左右两栏改为「一个整体」一起滚动**（`webui/public/style.css`）：原来左栏「媒体」列表自己 `overflow-y: auto`、「描述与标签」的 `.detail-msg-list` 也自己 `overflow-y: auto`，两栏各滚各的；现在这两处内部滚动全部去掉（`.detail-left` 不再滚动、`.detail-aside > .detail-msg-list` 由 `flex: 1 1 auto` + `overflow-y: auto` 改为 `flex: 0 0 auto` 按内容撑高），**唯一滚动容器是 `.dialog-body`**，左右两栏等高（`align-items: stretch`）跟着对话框正文一起上下滚；窄屏单栏同样整体滚动（媒体查询里多余的 `overflow: visible` 覆盖规则一并删除）。
-- **「🎲 随机推荐」筛选条件面板可折叠（默认折叠，只显示「类型」一行）**（`webui/public/app.js`）：卡片右上角新增「▾ 更多筛选 / ▴ 收起筛选」按钮（`data-action="random-filters-toggle"`），折叠时只渲染「类型」一行，展开后才渲染 时长 / 数量 / 范围 / 标签 / 关键词；**纯前端切换，不重新抽**，展开状态在「换一批」「点类型重抽」「重置条件」后都保持不变（重置条件只重置条件、不改变展开状态）；折叠时标题右侧显示「已启用：时长 … / 范围 … / 标签 … / 关键词 … / 数量 …」摘要，没有非默认条件时显示「已收起（时长 / 范围 / 标签 / 关键词 / 数量）」。
-- **「🎲 随机推荐」新增「数据来源」下拉**（`webui/public/app.js` + `GET /api/random?source=…`）：下拉常驻在卡片标题行、**排在「▾ 更多筛选」按钮前面**（折叠状态也可见，切换不需要先展开面板），可在 **`message` 库（有描述 / 标签的记录，默认）** 与 **`media` 库（全部收录媒体）** 之间切换，切换即按当前条件重抽，「↺ 重置条件」回到默认的 `message`：
-  - `source=message`：抽取池是 `message` 集合（只有带描述/标签的媒体才有记录），再按 `file_unique_id` 关联 `media` 补类型、缩略图、时长与 Telegram 位置；关联不到 media 的孤儿记录用 message 自身的 `group_id / chat_id / message_id / media_type` 兜底，不会报错。
-  - `source=media`：与改动前完全一致（抽取池是 `media` 集合，`message` 只用来补描述 / 标签）。
-  - 两种来源共用**标签 / 关键词 / 范围**筛选；**视频时长**在 `message` 来源下先按 `media.video_time` 取出合格 `file_unique_id` 再回筛，语义与 `media` 来源一致。
-  - 响应 `filters` 回显 `source`，原有返回字段（`total` / `count` / `items`）结构不变。
-- 测试：`tests/webui.test.js` 新增「默认来源 message（含孤儿记录兜底、类型/标签/关键词/范围筛选）」「message 来源时长过滤」两个用例，原有用例改为显式 `source=media`；`tests/webuiViews.test.js` 新增「默认折叠只显示类型 + 来源下拉在「更多筛选」前面」「展开状态在重抽 / 重置后保持、再点收起回到只显示类型」「来源下拉折叠时即可切换 / 重置回 message」用例；`tests/uiStatic.test.js` 新增「媒体详情左右两栏整体滚动（只有 `.dialog-body` 一个滚动容器）」的 CSS 守卫；全量 **272 项通过**。
-
-### v0.5.14
-- **控制台「数据库」视图去掉下方重复的集合列表**：原来在集合明细表下面还会用「📁 集合名 + 条数」的文件夹列表再列一遍所有集合（`col-summary`），与上面的明细表重复。现在只保留一句引导提示「点上方『集合明细』里的任意一行，即可浏览该集合的原始文档」，并**不再为「全部数据库」发起跨集合查询**（少一次无用的数据库往返）；浏览某个集合仍然照旧（点明细行 / 下拉选择 / 排序 / 分页 / 就地改删 / 插入）。
-- 测试：`tests/webuiViews.test.js` 增加断言（不再出现 `col-summary`、显示引导提示）；全量 **266 项通过**。
-
-### v0.5.13
-- **控制台新增「🎲 随机推荐」视图**（`GET /api/random`，比机器人上的两个随机自由得多）：
-  - 筛选条件任意组合：**类型**（图片/视频/音频/文件，多选）、**标签**（多选，可切「含任一 / 需同时含全部」）、**关键词**（匹配描述）、**视频时长**（1 分钟内 / 3 分钟内 / 1-5 / 5-30 / 30 分钟以上 / 1 小时以上）、**范围**（全部 / 保留（有描述）/ 可清理）、**数量**（3/6/12/24）；
-  - 点「🎲 换一批」按当前条件重抽（随机取下标，不重复）；「↺ 重置条件」一键回到默认；
-  - 抽出的卡片带缩略图、**文件类型角标**、描述、标签、「可清理/保留」与标记次数，悬停可看大图，点卡片直接进该媒体组详情改描述/改标签，另有「↗」直接在 Telegram 打开；
-  - 后端按 `message`（描述/标签）→ `media`（类型/时长）→ `group_list`（是否有描述）三段过滤后在候选里随机抽，无候选时返回空列表而不是报错。
-- **媒体预览图加文件类型角标**（`webui/public/app.js: typeBadgeHtml` + `.thumb-type`）：媒体库卡片、标签详情、媒体详情缩略图条右下角统一显示 🖼 图片 / 🎬 视频 / 🎵 音频 / 📄 文件，覆盖在预览图上（`backdrop-filter` 毛玻璃小胶囊，`pointer-events: none` 不挡点击与悬停放大）；详情缩略图条额外包了一层 `.detail-thumb` 让角标贴在图片上、不压到下面的说明行。
-- 测试：`tests/webui.test.js` 新增随机推荐接口用例（类型/标签/关键词/范围/时长/数量组合 + 无候选），`tests/webuiViews.test.js` 新增视图用例（筛选面板与控件、类型角标、点类型即重抽、重置条件），`tests/uiStatic.test.js` 新增导航入口守卫；全量 **266 项通过**。
-
-### v0.5.12
-- **改描述：位置优先级修正 + 失败换位重试**（`utils/editTarget.js`，私聊 `/edit`、群/频道回复 `/edit`、控制台改描述共用）：频道发布后被自动转发到讨论群的媒体，**优先改频道源消息**（Telegram 会自动同步到群里那份副本），该位置改不了（超 48 小时 / 不是机器人发的）时再退群组位置重试；失败后仍走原来的「仅更新数据库」降级。修掉"刚 `/send` 到频道的消息也提示超过 48 小时"的问题（原来一律优先群组位置，改的是群里那份转发副本，机器人永远改不了）。
-- **标签：编辑描述不再清空已有标签**（`utils/tagSync.js`、`sendMode.js`）：改描述只把新文本里匹配到、且尚未打上的标签补上（并集），已有标签原样保留；**只有清空描述**才整体清空标签，且改为"先清标签（递减使用次数）再删 message 记录"，修掉标签使用次数只增不减的老问题。
-- **私聊 `/edit` 交互**：「✅ 找到了，请输入修改内容」下新增「🗑 清空描述 / 🚪 退出」两个按钮（清空同样走统一的"仅更新数据库"确认流程）；编辑成功后自动弹出打标签界面，界面里显示保留后的完整标签。
-- **media 位置瘦身**：位置的唯一权威是 `group` / `channel` 子文档，**新数据不再写顶层 `message_id`**（旧数据保留、读取统一走 `db/media.js: resolveMediaPosition()`：group_id 前缀对应的位置 → 顶层字段兜底 → group → channel）；排序（列表 / 相册顺序 / 控制台详情）改按解析出的位置在内存里排。启动时一次性清理与子文档重复的顶层字段（幂等，旧数据不动）。
-- **`/mark` 改为单选题 + 新增 `mark` 集合**：`/mark` 回复只有两个按钮「📝 仅记录 / 🚪 退出」——发媒体照旧 `group_list.mark +1` 并写入 `mark` 历史，点「仅记录」则**不标记任何媒体/媒体组**、只写一条 `mode='record'` 记录（不带 `group_id`），两者完成后都自动退出标记模式；媒体未收录时仍留在模式内可重试。新集合：`{ userId, mode, time, date }` +（`mode='mark'` 时）`group_id / file_unique_id / media_type / isGroup`；`group_list.mark` / `last_mark_time` 语义不变（且未标记过的组不再写 `last_mark_time` 空字段，启动时清理历史 null，来源 `db/mark.js`、`db/groupList.js: cleanupNullMarkTime`）。
-- **修复"管理员解封后机器人又拉黑"**（`handlers/chatMemberHandler.js`）：`chat_member` 事件新增旧状态判断 —— Telegram 侧解封（频道/群「已移除用户 / 黑名单」移除）发来的是 `kicked → left`，旧实现只看新状态 `left` 就当成退群 → 触发"退出即封禁"立刻又封回去。现在识别为解封：库状态同步为正常 + 标记"最近解封"，不做任何自动封禁；真正的 `member → left` 仍维持退出即封禁。
-- **控制台「数据库」视图**（原「数据库 / 原始数据」）：改名并把**集合浏览上栏**与**集合明细表**整合成一个视图 —— 上栏选集合/排序/插入/AI/重新统计，中部整库汇总卡，下方集合明细表（**点行即切换浏览**、当前集合行高亮），去掉「平均文档」卡片与表头列。
-- **统计报表「每日操作量」可手动选查看项**：默认「全部操作」，可切「媒体数」、按大类、或按单个动作（如「媒体标记」「标记仅记录」，带次数）单独看；方格深浅、悬停提示、图例与分级上限都跟着切换项走，切换年份若该查看项无数据自动回落默认。
-- **媒体预览悬停放大（整图可见）**：媒体库卡片与媒体详情对话框里的缩略图悬停时不再裁切（`object-fit: contain`），并在旁边弹出**完整比例的大图浮层**（`position: fixed`；对话框打开时挂进对话框，否则会被顶层遮住），自动按视口与缩略图位置排版、移出/滚动/点击即收起，触屏设备不启用。
-- **统计报表操作日志明细区域加长**：最小高度从 280px 提到约 620px（窄屏按 `vh` 自适应，约 14 行可见）。
-- 其它：`db-guide.md` 补 `mark` 集合与 media 位置说明；集合中文名新增「标记历史」；测试新增 `editTarget` / `tagEdit` / `mediaPosition` / `groupMark` / `markRecord` / `chatMember` 等用例，全量 **262 项通过**。
-
-### v0.5.11
-- **媒体详情「描述与标签」区重做**（控制台）：
-  - 以前每点一个没有描述的媒体，都会**在上方另开一段**「描述与标签」section，点几次就堆几段；现在新增的编辑区**落在原有的「描述与标签」区里并置顶显示**（该区紧跟在媒体条下方，用 `<div class="detail-msg-list">` 统一承载所有描述块）；
-  - **同一时间只有一个新增块**，并且跟着点击走：点第 1 个没有描述的媒体出现它的编辑区，再点第 2 个没有描述的媒体，新增块自动切换成第 2 个（不是叠加）；
-  - **没点击（或取消选中）不显示新增块**；**点已有描述的媒体也不新增块**，而是把它**自己的描述块置顶**，省得在长列表里找；
-  - 新增块直接进入编辑态并带「🆕 新增描述」标记（虚线强调边框），保存时后端照旧自动补建 `message` 记录；
-  - 实现上只重建「新增块」，已有块用 `data-idx` 还原原始顺序后再移动排序，不打断用户正在输入的内容。
-- 测试：`tests/webuiViews.test.js` 新增 3 项（新增块落区/唯一性/跟随切换/取消即消失、已有描述媒体置顶且不新增、跨组切换不残留），并让测试桩的 `appendChild` / `insertBefore` / `remove` 与真实 DOM 一致（移动而非复制、真实摘除节点）；全量 **211 项通过**。
-
-### v0.5.10
-- **手动输入标签统一规则**（`utils/tagUi.js: parseTagInput`，机器人端与控制台同一套，适用于**任意添加标签处**）：
-  - **空格分隔一次写多个**：`xx yy` → 添加 `XX`、`YY`（空格 / `、` / `,` / `，` / 换行都能分隔）；
-  - **`-` 前缀表示移除**：`xx -yy` → 添加 `XX`、移除 `YY`；`-xx -yy` → 只移除；中文输入法的全角 `－` / `−` 同样识别；
-  - 同名同时出现（`xx -xx`）以移除为准；各榜单内部去重（大小写不敏感）；标签名中间的 `-`（`jk-2`）不算前缀；
-  - 落到三处：`/tag` 修改消息标签的手动输入（➕ 添加面板无前缀=添加、`-`=移除；🗑️ 删除面板两者都算移除）、`/send` 发送成功后的打标签面板、控制台媒体详情的标签输入框（回车或「➕ 添加」都提交一次 `POST /api/media/tags`，`add`/`remove` 同时下发）；
-  - `splitTagInput` 保留（= `parseTagInput().add`），旧调用点自动忽略 `-标签`。
-- **媒体详情标签区新增「取消」按钮**：`➕ 添加标签` 后面与输入框 `➕ 添加` 后面各一个，点取消即收起选择区并清空输入、不写库。
-- **修复「点媒体卡片进不去详情」**：`mediaCard(item, action)` 加了第二个参数后，媒体库仍写成 `m.items.map(mediaCard)`，`Array.map` 会把**索引**当第二参传进去 → `data-action="0"` → 点击无任何反应。改为 `map(it => mediaCard(it))`，并加回归测试断言卡片必须是 `data-action="open-media"`、且 HTML 里不得出现数字 action。
-- 测试：新增 `parseTagInput` 8 项（多标签/移除/全角减号/去重/同名优先级/孤立减号）与控制台输入框多标签+移除用例，新增「媒体库点卡片进详情」回归用例；全量 **209 项通过**。
-
-### v0.5.9
-- **统计报表「每日操作量」统一为 GitHub 全年方格**：去掉「月报 / 年报」页签，报表统一按年统计，年份改为顶栏右上角 `◀ 2026 年 ▶` 左右切换（2000~2100 边界禁用）；方格图独占一条长卡片，**7 行 = 周一…周日、每列一周**，整年每格一天、列顶标注 1~12 月，列宽 `minmax(9px, 1fr)` 自适应撑满卡片（窄屏横向滚动），颜色随操作量分 5 档加深；移除右侧「最活跃的日子」。
-  - 修掉「方格只排成一行」的根因：`grid-auto-flow: column` 未显式声明行数时会把所有格子铺在第一行，现显式 `grid-template-rows: repeat(7, auto)` 并加静态回归测试守卫。
-- **新增「活跃时间」卡片**（排在「活跃用户」之后）：`/api/stats` 新增 `byHour`（北京时间整点 24 个小时桶，含媒体产出）；前端 24 根柱、**00~23 全部标注刻度**，0 次的小时用底色短桩区分（不再像有活动），每 6 小时一条淡分隔线，高峰柱标绿并在柱顶标出次数，底部汇总「高峰 HH:00 · N 次（占 X%）· 次高 …」；柱高改由 `grid-template-rows: 14px 1fr 13px` 精确换算，不再被 flex 收缩压扁。
-- **标签详情直接列媒体**：点标签卡片后正文用**与「媒体库」同款方块卡片**列出该标签下的媒体组（缩略图 / 状态徽标 / 描述 / 标签 / 媒体数），点卡片直接打开媒体详情，页脚保留「🖼 在媒体库中筛选」查看全部。
-- **修复媒体详情里标签根本点不动**（`pointer-events` 陷阱）：`.tag-edit.is-locked` 设了 `pointer-events: none`，选中后只加 `is-active` 而没有移除 `is-locked`，导致「➕ 添加标签」、标签上的 ✎/✕ 在浏览器里全部点不动（测试桩不实现 CSS 所以未暴露）。现在选中时移除 `is-locked`、未选中时加回，并补 `.tag-edit.is-active { pointer-events: auto }` 与静态 CSS 守卫。
-- **标签增删改齐全**：
-  - ➕ 添加标签：展开选择区，可点推荐标签或输入回车添加；**「➕ 添加标签」后面新增「取消」**（输入框那一行的「➕ 添加」后面也有），取消即收起并清空输入、不写库；
-  - ✕ 移除已有标签；**新增 ✎ 改名**（`POST /api/tags/rename`，自动大写、重名 409、不存在 404，同步改写所有 `message.tags`）；
-  - 只有一个媒体的组打开即自动选中，标签区直接可点。
-- **无文本记录的媒体也能补描述 + 打标签**：缩略图统一可点选，选中后自动补出「描述与标签」编辑块（虚线框 + `无文本记录` 标记，直接进入编辑态），保存描述时后端自动补建 `message` 记录。
-- **自动识别标签改为整词匹配**（`utils/tagUi.js: matchTagsInText`）：纯英文/数字标签按整词匹配，`hello` 不会再被拆成 `h`/`e`/`he`/`el`（`helloworld`、`a_hd_b` 也不命中）；含中文等非 ASCII 字符的标签仍按子串匹配（中文没有词边界，`这是HD画质` 仍能识别 `HD`）；正则元字符标签已转义。需要片段匹配时自行在标签库另加标签。
-- 测试：`tests/webuiViews.test.js` 扩充为 30 项（方格整年格数与色深分级、年份左右切换与边界禁用、活跃时间 24 小时与高峰、标签详情方块卡片、标签增删改与取消按钮、无文本记录媒体补描述、单媒体自动选中）；`tests/webui.test.js` 新增标签改名与 `byHour` 聚合用例（并让内存假集合支持 `tags.$` 位置更新）；`tests/tags.test.js` 新增英文整词匹配用例；`tests/uiStatic.test.js` 新增方格 7 行与标签区 `pointer-events` 静态守卫。全量 **199 项通过**。
-
-### v0.5.8
-- **控制台媒体详情改为「点选媒体再改标签」**：移除整组操作块；点击缩略图或描述块选中该媒体 → 已有标签高亮、点 ✕ 直接移除；该媒体没有标签则高亮「➕ 添加标签」；未选中时标签区置灰不可点（`pointer-events:none` + 按钮 `disabled`）。改完标签整块重渲染后仍保留选中态。标签仍按 message 独立，`POST /api/media/tags` 的整组用法保留（机器人侧在用）。
-- **修复收录链接活性误报失效**（`utils/linkHealth.js`）：原实现直接 `getChat(chat_id)`，而机器人通常并不在搬运来源频道里，38 条记录全部返回 "chat not found" → 被误判为 ❌ 失效。现在改为**优先按链接里的 `t.me/<username>` 探测**（实测 6/6 恢复为 ✅，并回填了最新频道名）；公开用户名解析失败才算 `dead`；私有/消息链接（`t.me/c/…`）机器人无权验证时判 `unknown` 而不是失效；**429 限流不再计入失效**（返回 `unknown` + `retry_after`，单条手动检查可按建议等待重试一次），批量检查加节流。
-- **统计报表**：底部「操作日志明细」改为撑满剩余高度、表格内部滚动（原先悬在页面中间不贴底）；历史日志编号补齐可读名称——`type=23` 现在是「修改文本」（`media_edit_text`），`-1`/缺失编号显示「未知操作」，不再出现 `legacy_type_23` 这类占位名（`utils/opLog.js` 新增 `LEGACY_TYPE_LABELS` / `legacyTypeLabel()`）。
-- **「数据库」视图并入「原始数据」**：顶部为数据库存储统计（整库汇总卡 + 各集合明细表），下方为集合浏览；概览与导航同步调整；**平均文档大小保留两位小数**（新增 `fmtBytesFixed`）。
-- **标签视图增强**：顶栏新增「➕ 添加标签 / 🗑️ 删除标签 / ⭐ 置顶排序」；点卡片进入标签详情，详情顶栏显示置顶状态并可**点击切换**（置顶时自动取下一个空位，满 40 提示）；「置顶排序」模式下可**直接拖动卡片排序**，保存后按顺序写入置顶位置 1..N（`db/tags.js: reorderTags` + `POST /api/tags/reorder`）。新增接口 `POST /api/tags/{create,delete,pin,reorder}`。
-- 测试：新增 `tests/linkHealth.test.js`（11 项：公开链接判活、私有链接不判死、429 不算失效、重试一次等）；`tests/webui.test.js` 新增标签接口与历史类型命名用例；`tests/webuiViews.test.js` 升级为带「HTML → DOM 树」解析的交互测试（媒体详情点选高亮、标签详情置顶切换、拖拽排序保存等 13 项）。
-
-### v0.5.7
-- **控制台新增 4 个视图**（`webui/public/app.js` + `index.html` 导航）：
-  - **🚚 搬运收录**：`transport` 增删改查 + 活性徽标（✅/❌/❔）+ 失效原因 + 「↗ Telegram」跳转（`utils/tgLink.js` 统一推导，修掉 `-1002` 被误判为频道的边界问题）+ 状态筛选/搜索/分页 + 单条与全量活性检查。
-  - **📄 文章**、**📚 合集 / 杂集**：父项与子项的增删改查（删除级联、自动维护父项 `updated_at`、id 业务自增），带搜索与类型筛选。
-  - **🗄 数据库**：整库 `dbStats` + 逐集合 `collStats`（文档数 / 数据体积 / 磁盘占用 / 索引占用 / 索引数 / 平均文档大小，按体积排序，15 秒缓存，可手动重算）；取不到时降级为仅文档数并给出原因。概览页新增「🗄 数据库占用」卡片。
-- **搬运收录链接活性检查**（`utils/linkHealth.js`，机器人与控制台共用同一份结论）：
-  - 判定：`getChat` 成功且机器人在群内 → ✅ 有效；会话不存在 / 机器人被踢 → ❌ 失效；网络/限流/5xx → ❔ 未知（不算失效）；结论写回 `transport.alive / last_check_at / last_check_status / last_check_error`。
-  - 触发点：机器人 `/transport` 列表自动补查过期（>6h）记录并私聊提醒新失效项；菜单/明细可全量或单条检查；新增、改链接、改 chat_id 后立即实测并回显；`index.js` 每 6 小时全量巡检，**新失效的链接提醒管理员**（`ADMIN_CHAT_ID`）并记 `transport_check` 日志。
-  - 机器人列表与管理界面显示活性徽标、统计行与失效原因。
-- 新增 `db/transport.js` 的 `createTransport / updateTransport / updateTransportStatus / getTransportHealth`，新增 `db/dbStats.js`、`utils/linkHealth.js`、`utils/tgLink.js`；新增操作日志动作 `transport_save / transport_delete / transport_check`。
-- 新增接口：`GET /api/transport`、`POST /api/transport/{create,update,delete,check}`、`GET /api/articles`、`POST /api/articles/{create,update,delete}`、`POST /api/articles/sub/{create,update,delete}`、`GET /api/collections`、`POST /api/collections/{create,update,delete}`、`POST /api/collections/sub/{create,update,delete}`、`GET /api/db-stats`。
-- 测试：`tests/webui.test.js` 新增 13 项领域接口用例（含活性检查注入、级联删除、降级分支），新增 `tests/tgLink.test.js`（链接推导边界）；新增 `tests/webuiViews.test.js`（用最小 DOM 桩在 Node 里**真跑** `public/app.js`，覆盖四个新视图的渲染、筛选/动作请求、字节格式化、降级提示，并回归"视图状态桶不得污染 `state.collections`"）；未登录 401 清单同步补齐新接口。
-
-### v0.5.6
-- **标签按钮改为两区版面**（`/send` 发送成功后的打标签面板、`/tag` → 修改消息标签 → 🏷️ 添加标签）：
-  - **上区=已有标签**（作用目标上已打上的标签，置顶显示，按钮 `✅名称`，点击移除）；
-  - **下区=标签库正常显示**（置顶标签 `pin>0` 按位置排在最前，其余按使用次数，按钮 `+名称`，点击添加）；
-  - 两区之间插入分隔行 `── 已有标签（点击移除） ──`（点击只提示上下区含义，不改变状态）；
-  - **下区过滤规则**：已打上的非置顶标签不再在下区重复（它们已在上区）；已打上的置顶标签仍在下区显示（置顶标签属于下区置顶）；
-  - 点击语义统一为"已打上=移除、未打上=添加"，由回调按当前状态判断，因此 `/tag` 添加标签界面也能直接点掉已有标签（日志按实际增删分别记为 `tag_add`/`tag_remove`）；
-  - 翻页只翻下区标签库，上区已有标签每页都在；`/tag` 的 🗑️ 删除标签仍为原单区版面；
-  - 新增 `utils/tagUi.js: buildTagRegionKeyboard`（两区键盘构建，纯函数）+ 7 项单元测试；新增分隔行回调 `tag_noop`。
-
-### v0.5.5
-- **操作日志全面重构（schema v2，面向月表 / 年终统计）**：
-  - 新增统一写入入口 `utils/opLog.js`：`logOperation({ action, category, result, source, userId, chatId, target, counts, detail, error, durationMs })`，
-    文档含 `action`（稳定动作键）、`actionLabel`、`category`、`result/error`、`source`、`date`（BSON 日期，供聚合）、`target`、`counts`（产出量）、`detail`（结构化细节）；
-    旧的 `insertLog(type, ...)` 保留为兼容包装（旧编号自动映射成动作键），历史数据仍可统计。
-  - **补齐此前完全没有日志的功能**：用户封禁/解封/白名单增删、入群/退群/入群审批、群组频道增删改与绑定（管理面板与控制台）、文章与合集的保存删除、
-    媒体密码、`/help`、`/log` 自身、机器人启动/关闭、控制台登录（含失败）与控制台原始数据增删改。
-  - **细化已有日志**：收录（媒体类型/时长/是否有描述/位置/是否媒体组）、重复命中、收录失败回滚、频道转发归属（新收录 or 仅补位置）、
-    发送/回复（目标频道或群组、数量、类型分布、视频时长合计、打包模式、失败原因）、查询（查询词、命中条数）、
-    随机视频/图片（模式与时长筛选）、标记（组 ID 与新标记值）、清理（扫描 vs 实际删除的组数与媒体数）、标签（标签名、自动识别标记、改名/置顶/删除同步条数）、
-    编辑描述（改前改后、是否超 48 小时降级、来源）等。
-  - 删除"进入某模式"的重复入口日志（发送/回复/合并/遮罩/删除/标签模式），避免与真实操作重复计数。
-  - `/log` 重写：按大类 → 动作聚合 + 产出量 + 近 7 天/本月/本年三个口径 + 北京时间活跃时段；无 `action` 的旧数据按 `type` 归类回退。
-  - `db/index.js` 新增 `date` / `{action,date}` / `{category,date}` / `{userId,date}` / `{result,date}` 索引。
-- **WebUI 新增/增强**：
-  - **主题跟随系统**：默认「自动」（CSS `prefers-color-scheme`，首屏不闪白），可在 自动/浅色/深色 间循环切换并记住；
-  - **标签 → 媒体组**：标签视图点击任意标签即筛选出该标签下的全部媒体组（可一键清除筛选）；
-  - **媒体详情可编辑**：新增「↗ 跳转 Telegram 查看」（按群组/频道位置生成 `t.me/c/…` 链接，位于「复制 group_id」之前）、
-    在线修改描述（同步 Telegram caption，超 48 小时自动降级为仅改库并提示）、逐条或整组增删标签（可新建标签并自动维护标签库计数）；
-  - **视频/文档/音频封面**：收录时保存 Telegram 缩略图 `thumb_file_id`，媒体库与详情页可显示封面（老数据无封面时退化为类型图标）；
-  - **用户与群组频道可增删改**：用户（名称/状态/白名单/所在群组）与聊天（名称/类型/绑定）均支持新增、编辑、删除；绑定为双向写入，改绑会清理旧对端、删除会解除对端绑定；
-  - **新增「统计报表」视图**：月报/年报（操作总数、媒体与媒体组产出、活跃天数、失败次数、环比、每日柱状趋势、动作 Top15、大类分布、活跃用户）
-    + 可筛选的操作日志明细表（新增 `GET /api/oplogs`、`GET /api/stats`）；
-  - 新增 `POST /api/media/tags`、`POST /api/media/description`、`POST /api/users/create|update|delete`、`POST /api/groups/create|update|delete`，`GET /api/media` 支持 `tag` 参数。
-- **AI 翻译提示词重写**（`webui/db-guide.md`）：新增"意图 → 集合"路由表、更新到 schema v2 的表结构（含 `log` 新字段、`tags` 集合、`is_delete` 语义、`thumb_file_id`）、
-  9 个覆盖不同集合与动作的示例，并强制要求按当次需求作答；服务端新增 `action`/`collection` 合法性校验，非法时返回可展开的原始返回便于排查。
-- 修复：`webui/server.js` 改聊天/改用户时原先依赖 `findOne` 返回副本，改为显式快照后再更新（避免"先读旧值、更新后再读旧值"读到新值）；
-  测试假集合的 `findOne` 改为返回活引用，长期防住这类问题。
-
-### v0.5.4
-- **空描述媒体必须照常收录（修复数据丢失）**：
-  - 频道转发到讨论群组的媒体，若媒体库中没有对应记录（频道侧未收录、或记录已被 `/clean` 清理），
-    原实现只补一条没有 `media` 的 `message`——**描述为空时则什么都写不进去，媒体彻底丢失**。
-    现在改为**照常收录**：新建 `group_list` + `media`（群组位置，频道位置在已知频道消息 ID 时一并记录），
-    有描述再写 `message`（`group_id` 指向新建的组）。
-  - `group_list.is_delete` 语义全项目统一为**唯一入口** `db/groupList.js: syncGroupDeleteByText(groupId)`：
-    组内还有 `message`（文本）→ `0`（保留）；已无文本 → 时间戳（可被 `/clean` 清理）。
-    收录 / 发送 / 回复 / 编辑 / 清空描述 / 删除全部改走该函数，修复了此前多处写死 `is_delete=0`
-    或写死时间戳导致的不一致（消息回复模式无描述时不可清理、群内直接清空描述后仍标记为保留等）。
-  - 群组自动收录、`/send` 不再依赖"是否新建组"判断标记，改为按实际文本状态重算，与媒体组内消息到达顺序无关。
-  - `/send` 媒体组落库失败不再静默吞掉：会明确提示"已发送但入库失败"，避免用户误以为已收录。
-  - 新增回归测试 `tests/recordMedia.test.js`（10 项）+ 内存 Mongo 桩 `tests/helpers/memoryDb.js`，
-    离线覆盖收录 / 频道转发兜底 / `/send` / 清空描述等写库链路。
-- **Web UI 全新界面**（简洁 / 高效 / 优雅，围绕机器人功能组织）：
-  - 左侧导航 + 主区 + 右侧实时日志坞；深色/浅色双主题（同一套设计令牌）、响应式窄屏折叠；
-  - 新增 **概览**（统计卡片 + 类型分布 + 最近操作 + 最新媒体组）、**媒体库**（媒体组卡片 + Telegram 图片缩略图代理 +
-    描述/标签/位置 + 全部/有描述/可清理筛选 + 搜索分页 + 详情对话框）、**清理中心**（精确待清理数量 + 一键清理，
-    与 `/clean` 同逻辑）、**标签**、**用户**、**群组/频道** 视图；原「原始数据」与「AI 翻译」能力保留并重新设计；
-  - 快捷键（`/`、`Ctrl/⌘+K`、`R`、`Esc`）、自动刷新开关、缩略图懒加载与失败降级、Toast 与确认对话框。
-  - 新增后端接口：`/api/overview`、`/api/media`、`/api/media/detail`、`/api/clean`、`/api/tags`、`/api/users`、
-    `/api/groups`、`/api/thumb`（服务端代理 Telegram `getFile`，带内存缓存），原有接口与鉴权保持不变。
-  - 新增前端静态一致性测试 `tests/uiStatic.test.js`（选择器、动作分支、主题令牌、既有文案）。
-
-### v0.5.3
-- **固定数量回复（`/message_reply N` 打包）**：删除"3 秒静默自动冲刷余量"逻辑——满 N 个立即作为媒体组回复，不足 N 的余量一直留在缓冲等待补满下一组，只有退出（/exit、超时、切换模式）时才冲刷发出。
-- **标签按 message 独立（共存）**：
-  - 发送/回复时自动识别出的标签只写入**新收录那条 message**（新增 `addTagToMessage` / `removeTagFromMessage` / `getMessageTags`），不再广播到整组；
-  - 查看/预览媒体组时"📌 标签"与**显示的文本配对**（显示哪条文本就配哪条的标签）；
-  - `/tag` 修改消息标签只作用于**定位用的那条 message**（无记录时回退组内最后新增文本那条），定位界面把组内**所有带文本 message 的标签分别列出**；
-  - 编辑 caption（私聊 edit、群内直接编辑、回复 `/edit`）后按新文本**重算该 message 自己的标签**；
-  - 修复：回复**媒体组**时只取第一条 caption 导致文本在非首条媒体上漏打标签；
-  - 打标签后点"🔁 回复该消息"：回复目标改为**刚打标签的那条 message**。
-- **新增：群组/频道回复 `/edit` 快捷编辑**（`handlers/groupReplyEdit.js`）：
-  - 管理员**回复一条媒体消息**并发送 `/edit [新描述]`（支持 `/edit@机器人用户名`）直接修改该媒体，跳过"重新发送媒体"步骤；
-  - 带文字一步完成；不带文字时群组内等管理员下一条文本（频道仅支持带文字）；
-  - 修改 = 改 Telegram caption（HTML 解析失败自动降级）+ 同步数据库 + 按新文本重算标签；超 48 小时自动降级为仅更新数据库；
-  - **1 分钟后自动删除全部操作记录**（机器人提示 + 管理员的 `/edit` 命令消息 + 两步流程的输入文本）。
-- **指令兼容 `@机器人用户名` 后缀**：所有指令（/edit、/search、/message_reply 等）均可带 `@botname` 使用。
-- message 记录新增 `updated_at` 时间戳，用于"组内最后新增/修改文本"判定。
-
-### v0.5.2
-- 落库并行化（媒体组逐条并发写入，显著提速）、回复位置切换按钮、数字参数指令（/media_group N 等）、标签展示优化。
-
-### v0.5.1
-- 发送/回复/日志多项优化：发送媒体组注释位置还原、群组自动收录去重兜底、操作日志完善等。

@@ -35,17 +35,27 @@ setInterval(() => {
 
 // ---------------- 群组列表（分页） ----------------
 
+/**
+ * 选择列表的图标：频道 📢 / 群组 👥
+ * 类型以 Telegram 真实会话类型为准（channel_group.type 可能是错的，见 utils/chatKind.js）
+ */
+function chatIcon(type) {
+    return type === 'channel' ? '📢' : '👥';
+}
+
 async function showGroupList(userId, replyToMessageId, page) {
-    const groups = await getAllChannelGroups();
+    // 先按 Telegram 真实类型补正 type，再排序：
+    //   互相绑定的一对相邻，且**先频道、后群组**，未绑定的排在后面（见 utils/chatKind.sortChatGroups）
+    const { withRealTypes, sortChatGroups } = require('../../utils/chatKind');
+    const groups = sortChatGroups(await withRealTypes(await getAllChannelGroups()));
     const totalPages = Math.max(1, Math.ceil(groups.length / PAGE_SIZE));
     const current = Math.min(Math.max(1, page), totalPages);
     const slice = groups.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
 
     const keyboard = [];
     for (const g of slice) {
-        const icon = g.type === 'channel' ? '📢' : '👥';
         keyboard.push([{
-            text: `${icon} ${g.name || `Chat${g.id}`}`,
+            text: `${chatIcon(g.type)} ${g.name || `Chat${g.id}`}`,
             callback_data: `sendg:${g.id}`
         }]);
     }
@@ -97,7 +107,11 @@ async function handleCallback(query) {
         const name = group ? (group.name || `Chat${chatId}`) : `Chat${chatId}`;
 
         const rawState = getRawUserState(userId);
-        const targetType = group ? (group.type === 'channel' ? 'channel' : 'group') : 'group';
+        // 目标类型（决定媒体位置写 group 还是 channel 子文档）：以 Telegram 真实会话类型为准，
+        // 否则一条只发在群组里的媒体会被记成频道位置（回复文案随之出错，见 utils/chatKind.js）
+        const { resolveChatKind, normalizeKind } = require('../../utils/chatKind');
+        const targetType = (await resolveChatKind(chatId)) ||
+            normalizeKind(group && group.type) || 'group';
         if (!rawState || rawState.mode !== 'send') {
             setUserState(userId, {
                 mode: 'send',
@@ -120,7 +134,7 @@ async function handleCallback(query) {
             });
         }
 
-        const icon = group ? (group.type === 'channel' ? '📢' : '👥') : '👥';
+        const icon = chatIcon(targetType);
         await bot.editMessageText(`✅ 已选择：${icon} ${name}\n请发送要发送的消息（支持单个媒体或媒体组）：`, {
             chat_id: userId,
             message_id: query.message.message_id

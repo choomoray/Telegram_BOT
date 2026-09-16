@@ -172,11 +172,17 @@ async function getTransportHealth() {
 
 /**
  * 从 Telegram 链接中提取 chat_id，如果无法获取名称则返回默认名称
+ *
+ * 返回值里的 `chat_type` 是**以 Telegram 为准**的会话类型（'channel' | 'group'，取不到为 null）：
+ * 超级群组与频道的 id 都以 -100 开头，**不能靠前缀猜类型**（旧实现据此把讨论群登记成频道，
+ * 导致"只发在群组里的媒体"被记成频道位置、列表图标也全变成 📢，见 utils/chatKind.js）。
+ *
  * @param {string} url - 原始链接
  * @param {Object} bot - Telegram bot 实例
- * @returns {Promise<{chat_id: number, chat_name: string, url: string, is_verified: boolean}>}
+ * @returns {Promise<{chat_id: number, chat_name: string, url: string, is_verified: boolean, chat_type: string|null}>}
  */
 async function extractChatInfo(url, bot) {
+    const { normalizeKind } = require('../utils/chatKind');
     // 1. 公开链接 t.me/username
     const publicMatch = url.match(/https?:\/\/t\.me\/([a-zA-Z][a-zA-Z0-9_]{4,31})(?:\/.*)?$/);
     if (publicMatch) {
@@ -187,7 +193,8 @@ async function extractChatInfo(url, bot) {
                 chat_id: chat.id,
                 chat_name: chat.title || username,
                 url: url,
-                is_verified: true
+                is_verified: true,
+                chat_type: normalizeKind(chat.type)
             };
         } catch (err) {
             logger.error(`通过 username 获取 chat 失败: ${err.message}`);
@@ -205,9 +212,11 @@ async function extractChatInfo(url, bot) {
         }
         let chatName = `频道 ${chatIdNum}`;
         let isVerified = false;
+        let chatType = null;
         try {
             const chat = await bot.getChat(actualChatId);
             chatName = chat.title || chatName;
+            chatType = normalizeKind(chat.type);
             isVerified = true;
         } catch (err) {
             logger.warn(`无法获取频道 ${actualChatId} 信息: ${err.message}`);
@@ -216,7 +225,8 @@ async function extractChatInfo(url, bot) {
             chat_id: actualChatId,
             chat_name: chatName,
             url: url,
-            is_verified: isVerified
+            is_verified: isVerified,
+            chat_type: chatType
         };
     }
 
@@ -235,7 +245,8 @@ async function extractChatInfo(url, bot) {
                 chat_id: chat.id,
                 chat_name: chat.title || chat.username || `Chat ${numericId}`,
                 url: url,
-                is_verified: true
+                is_verified: true,
+                chat_type: normalizeKind(chat.type)
             };
         } catch (err) {
             throw new Error('无法获取该 ID 的群组信息，请确保机器人已加入');

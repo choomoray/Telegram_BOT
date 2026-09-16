@@ -7,7 +7,6 @@
  *   node watchdog.js             -> node index.js
  *   node watchdog.js webui       -> node index.js webui
  *   node watchdog.js test        -> node index.js test
- *   node watchdog.js --test      -> node index.js --test
  * 崩溃后会用**同一份参数**重新拉起，保证「按用户的启动方式重启」。
  */
 const fs = require('fs');
@@ -60,7 +59,6 @@ function envInt(key, fallback) {
  *   []            -> []
  *   ['webui']     -> ['webui']
  *   ['test']      -> ['test']
- *   ['--test']    -> ['--test']
  *   ['webui','x'] -> ['webui','x']
  */
 function normalizeBotArgs(argv) {
@@ -69,7 +67,7 @@ function normalizeBotArgs(argv) {
 
 /** 可读的启动方式描述（通知里显示用） */
 function describeMode(botArgs) {
-    if (botArgs.includes('test') || botArgs.includes('--test')) return 'test';
+    if (botArgs.includes('test')) return 'test';
     if (botArgs.includes('webui')) return 'webui';
     return 'normal';
 }

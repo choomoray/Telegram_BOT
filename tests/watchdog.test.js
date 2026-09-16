@@ -23,7 +23,6 @@ const notify = require('../watchdog/notify');
 test('启动参数原样透传：node watchdog.js webui -> node index.js webui', () => {
     assert.deepStrictEqual(normalizeBotArgs(['webui']), ['webui']);
     assert.deepStrictEqual(normalizeBotArgs(['test']), ['test']);
-    assert.deepStrictEqual(normalizeBotArgs(['--test']), ['--test']);
     assert.deepStrictEqual(normalizeBotArgs([]), []);
 });
 
@@ -31,7 +30,6 @@ test('describeMode 识别三种启动方式', () => {
     assert.strictEqual(describeMode([]), 'normal');
     assert.strictEqual(describeMode(['webui']), 'webui');
     assert.strictEqual(describeMode(['test']), 'test');
-    assert.strictEqual(describeMode(['--test']), 'test');
 });
 
 test('buildConfig：botArgs / mode / entry 正确，重启延迟默认 30 秒', () => {

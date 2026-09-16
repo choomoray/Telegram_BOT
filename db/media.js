@@ -67,17 +67,22 @@ async function insertMedia(data) {
 /**
  * 根据聊天类型构建媒体位置对象：
  * 频道 → { channel: { chat_id, message_id } }；群组/未知 → { group: { chat_id, message_id } }
+ *
+ * 未显式给出类型时**以 Telegram 真实会话类型为准**（`utils/chatKind.resolveChatKind`：
+ * getChat → channel_group.type → 'group'）。历史上这里直接信 channel_group.type，
+ * 而该字段可能是错的（讨论群被登记成频道）→ 只发在群组里的媒体被记成 channel 位置，
+ * 回复时文案就变成"回复在📢 频道"，与事实（实际发在群里）不符。
+ *
  * @param {number|string} chatId - 聊天 ID
  * @param {number|string} messageId - 消息 ID
- * @param {string} [chatType] - 已知聊天类型（channel/group），未知时查询 channel_group 库
+ * @param {string} [chatType] - 已知聊天类型（channel/group/supergroup），未知时按真实会话类型判断
  * @returns {Promise<Object>} 形如 { group: {...} } 或 { channel: {...} }
  */
 async function buildMediaLocation(chatId, messageId, chatType) {
-    let type = chatType;
+    const { normalizeKind, resolveChatKind } = require('../utils/chatKind');
+    let type = normalizeKind(chatType);
     if (!type) {
-        const { getChannelGroupById } = require('./channelGroup');
-        const info = await getChannelGroupById(chatId);
-        type = info && info.type ? info.type : 'group';
+        type = (await resolveChatKind(chatId)) || 'group';
     }
     if (type === 'channel') {
         return { channel: { chat_id: chatId, message_id: messageId } };

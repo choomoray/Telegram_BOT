@@ -14,7 +14,9 @@ const { escapeHTML } = require('../../../utils/sanitize');
 const { paginationRow } = require('../../../utils/reply');
 
 async function showGroupList(userId, messageId) {
-    const groups = await getAllChannelGroups();
+    // 类型以 Telegram 真实会话类型补正（channel_group.type 可能是错的，见 utils/chatKind.js）
+    const { withRealTypes } = require('../../../utils/chatKind');
+    const groups = await withRealTypes(await getAllChannelGroups());
     let text = '📊 频道 / 群组列表：\n';
     if (groups.length === 0) {
         text += '暂无记录';
@@ -51,7 +53,8 @@ async function showGroupList(userId, messageId) {
 }
 
 async function showGroupManageView(userId, messageId, page = 1) {
-    const groups = await getAllChannelGroups();
+    const { withRealTypes } = require('../../../utils/chatKind');
+    const groups = await withRealTypes(await getAllChannelGroups());
     const pageSize = 30;
     const totalPages = Math.ceil(groups.length / pageSize) || 1;
     const start = (page - 1) * pageSize;
@@ -153,7 +156,12 @@ async function promptAddGroup(userId, messageId) {
 async function verifyAndAddGroup(userId, input, state, msg) {
     try {
         const chatInfo = await extractChatInfo(input, bot);
-        const chatType = chatInfo.chat_id.toString().startsWith('-100') ? 'channel' : 'group';
+        // 类型必须问 Telegram：**超级群组和频道的 id 都以 -100 开头**，
+        // 旧实现用 `startsWith('-100')` 判断，把讨论群全登记成了频道 ——
+        // 于是 /send 列表里群组显示 📢、"只发在群组里"的媒体被记成频道位置、
+        // 回复它的文案写成"回复在频道"（见 utils/chatKind.js）。
+        const { resolveChatKind } = require('../../../utils/chatKind');
+        const chatType = chatInfo.chat_type || (await resolveChatKind(chatInfo.chat_id, { persist: false })) || 'group';
         await upsertChannelGroup({
             id: chatInfo.chat_id,
             name: chatInfo.chat_name || `Group ${chatInfo.chat_id}`,

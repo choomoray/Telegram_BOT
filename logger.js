@@ -37,10 +37,10 @@ const LOG_ROOT = path.join(__dirname, 'logs');
 fs.mkdir(LOG_ROOT, { recursive: true }).catch(() => { });
 
 // ---------------- test-log 模式临时日志（node index test） ----------------
-// test-log 与 logs 平级双根，供 AI 读取分析；test-log 下只有 log.log / error.log 两个扁平文件，
+// 放在 logs 目录内：logs/test-log/{log.log,error.log}（扁平两文件，供 AI 读取分析），
 // 每次以 test 启动时初始化（清空重写），关闭时不清理（仅启动时初始化）
 const TEST_MODE = process.argv.includes('test');
-const TEST_LOG_DIR = path.join(__dirname, 'test-log');
+const TEST_LOG_DIR = path.join(LOG_ROOT, 'test-log');
 const TEST_LOG_FILES = {
     error: 'error.log',
     warn: 'log.log',
@@ -49,7 +49,7 @@ const TEST_LOG_FILES = {
 };
 
 /**
- * 初始化 test 模式临时日志：重置 test-log/log.log 与 test-log/error.log
+ * 初始化 test 模式临时日志：重置 logs/test-log/log.log 与 logs/test-log/error.log
  * 每次以 test 启动时调用，清空上次运行内容
  */
 async function initTestLog() {
@@ -151,7 +151,7 @@ async function log(level, message, ...args) {
     const queue = getQueue(filePath);
     queue.push({ path: filePath, content: fileMsg });
 
-    // test 模式：同一行日志复制一份到 test-log/log.log 或 test-log/error.log
+    // test 模式：同一行日志复制一份到 logs/test-log/log.log 或 logs/test-log/error.log
     if (TEST_MODE) {
         const testFilePath = path.join(TEST_LOG_DIR, TEST_LOG_FILES[level] || 'log.log');
         const testQueue = getQueue(testFilePath);

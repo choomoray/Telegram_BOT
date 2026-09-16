@@ -25,6 +25,23 @@ function targetDisplay(target) {
 }
 
 /**
+ * 就绪文案里的位置图标 / 名称：**以实际回复到的会话为准**（Telegram 真实类型），
+ * 拿不到真实类型时才退回调用方给的位置名（'channel' / 'group'）。
+ *
+ * 为什么不能只用位置名：`channel_group.type` 可能是错的（讨论群被登记成频道），
+ * 于是"只发在群组里"的媒体被记成 channel 位置 —— 回复明明发在群里，
+ * 文案却写着「✅ 已选择回复在📢 频道」。见 utils/chatKind.js 顶部注释。
+ *
+ * @param {number} chatId - 实际回复目标会话
+ * @param {'channel'|'group'} fallback - 取不到真实类型时用的位置名
+ */
+async function resolveReadyLabel(chatId, fallback) {
+    const { telegramChatKind } = require('../../utils/chatKind');
+    const real = await telegramChatKind(chatId);
+    return targetDisplay(real || fallback);
+}
+
+/**
  * 由 message 记录一次性解析"群组/频道"双位置（频道转发消息时两者都有，否则为 null）
  *
  * 位置来源有两处，必须都看：
@@ -137,12 +154,13 @@ function buildReadySwitchKeyboard(locations, currentTarget) {
 }
 
 /**
- * 解析目标聊天类型（channel/group），用于非转发消息回退时正确显示图标
+ * 解析目标聊天类型（channel/group），用于非转发消息回退时正确显示图标 / 写位置。
+ * 以 Telegram 真实会话类型为准（channel_group.type 可能是错的，见 utils/chatKind.js）。
  */
 async function resolveChatType(chatId) {
-    const { getChannelGroupById } = require('../../db/channelGroup');
-    const info = await getChannelGroupById(chatId);
-    return (info && info.type) || 'group';
+    const { resolveChatKind } = require('../../utils/chatKind');
+    const kind = await resolveChatKind(chatId);
+    return kind || 'group';
 }
 
 // ---------- 用户隔离上下文 ----------
@@ -306,7 +324,9 @@ async function finishEnterReadyState(userId, messageDoc, processingMsgId, resolv
     const targetGroupId = messageDoc.group_id;
     const locations = deriveReplyLocations(messageDoc, mediaDoc);
 
-    // 确定当前目标类型（用于显示图标）：优先按双位置匹配，非转发回退按实际聊天类型
+    // 位置语义（'channel' / 'group'）决定「🔄 更改为发送至…」按钮指向哪一侧；
+    // 显示文案另按**实际会话类型**算：位置名理论上应与会话类型一致，但库里的
+    // channel_group.type 可能是错的（讨论群被登记成频道），此时位置名会骗人
     let target;
     if (locations.channel && resolved.chatId === locations.channel.chatId && resolved.messageId === locations.channel.messageId) {
         target = 'channel';
@@ -315,7 +335,7 @@ async function finishEnterReadyState(userId, messageDoc, processingMsgId, resolv
     } else {
         target = await resolveChatType(resolved.chatId);
     }
-    const { icon, label } = targetDisplay(target);
+    const { icon, label } = await resolveReadyLabel(resolved.chatId, target);
     const readyText = `✅ 已选择回复在${icon} ${label}，现在可以向我发送消息了`;
 
     let hintMsg;
@@ -475,7 +495,7 @@ async function handleLocationCallback(query) {
         await bot.answerCallbackQuery(query.id, { text: `❌ 没有可用的${target === 'channel' ? '频道' : '群组'}位置` });
         return;
     }
-    const { icon, label } = targetDisplay(target);
+    const { icon, label } = await resolveReadyLabel(resolved.chatId, target);
     const readyText = `✅ 已选择回复在${icon} ${label}，现在可以向我发送消息了`;
 
     let hintMsg;
@@ -564,7 +584,7 @@ async function handleSwitchLocationCallback(query) {
         logger.warn(`切换位置时发送提示消息失败: ${err.message}`);
     }
 
-    const { icon, label } = targetDisplay(target);
+    const { icon, label } = await resolveReadyLabel(loc.chatId, target);
     const readyText = `✅ 已选择回复在${icon} ${label}，现在可以向我发送消息了`;
     // 保留 _onExit、replyLocations、readyMsgId 等既有字段
     const prevRaw = getRawUserState(userId);

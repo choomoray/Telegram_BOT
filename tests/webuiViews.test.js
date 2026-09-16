@@ -345,7 +345,7 @@ function fixtures() {
             latestGroupList: []
         },
         '/api/db-stats': {
-            ok: true, available: true, database: 'telegram_bot_test', at: now, reason: null,
+            ok: true, available: true, database: 'telegram_bot', at: now, reason: null,
             totals: { collections: 3, objects: 10, dataSize: 2048, storageSize: 4096, indexes: 5, indexSize: 1024, avgObjSize: 204.567 },
             collections: [{ name: 'media', label: '媒体文件', count: 5, size: 1024, storageSize: 2048, indexSize: 512, nindexes: 2, avgObjSize: 204.567, available: true, error: null }]
         },
@@ -759,7 +759,7 @@ test('「数据库」视图：上栏（集合浏览）+ 集合明细表 整合�
     assert.match(html, /data-action="raw-insert"/, '上栏有插入');
     assert.match(html, /data-action="palette"/, '上栏有 AI 翻译');
     assert.match(html, /data-action="dbstats-refresh"/, '上栏有重新统计');
-    assert.match(html, /库名 <code>telegram_bot_test<\/code>/);
+    assert.match(html, /库名 <code>telegram_bot<\/code>/);
 
     // 中部：整库汇总卡片（保留），但没有「平均文档」
     assert.match(html, /class="stats"/);
@@ -994,7 +994,8 @@ test('瀑布流：按每张卡的内容高度算 grid 行跨度（"先第一行�
         '图片加载完按新高度重排该容器');
 });
 
-test('媒体库：卡片瀑布流按容器宽度自适应（列宽固定 228px，与原来的网格同尺度）', () => {    const css = fs.readFileSync(path.join(__dirname, '..', 'webui', 'public', 'style.css'), 'utf8');
+test('媒体库：卡片瀑布流按容器宽度自适应（列宽固定 228px，与原来的网格同尺度）', () => {
+    const css = fs.readFileSync(path.join(__dirname, '..', 'webui', 'public', 'style.css'), 'utf8');
     const fit = (css.match(/\.media-grid--fit\s*\{[^}]*\}/) || [''])[0];
     assert.ok(fit, '缺少 .media-grid--fit 规则');
     // 用 auto-fill 的 minmax（每列至少多宽）而不是写死列数：列数由容器自己算

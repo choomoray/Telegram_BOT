@@ -8,9 +8,9 @@ const { escapeHTML } = require('./sanitize');
 
 const MEDIA_ICON = {
     video: '🎬',
-    photo: '🏞',
+    photo: '🖼',
     audio: '🎵',
-    document: '📄'
+    document: '💾'
 };
 
 const PAGE_SIZE = 30;
