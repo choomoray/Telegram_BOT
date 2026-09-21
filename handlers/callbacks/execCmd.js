@@ -17,10 +17,11 @@ async function handleExecCmdCallback(query) {
     const messageId = query.message.message_id;
 
     // 权限校验：exec_cmd 按钮可能出现在 /help 或 AI 回复中，
-    // 必须再次确认管理员身份，防止按钮泄露被非管理员利用（越权防护）
+    // 必须再次确认管理员身份，防止按钮泄露被非管理员利用（越权防护）。
+    // 无权限时**静默忽略**：只把按钮的转圈停掉，不回任何"无权限"文案。
     if (!isAdmin(userId)) {
-        await bot.answerCallbackQuery(query.id, { text: '❌ 无权限执行命令' });
-        logger.warn(`用户 ${userId} 尝试通过按钮执行命令，已被拒绝: ${parts[1]}`);
+        await bot.answerCallbackQuery(query.id).catch(() => { });
+        logger.warn(`用户 ${userId} 尝试通过按钮执行命令，已静默忽略: ${parts[1]}`);
         return;
     }
 
@@ -38,7 +39,8 @@ async function handleExecCmdCallback(query) {
     try {
         const result = await executeCommand(command, userId, fakeMsg);
         if (result === 'forbidden') {
-            await bot.sendMessage(chatId, '❌ 无权执行该命令');
+            // 同上：无权限指令静默忽略
+            logger.warn(`用户 ${userId} 通过按钮执行无权限命令，已静默忽略: ${command}`);
         } else if (result === 'not_found') {
             await bot.sendMessage(chatId, `❌ 命令 ${command} 不存在`);
         }

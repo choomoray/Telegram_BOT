@@ -11,6 +11,9 @@
  *   2. `spawnNotifier`：起一个**只负责发消息、短时间后自行结束**的短命进程
  *      （watchdog/notify-bot.js）。这样崩溃播报与主 bot 的生命周期完全解耦：
  *      即使主 bot 还没起来、或起来后又立刻崩，这条崩溃消息也已经发出去了。
+ *
+ * 收件人（用户要求）：配置了 `notifyChatId`（默认 = 启动通知话题群）就**只发那个话题**
+ * （`message_thread_id`，见 reportTargets），不再私聊管理员；填 0 则退回管理员私聊。
  */
 const https = require('https');
 const path = require('path');
@@ -125,14 +128,18 @@ function formatGiveUpReport(info) {
  * @param {string} token
  * @param {number|string} chatId
  * @param {string} text
+ * @param {number|string|null} [threadId] - 话题群的话题 ID（普通会话传 null/省略）
  */
-function sendMessage(token, chatId, text) {
+function sendMessage(token, chatId, text, threadId = null) {
     return new Promise((resolve, reject) => {
-        const body = new URLSearchParams({
+        const params = {
             chat_id: String(chatId),
             text,
             disable_web_page_preview: 'true'
-        }).toString();
+        };
+        // 话题群（forum）必须带 message_thread_id，否则消息只会落到 General 话题
+        if (threadId) params.message_thread_id = String(threadId);
+        const body = new URLSearchParams(params).toString();
 
         const req = https.request({
             hostname: 'api.telegram.org',
@@ -159,26 +166,41 @@ function sendMessage(token, chatId, text) {
 }
 
 /**
- * 在**当前进程内**发给所有管理员
- * @param {Object} cfg - 看门狗配置（telegramToken / adminChatIds）
+ * 报告收件会话（用户要求）：
+ *   配置了 `notifyChatId`（默认就是启动通知话题群）→ 只发那里，并按话题发；
+ *   填 0 / 未配置 → 退回管理员私聊。
+ * @param {Object} cfg - 看门狗配置
+ * @returns {Array<{chatId:number, threadId:(number|null)}>}
+ */
+function reportTargets(cfg) {
+    if (cfg && cfg.notifyChatId) {
+        return [{ chatId: cfg.notifyChatId, threadId: cfg.notifyThreadId || null }];
+    }
+    return (cfg && Array.isArray(cfg.adminChatIds) ? cfg.adminChatIds : []).map(chatId => ({ chatId, threadId: null }));
+}
+
+/**
+ * 在当前进程内发给所有收件会话（通知群话题 或 管理员私聊）
+ * @param {Object} cfg - 看门狗配置（telegramToken / notifyChatId / notifyThreadId / adminChatIds）
  * @param {string} text
  * @returns {Promise<{sent:number, failed:number, errors:string[]}>}
  */
 async function sendToAdmins(cfg, text) {
     const result = { sent: 0, failed: 0, errors: [] };
-    if (!cfg.telegramToken || !Array.isArray(cfg.adminChatIds) || cfg.adminChatIds.length === 0) {
-        result.errors.push('缺少 TELEGRAM_BOT_TOKEN 或 ADMIN_CHAT_ID，无法发送通知');
+    const targets = reportTargets(cfg);
+    if (!cfg || !cfg.telegramToken || targets.length === 0) {
+        result.errors.push('缺少 TELEGRAM_BOT_TOKEN 或通知收件人（STARTUP_NOTIFY_CHAT_ID / ADMIN_CHAT_ID）');
         return result;
     }
     if (!text) return result;
 
-    for (const chatId of cfg.adminChatIds) {
+    for (const { chatId, threadId } of targets) {
         try {
-            await sendMessage(cfg.telegramToken, chatId, text);
+            await sendMessage(cfg.telegramToken, chatId, text, threadId);
             result.sent++;
         } catch (err) {
             result.failed++;
-            result.errors.push(`chat ${chatId}: ${err.message}`);
+            result.errors.push(`chat ${chatId}${threadId ? `#${threadId}` : ''}: ${err.message}`);
         }
     }
     return result;
@@ -195,13 +217,16 @@ async function sendToAdmins(cfg, text) {
  *   - text: 要发送的文本
  *   - ttlMs: 该进程最长存活时间（到点强制结束）
  *   - root: 项目根目录
- *   - token / adminChatIds: 收件人信息
+ *   - token / adminChatIds / notifyChatId / notifyThreadId: 收件人信息
+ *     （配了 notifyChatId 就只发通知群的那个话题，否则发管理员私聊）
  *   - onExit: 退出回调（便于日志）
  * @returns {import('child_process').ChildProcess|null}
  */
-function spawnNotifier({ text, ttlMs = 5000, root, token, adminChatIds, onExit }) {
+function spawnNotifier({ text, ttlMs = 5000, root, token, adminChatIds, notifyChatId, notifyThreadId, onExit }) {
     if (!text) return null;
-    if (!token || !Array.isArray(adminChatIds) || adminChatIds.length === 0) return null;
+    if (!token) return null;
+    const targets = reportTargets({ notifyChatId, notifyThreadId, adminChatIds });
+    if (targets.length === 0) return null;
 
     const script = path.join(__dirname, 'notify-bot.js');
     let child;
@@ -212,7 +237,7 @@ function spawnNotifier({ text, ttlMs = 5000, root, token, adminChatIds, onExit }
             env: {
                 ...process.env,
                 NOTIFY_PAYLOAD: Buffer.from(JSON.stringify({
-                    text, token, adminChatIds, ttlMs
+                    text, token, adminChatIds, notifyChatId, notifyThreadId, ttlMs
                 }), 'utf8').toString('base64')
             }
         });
@@ -238,6 +263,7 @@ function spawnNotifier({ text, ttlMs = 5000, root, token, adminChatIds, onExit }
 
 module.exports = {
     sendToAdmins,
+    reportTargets,
     sendMessage,
     spawnNotifier,
     pickWarnErrorLines,

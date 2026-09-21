@@ -25,8 +25,21 @@ async function handleSendCommand(userId, msg) {
 
     logger.info(`用户 ${userId} 进入发送模式`);
 
+    // 先回一条「正在获取列表」，拿到列表后就地刷新成选择面板。
+    // 必须这样做：列表要查云端数据库、还要按 Telegram 真实会话类型逐个补正，
+    // 这段时间里如果什么都不发，用户端完全没反馈（以为 bot 卡了 / 网不好）。
+    let loadingMsg = null;
+    try {
+        loadingMsg = await bot.sendMessage(userId, '♻️ 正在获取频道 / 群组 列表，请稍候...', {
+            reply_to_message_id: msg.message_id,
+            allow_sending_without_reply: true
+        });
+    } catch (err) {
+        logger.error(`发送获取列表提示失败: ${err.message}`);
+    }
+
     const { showGroupList } = require('../modes/sendMode');
-    await showGroupList(userId, msg.message_id, 1);
+    await showGroupList(userId, loadingMsg ? loadingMsg.message_id : null, 1);
 }
 
 module.exports = handleSendCommand;

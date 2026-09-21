@@ -55,13 +55,15 @@ async function main() {
 
     const cfg = {
         telegramToken: payload.token,
-        adminChatIds: Array.isArray(payload.adminChatIds) ? payload.adminChatIds : []
+        adminChatIds: Array.isArray(payload.adminChatIds) ? payload.adminChatIds : [],
+        notifyChatId: payload.notifyChatId || 0,
+        notifyThreadId: payload.notifyThreadId || 0
     };
 
     try {
         const res = await sendToAdmins(cfg, payload.text);
         if (res.sent > 0) {
-            log(`已发送给 ${res.sent} 位管理员${res.failed ? `，失败 ${res.failed} 位` : ''}`);
+            log(`已发送给 ${res.sent} 个收件会话${res.failed ? `，失败 ${res.failed} 个` : ''}`);
             clearTimeout(killer);
             process.exit(0);
         }

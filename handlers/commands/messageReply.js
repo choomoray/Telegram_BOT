@@ -17,7 +17,8 @@ const { getClampedNumberArg } = require('../../utils/commandArgs');
  * @param {number} userId - 用户ID
  * @param {Object} msg - Telegram 消息
  * @param {string|null} replyTarget - 指定回复位置：
- *   null    = 定位后询问（频道转发消息时询问群组/频道）
+ *   null    = 按默认位置回复（**群组**；该媒体若同时有频道位置，
+ *             就绪消息下会带「🔄 更改为发送至📢 频道」按钮，点一下即可切换）
  *   'group' = 直接回复在群组（/message_reply_group）
  *   'channel' = 直接回复在频道（/message_reply_channel）
  */
@@ -54,7 +55,9 @@ async function enterMessageReplyMode(userId, msg, replyTarget) {
 
     const targetHint = replyTarget === 'group'
         ? '\n回复位置：👥 群组'
-        : (replyTarget === 'channel' ? '\n回复位置：📢 频道' : '');
+        : (replyTarget === 'channel'
+            ? '\n回复位置：📢 频道'
+            : '\n回复位置：👥 群组（默认；该媒体同时有频道位置时，可用就绪消息上的按钮改为 📢 频道）');
     const packHint = packSize && packSize >= 2 ? `\n📦 媒体将以 ${packSize} 个为一组打包回复` : '';
     const welcomeMsg = `✅ 已进入消息回复模式${targetHint}${packHint}\n\n` +
         '请发送需要回复的媒体消息（用于定位目标）\n' +

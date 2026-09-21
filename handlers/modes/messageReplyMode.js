@@ -375,51 +375,25 @@ async function finishEnterReadyState(userId, messageDoc, processingMsgId, resolv
 }
 
 /**
- * 目标消息定位后的统一处理：
- * - 频道转发媒体（能解析出双位置）且未指定回复位置 → 询问"回复在群组/频道"
- * - 其余情况 → 解析位置后直接进入就绪状态
+ * 目标消息定位后的统一处理：**直接进入就绪状态，位置默认群组**。
+ *
+ * 位置语义（用户要求）：
+ *   - 默认回复在**群组**（`resolveReplyLocation` 在未指定时优先取群组位置）；
+ *   - 群组/频道双位置都存在（频道转发媒体）时，就绪消息下带
+ *     「🔄 更改为发送至📢 频道」按钮，随时一键切换；
+ *   - 只有一边位置时按可用位置回复，不给空按钮。
+ *
+ * 历史行为（已改）：早先是先弹「👥 回复在群组 / 📢 回复在频道」让用户必须点一下，
+ * 多一次点击、而且期间任何媒体都不会被回复。旧的询问按钮若还留在聊天里，
+ * `handleLocationCallback` 仍可正常工作（向后兼容老消息）。
+ *
  * @param {Object} messageDoc - message 记录
- * @param {string|null} replyTarget - 指令指定的回复位置（'group'/'channel'/null=询问）
+ * @param {string|null} replyTarget - 指令指定的回复位置（'group'/'channel'/null=默认群组）
  * @param {Object} [mediaDoc] - 同一媒体的 media 记录（补全位置，可省）
  */
 async function enterReplyReadyState(userId, messageDoc, processingMsgId, replyTarget, mediaDoc = null) {
     const media = mediaDoc || await loadMediaForLocations(null, messageDoc && messageDoc.file_unique_id);
     const locations = deriveReplyLocations(messageDoc, media);
-
-    // 只有**真正的频道转发媒体**才询问"回复在群组/频道"（默认群组）：
-    //   - isForwarded=true：message.channel_forward 或 media 里存在两个不同位置；
-    //   - 普通群组媒体（media 只有 group）不弹按钮，直接回复在消息自身位置。
-    if (locations.isForwarded && !replyTarget) {
-        const rows = [];
-        if (locations.group) rows.push({ text: '👥 回复在群组', callback_data: 'mreply_loc:group' });
-        if (locations.channel) rows.push({ text: '📢 回复在频道', callback_data: 'mreply_loc:channel' });
-
-        if (rows.length > 0) {
-            const keyboard = { inline_keyboard: [rows] };
-            await bot.editMessageText('✅ 已找到该消息（频道转发）\n请选择回复位置：', {
-                chat_id: userId,
-                message_id: processingMsgId,
-                reply_markup: keyboard
-            });
-
-            // 保留 _onExit（退出时删除群组/频道提示消息、清理上下文）
-            const prevRaw = getRawUserState(userId);
-            setUserState(userId, {
-                mode: 'message_reply',
-                step: 'waiting_reply_location',
-                targetGroupId: messageDoc.group_id,
-                pendingMessageDoc: messageDoc,
-                pendingMediaDoc: media || null,   // 位置解析用（频道侧收录 / 空描述媒体没有 message.channel_forward）
-                processingMsgId,
-                packSize: (prevRaw && prevRaw.packSize) || null, // 保留打包模式数量
-                _onExit: (prevRaw && prevRaw._onExit) || (async () => { }),
-                lastActivity: Date.now()
-            });
-            logger.info(`用户 ${userId} 消息回复模式：频道转发消息，等待选择回复位置（group=${!!locations.group}, channel=${!!locations.channel}）`);
-            return;
-        }
-    }
-
     const resolved = resolveReplyLocation(messageDoc, replyTarget, locations);
     await finishEnterReadyState(userId, messageDoc, processingMsgId, resolved, media);
 }
@@ -428,7 +402,8 @@ async function enterReplyReadyState(userId, messageDoc, processingMsgId, replyTa
  * 打标签完成后"回复该消息"：完成打标签后自动进入消息回复模式，
  * 回复目标优先为"刚打标签的那条 message"（file_unique_id），无则回退为该组第一条 message
  * （跳过用户重新发送媒体的定位步骤）。
- * 频道转发消息（有双位置）直接进入"选择回复至频道/群组"界面，其余直接进入就绪状态。
+ * 回复位置**默认群组**；频道转发消息（群组/频道双位置都在）时，就绪消息下会带
+ * 「🔄 更改为发送至📢 频道」一键切换按钮，不再让用户先做一次选择。
  * @param {number} userId - 用户ID
  * @param {string} groupId - 打标签的媒体组 ID
  * @param {number} baseMsgId - 当前标签消息 ID（将被编辑为回复模式界面）
@@ -455,7 +430,7 @@ async function autoEnterReplyFromTag(userId, groupId, baseMsgId, fileUniqueId = 
             mode: 'message_reply',
             lastActivity: Date.now(),
             step: 'waiting_for_target',
-            replyTarget: null,      // null：频道转发消息时询问回复位置
+            replyTarget: null,      // null：按默认位置（群组）回复
             packSize: null,
             targetGroupId: null,
             targetChatId: null,
@@ -465,7 +440,7 @@ async function autoEnterReplyFromTag(userId, groupId, baseMsgId, fileUniqueId = 
             _onExit: buildReplyModeExitHandler()
         });
 
-        // 直接定位目标：频道转发消息进入"选择回复至频道/群组"界面，其余直接进入就绪状态
+        // 直接定位目标：默认回复在群组（双位置时可就绪消息上的按钮切到频道）
         await enterReplyReadyState(userId, messageDoc, baseMsgId, null);
         logger.info(`用户 ${userId} 打标签后自动进入回复模式: group_id=${groupId}`);
         return { ok: true };
@@ -475,24 +450,41 @@ async function autoEnterReplyFromTag(userId, groupId, baseMsgId, fileUniqueId = 
     }
 }
 
-/** 处理"回复在群组/频道"选择回调（mreply_loc:group | mreply_loc:channel） */
+/**
+ * 处理"回复在群组/频道"选择回调（mreply_loc:group | mreply_loc:channel）
+ *
+ * 注：新版流程**不再弹这两个按钮**（默认群组 + 就绪消息上的切换按钮），
+ * 这里保留是为了兼容聊天记录里遗留的旧按钮消息。
+ */
 async function handleLocationCallback(query) {
     const data = query.data;
     const userId = query.from.id;
+    const target = (data.split(':')[1] === 'channel') ? 'channel' : 'group';
+
     const rawState = getRawUserState(userId);
+    // 旧消息上的「👥 回复在群组 / 📢 回复在频道」按钮：新版流程定位后状态直接是就绪态
+    // （默认群组），此时这个按钮等价于"切换回复位置"，老按钮依然点得动
+    if (rawState && rawState.mode === 'message_reply' && rawState.step === 'ready') {
+        return handleSwitchLocationCallback(query);
+    }
+
     if (!rawState || rawState.mode !== 'message_reply' || rawState.step !== 'waiting_reply_location' || !rawState.pendingMessageDoc) {
-        await bot.answerCallbackQuery(query.id, { text: '❌ 状态已过期，请重新发送媒体' });
+        await bot.answerCallbackQuery(query.id, { text: '❌ 状态已过期，请重新发送媒体' }).catch(() => { });
         return;
     }
 
-    const target = (data.split(':')[1] === 'channel') ? 'channel' : 'group';
+    // 先回执：后面要查库 + 解析位置 + 往目标会话发提示消息，不能让按钮一直转圈
+    await bot.answerCallbackQuery(query.id, {
+        text: `♻️ 正在设置为${target === 'channel' ? '📢 频道' : '👥 群组'}...`
+    }).catch(() => { });
+
     const messageDoc = rawState.pendingMessageDoc;
     // 位置解析同样要带上 media（空描述媒体 / 频道侧收录时 message.channel_forward 不全）
     const media = await loadMediaForLocations(rawState.pendingMediaDoc, messageDoc.file_unique_id);
     const locations = deriveReplyLocations(messageDoc, media);
     const resolved = resolveReplyLocation(messageDoc, target, locations);
     if (!resolved || !resolved.chatId || !resolved.messageId) {
-        await bot.answerCallbackQuery(query.id, { text: `❌ 没有可用的${target === 'channel' ? '频道' : '群组'}位置` });
+        await bot.sendMessage(userId, `❌ 没有可用的${target === 'channel' ? '频道' : '群组'}位置`).catch(() => { });
         return;
     }
     const { icon, label } = await resolveReadyLabel(resolved.chatId, target);
@@ -536,7 +528,6 @@ async function handleLocationCallback(query) {
         lastActivity: Date.now()
     });
 
-    await bot.answerCallbackQuery(query.id, { text: `已选择回复在${icon}${label}` });
     logger.info(`用户 ${userId} 选择回复位置: ${target}`);
 }
 
@@ -547,23 +538,29 @@ async function handleLocationCallback(query) {
 async function handleSwitchLocationCallback(query) {
     const data = query.data;
     const userId = query.from.id;
+    const target = (data.split(':')[1] === 'channel') ? 'channel' : 'group';
+
     const rawState = getRawUserState(userId);
     if (!rawState || rawState.mode !== 'message_reply' || rawState.step !== 'ready') {
-        await bot.answerCallbackQuery(query.id, { text: '❌ 状态已过期，请重新发送媒体' });
+        await bot.answerCallbackQuery(query.id, { text: '❌ 状态已过期，请重新发送媒体' }).catch(() => { });
         return;
     }
 
-    const target = (data.split(':')[1] === 'channel') ? 'channel' : 'group';
     const locations = rawState.replyLocations;
     const loc = locations && locations[target];
     if (!loc) {
-        await bot.answerCallbackQuery(query.id, { text: '❌ 该位置不存在' });
+        await bot.answerCallbackQuery(query.id, { text: '❌ 该位置不存在' }).catch(() => { });
         return;
     }
     if (rawState.targetChatId === loc.chatId && rawState.targetMessageId === loc.messageId) {
-        await bot.answerCallbackQuery(query.id, { text: '已是当前回复位置' });
+        await bot.answerCallbackQuery(query.id, { text: '已是当前回复位置' }).catch(() => { });
         return;
     }
+
+    // 校验通过后再回执：接下来要删旧提示、往新会话发提示、刷新确认消息，全是网络往返
+    await bot.answerCallbackQuery(query.id, {
+        text: `♻️ 正在切换到${target === 'channel' ? '📢 频道' : '👥 群组'}...`
+    }).catch(() => { });
 
     // 删除旧聊天中的提示消息（💬 Der包正在回复该消息）
     if (rawState.hintMsgInfo) {
@@ -590,6 +587,8 @@ async function handleSwitchLocationCallback(query) {
     const prevRaw = getRawUserState(userId);
     setUserState(userId, {
         ...prevRaw,
+        // 切换后的位置写进 replyTarget：后续媒体沿用本次选择
+        replyTarget: target,
         targetChatId: loc.chatId,
         targetMessageId: loc.messageId,
         hintMsgInfo: hintMsg ? { chat_id: loc.chatId, message_id: hintMsg.message_id } : null,
@@ -603,7 +602,6 @@ async function handleSwitchLocationCallback(query) {
         reply_markup: buildReadySwitchKeyboard(locations, target)
     }).catch(() => { });
 
-    await bot.answerCallbackQuery(query.id, { text: `已切换为回复在${icon}${label}` });
     logger.info(`用户 ${userId} 切换回复位置: ${target} -> chat=${loc.chatId}/${loc.messageId}`);
 }
 

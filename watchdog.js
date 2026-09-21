@@ -146,12 +146,20 @@ function writeCrashMarker(crash) {
         ensureLogDir();
         fs.writeFileSync(cfg.markerFile, JSON.stringify({
             ...crash,
+            // 崩溃发生的**时刻**（毫秒）：bot 重启后据此判断这条崩溃信息是否已经太旧
+            // （超过 reportMaxAgeMs 就只留痕、不再播报，见 utils/crashNotify.js）。
+            // 注意不能只依赖 crash.timeText —— 软卡死（unhealthy）路径不带该字段。
+            crashedAtMs: Date.now(),
+            // 可读的崩溃时间：同样兜底，保证报告 / opLog 里总有时间
+            timeText: crash.timeText || timeText(),
             mode: cfg.mode,
             botArgs: cfg.botArgs,
             consecutive: restartCount,
             maxRestarts: cfg.maxRestarts,
             // 报告里列几条 warn/erro：bot 侧发「重启成功」时沿用同一份上限
             reportLimit: cfg.reportTailLimit,
+            // 播报时效上限：bot 侧据此丢弃过期（如看门狗早已停止重启、用户几小时后才手动启动）的崩溃信息
+            reportMaxAgeMs: cfg.reportMaxAgeMs,
             // 通知模式：off 时 bot 侧也不发「重启成功」（保持"彻底不发通知"的语义）
             notifyMode: cfg.notifyMode
         }, null, 2));
@@ -385,9 +393,12 @@ function sendCrashReport(info) {
         root: cfg.root,
         token: cfg.telegramToken,
         adminChatIds: cfg.adminChatIds,
+        // 通知群（话题群）：配了就只发那里的话题，不再私聊管理员
+        notifyChatId: cfg.notifyChatId,
+        notifyThreadId: cfg.notifyThreadId,
         onExit: (code) => wlog('INFO', `崩溃播报进程结束（exit=${code}）`)
     });
-    if (!child) wlog('WARN', '崩溃播报未发出（缺少 token / 管理员，或启动失败）');
+    if (!child) wlog('WARN', '崩溃播报未发出（缺少 token / 收件人，或启动失败）');
 }
 
 async function recordAndRestart(crash) {
@@ -545,7 +556,8 @@ function main() {
     ensureLogDir();
     wlog('INFO', `看门狗启动：pid=${process.pid}，启动方式=node index.js${cfg.botArgs.length ? ' ' + cfg.botArgs.join(' ') : ''}（${cfg.mode}）`);
     wlog('INFO', `崩溃后重启延迟=${cfg.restartDelayMs}ms，健康轮询=${cfg.healthIntervalMs}ms（失败 ${cfg.healthFailThreshold} 次判定卡死），` +
-        `重启上限=${cfg.maxRestarts} 次/${Math.round(cfg.restartWindowMs / 60000)} 分钟，通知模式=${cfg.notifyMode}`);
+        `重启上限=${cfg.maxRestarts} 次/${Math.round(cfg.restartWindowMs / 60000)} 分钟，通知模式=${cfg.notifyMode}` +
+        `，通知去向=${cfg.notifyChatId ? `话题群 ${cfg.notifyChatId}/${cfg.notifyThreadId || '-'}` : '管理员私聊'}`);
 
     // 看门狗的 Ctrl+C：先关子进程再退出（第二次 Ctrl+C 直接强退，由 shutdown.js 处理）
     shutdown.configure({

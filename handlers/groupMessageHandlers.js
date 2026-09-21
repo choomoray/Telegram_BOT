@@ -23,9 +23,8 @@ const {
 } = require('../db/groupList');
 const { getCollection, COLLECTIONS } = require('../db/index');
 const { handleQuery } = require('./queryHandler');
-const { isAdmin } = require('./queryHandler');
+const { isAdmin, isIgnoredChat } = require('../utils/permissions');
 const { logOperation } = require('../utils/opLog');
-const { executeCommand } = require('./commands');
 const { getUserState } = require('../states');
 const handleModeMessage = require('./modes');
 const { extractMediaFromMessage } = require('../media'); // 统一媒体提取
@@ -716,14 +715,38 @@ async function handleEditedMessage(msg) {
 
 /**
  * 群组/频道消息总入口（普通消息）
+ *
+ * 两道门（用户要求）：
+ *   1. **通知专用群**（启动/崩溃信息的话题群）：完全不处理 —— 不收录、不响应、不管理；
+ *   2. **只处理管理员发送的内容**：群/频道里非管理员发的消息一律静默忽略
+ *      （频道帖没有 from，只有频道管理员能发帖 → 天然放行；
+ *       「频道 → 关联讨论群」的自动转发是频道自己的内容 → 放行，只补群组位置）。
+ *
+ * 群里的指令只剩「回复一条消息 + /edit」这一种（其它指令必须在私聊；
+ * 单独发 /edit 也不处理），见下面的 isReplyEdit 分支。
  */
 async function handleGroupMessage(msg) {
     if (!['group', 'supergroup', 'channel'].includes(msg.chat.type)) return;
 
+    // 1. 通知专用群：完全忽略
+    if (isIgnoredChat(msg.chat.id)) {
+        logger.info(`[群组] 通知专用会话，已忽略全部消息: chatId=${msg.chat.id}`);
+        return;
+    }
+
+    // 2. 只收录/处理管理员发送的内容
+    const userId = msg.from ? msg.from.id : null;
+    const isChannelPost = msg.chat.type === 'channel';
+    const isAutoForward = !!msg.is_automatic_forward;
+    if (!isChannelPost && !isAutoForward && !(userId && isAdmin(userId))) {
+        logger.info(`[群组] 非管理员消息已忽略: chatId=${msg.chat.id}, userId=${userId}`);
+        return;
+    }
+
     const hasMedia = SUPPORTED_MEDIA_TYPES.some(type => msg[type]);
 
     // 群组/频道：管理员回复媒体 + /edit（支持 /edit@机器人用户名 形式）快捷编辑
-    // （频道帖子无 from，须在身份校验前拦截；群组内非管理员会由 handleReplyEditCommand 返回 false 走原逻辑）
+    // （频道帖子无 from，须在身份校验前拦截；群组内非管理员已在上面拦掉）
     const isReplyEdit = !!msg.reply_to_message && /^\/edit(?:@\w+)?(\s|$)/i.test((msg.text || '').trim());
     if (isReplyEdit && !hasMedia) {
         const { handleReplyEditCommand } = require('./groupReplyEdit');
@@ -738,42 +761,42 @@ async function handleGroupMessage(msg) {
         logger.info(`[群组媒体消息] 收到: chatId=${msg.chat.id}, messageId=${msg.message_id}, mediaGroupId=${msg.media_group_id || '单条'}`);
         await handleNewMediaMessage(msg);
     } else {
-        const userId = msg.from ? msg.from.id : null;
-        if (userId && isAdmin(userId)) {
-            const messageText = msg.text || '';
-
-            // 1. 优先检查用户是否有活跃模式（如 edit, chat 等）
-            const userState = getUserState(userId);
-            if (userState && userState.mode) {
-                logger.info(`[群组] 管理员 ${userId} 处于模式 ${userState.mode}，交给模式处理器`);
-                await handleModeMessage(msg, userState);
-                return;
-            }
-
-            // 2. 处理命令
-            if (messageText.startsWith('/')) {
-                const fullCommand = messageText.trim();
-                const executed = await executeCommand(fullCommand, userId, msg);
-                if (executed === 'executed') {
-                    logger.info(`[群组] 管理员 ${userId} 执行命令: ${fullCommand}`);
-                    return;
-                }
-            }
-
-            // 3. 最后处理查询
-            logger.info(`[群组查询] 管理员 ${userId} 发送文本: ${msg.text}`);
-            await handleQuery(msg);
-        } else {
-            logger.info(`[群组] 非管理员或匿名文本消息已忽略: userId=${userId}`);
+        // 非媒体：
+        //   - 有活跃模式（如群内两步 /edit 的等待输入）→ 交给模式处理器；
+        //   - 其它文本 → 关键字查询（仅管理员，见上面的门）；
+        //   - 指令：**不在群里执行**（除上面的「回复 + /edit」），一律忽略。
+        const userState = getUserState(userId);
+        if (userState && userState.mode) {
+            logger.info(`[群组] 管理员 ${userId} 处于模式 ${userState.mode}，交给模式处理器`);
+            await handleModeMessage(msg, userState);
+            return;
         }
+
+        const messageText = (msg.text || '').trim();
+        if (messageText.startsWith('/')) {
+            logger.info(`[群组] 指令只能在私聊执行，已忽略: chatId=${msg.chat.id}, userId=${userId}, text=${messageText}`);
+            return;
+        }
+
+        logger.info(`[群组查询] 管理员 ${userId} 发送文本: ${msg.text}`);
+        await handleQuery(msg);
     }
 }
 
 /**
  * 群组编辑消息入口
+ * 与普通消息同一套门：通知专用会话忽略；只处理管理员（频道帖天然放行）的编辑。
  */
 async function handleGroupEditedMessage(editedMsg) {
     if (!['group', 'supergroup', 'channel'].includes(editedMsg.chat.type)) return;
+    if (isIgnoredChat(editedMsg.chat.id)) return;
+
+    const userId = editedMsg.from ? editedMsg.from.id : null;
+    if (editedMsg.chat.type !== 'channel' && !(userId && isAdmin(userId))) {
+        logger.info(`[群组] 非管理员编辑消息已忽略: chatId=${editedMsg.chat.id}, userId=${userId}`);
+        return;
+    }
+
     const hasMedia = SUPPORTED_MEDIA_TYPES.some(type => editedMsg[type]);
     if (!hasMedia) return;
 

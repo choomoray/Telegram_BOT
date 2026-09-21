@@ -34,6 +34,27 @@ const ADMIN_CHAT_IDS = ADMIN_CHAT_ID_RAW.split(',')
     .filter(id => id.length > 0)
     .map(id => Number(id));
 
+// ---- 启动 / 崩溃 / 重启通知专用群（话题群） ----
+// 用户要求：bot 的「启动 / 崩溃 / 重启」信息统一发到这个会话的**指定话题**里，不再私聊管理员；
+// 同时 bot **不对该会话做任何收录 / 管理动作**（只当通知出口，见 utils/permissions.isIgnoredChat）。
+// 链接 t.me/c/2223278475/85 → chat_id 补上超级群前缀 -100；话题 ID = 该话题首条消息的 message_id。
+// 把 STARTUP_NOTIFY_CHAT_ID 设为 0 可关闭（退回私聊管理员）。
+const STARTUP_NOTIFY_CHAT_ID = Number(process.env.STARTUP_NOTIFY_CHAT_ID || '-1002223278475') || 0;
+const STARTUP_NOTIFY_THREAD_ID = Number(process.env.STARTUP_NOTIFY_THREAD_ID || '85') || 0;
+
+/**
+ * 「完全不处理」的会话：bot 只往里发通知，不做收录、不响应消息、不记录成员。
+ * 默认 = 启动通知群；可用 IGNORED_CHAT_IDS（逗号分隔）追加别的会话（例如只想让它当日志出口的群）。
+ */
+const IGNORED_CHAT_IDS = [
+    STARTUP_NOTIFY_CHAT_ID,
+    ...String(process.env.IGNORED_CHAT_IDS || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+        .map(Number)
+].filter(id => Number.isFinite(id) && id !== 0);
+
 module.exports = {
     TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
     MONGODB_URI: process.env.MONGODB_URI,
@@ -42,6 +63,11 @@ module.exports = {
     INACTIVE_TIMEOUT: 10 * 60 * 1000,
     ADMIN_CHAT_ID: ADMIN_CHAT_ID_RAW,
     ADMIN_CHAT_IDS: ADMIN_CHAT_IDS,
+    // 启动 / 崩溃 / 重启通知的收件会话与话题（0 = 未配置，退回私聊管理员）
+    STARTUP_NOTIFY_CHAT_ID: STARTUP_NOTIFY_CHAT_ID,
+    STARTUP_NOTIFY_THREAD_ID: STARTUP_NOTIFY_THREAD_ID,
+    // 完全不处理的会话（只发通知，不收录 / 不管理）
+    IGNORED_CHAT_IDS: IGNORED_CHAT_IDS,
     missingEnvVars: missingVars,
     envFileExists: fs.existsSync(path.join(__dirname, '.env')),
     // Web UI 配置

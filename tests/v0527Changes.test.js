@@ -24,13 +24,19 @@ test('/restart 已注册为指令（文件名即命令名，会被自动装载�
     assert.match(idx, /commandMap\.set\(`\/\$\{commandName\}`, handler\)/, '自动注册机制仍在');
 });
 
-test('/restart 仅管理员可用：不在白名单命令里', () => {
+test('/restart 仅管理员可用：不在任何"非管理员可用"命令集合里', () => {
     const idx = read('handlers/commands/index.js');
-    const m = idx.match(/WHITELIST_ALLOWED_COMMANDS\s*=\s*new Set\(\[([^\]]*)\]\)/);
-    assert.ok(m, '缺少白名单集合');
-    assert.ok(!/\/restart/.test(m[1]), '/restart 绝不能进白名单（否则非管理员可用）');
-    assert.match(idx, /if \(!isAdmin\(userId\) && !WHITELIST_ALLOWED_COMMANDS\.has\(shortCommand\)\)/,
-        '非管理员 + 非白名单 → 拒绝');
+    const wl = idx.match(/WHITELIST_ALLOWED_COMMANDS\s*=\s*new Set\(\[([^\]]*)\]\)/);
+    assert.ok(wl, '缺少白名单集合');
+    assert.ok(!/\/restart/.test(wl[1]), '/restart 绝不能进白名单（否则非管理员可用）');
+    // 普通用户（非管理员、非白名单）也有一份自己的命令集合（随机看片）
+    const member = idx.match(/MEMBER_ALLOWED_COMMANDS\s*=\s*new Set\(\[([^\]]*)\]\)/);
+    assert.ok(member, '缺少普通用户命令集合');
+    assert.ok(!/\/restart/.test(member[1]), '/restart 也不能对普通用户开放');
+    assert.match(idx, /if \(!isAdmin\(userId\) && !allowedCommandsFor\(opts\.tier\)\.has\(shortCommand\)\)/,
+        '非管理员按所属层级拒绝');
+    assert.match(idx, /\/random_videos/, '普通用户命令集合应包含 /random_videos');
+    assert.match(idx, /\/random_pictures/, '普通用户命令集合应包含 /random_pictures');
 });
 
 test('/help 已加入「♻️ 重启」按钮，走 exec_cmd:/restart', () => {

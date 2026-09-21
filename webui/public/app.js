@@ -174,19 +174,59 @@
   const FLOW_ROW_HEIGHT = 8;   // 必须与 style.css 的 grid-auto-rows 一致
   const FLOW_SELECTOR = '.media-grid--flow, .media-grid--fit, .media-grid--mini, .detail-strip--flow';
 
+  /* ---------------- 滚动位置保护 ----------------
+     为什么需要：容器高度一旦变小，浏览器会把超出新范围的滚动位置**夹回去**（超出就归零）。
+     瀑布流排布（量高度 → 写跨度）与整视图重渲染（innerHTML 换成"正在加载…"）都会瞬间
+     改变容器高度，于是表现出来就是「刷新一下跳回最上面」。
+     做法：动手前把 node 自身 + 各级祖先（含文档滚动元素，窄屏时滚的是文档）的滚动位置
+     记下来，动完立刻放回去 —— 布局可以变，用户浏览的位置不动。 */
+
+  /** 收集 node 自身与各级祖先的滚动位置（只记非 0 的；无 scrollTop 的桩元素直接跳过） */
+  function captureScrollPositions(node) {
+    const saved = [];
+    const seen = new Set();
+    const push = (el) => {
+      if (!el || seen.has(el)) return;
+      if (typeof el.scrollTop !== 'number' || !el.scrollTop) return;
+      seen.add(el);
+      saved.push({ el, top: el.scrollTop, left: typeof el.scrollLeft === 'number' ? el.scrollLeft : 0 });
+    };
+    for (let el = node; el; el = el.parentElement) push(el);
+    // 窄屏（style.css: body{overflow:auto}）滚的是文档，不是 #view：也要一起保住
+    if (typeof document !== 'undefined') {
+      push(document.scrollingElement);
+      push(document.documentElement);
+    }
+    return saved;
+  }
+
+  /** 把 captureScrollPositions 记下的位置放回去（值没变就不写，避免多余回流） */
+  function restoreScrollPositions(saved) {
+    for (const s of saved || []) {
+      if (s.el.scrollTop !== s.top) s.el.scrollTop = s.top;
+      if (s.left && s.el.scrollLeft !== s.left) s.el.scrollLeft = s.left;
+    }
+  }
+
   /** 量一个瀑布流容器里的卡片高度，写回各自的 grid-row-end 跨度 */
   function layoutFlowBox(box) {
     if (!box || !box.children) return;
     const cards = [...box.children].filter(el => el.nodeType === 1 && el.style);
     if (!cards.length) return;
     const gap = parseFloat(getComputedStyle(box).rowGap) || 0;
-    // 先全部复位成 1 行，再统一量高度：只触发两次布局（读写分离），避免逐张卡量高度时反复回流
-    for (const card of cards) card.style.gridRowEnd = 'span 1';
+    // 注意：**不要**先把卡片复位成 span 1 再量高度。
+    //   卡片是 align-self: start（style.css），高度只由内容决定、与跨几行无关，
+    //   直接量就是内容高度；而"复位成 1 行"会让整个容器的总高度瞬间塌成 8px/张 ——
+    //   量高度会强制回流，浏览器顺手把滚动位置夹到新的最大值上（多半就是 0），
+    //   表现为「缩略图一加载（视频缩略图是现从 Telegram 下的、来得最晚）就跳回最上面」。
+    //   这里只读一次、只写一次，并在前后保住滚动位置，双保险。
+    const saved = captureScrollPositions(box);
     const heights = cards.map(card => card.getBoundingClientRect().height);
     for (let i = 0; i < cards.length; i++) {
       const span = Math.max(1, Math.ceil((heights[i] + gap) / (FLOW_ROW_HEIGHT + gap)));
       cards[i].style.gridRowEnd = `span ${span}`;
     }
+    restoreScrollPositions(saved);
   }
 
   /**
@@ -2956,7 +2996,13 @@
     }
   }
 
-  async function show(view) {
+  /**
+   * 切换 / 刷新视图
+   * @param {string} view - 目标视图
+   * @param {Object} [opts] - { keepScroll: true } 同一视图刷新时保住当前浏览位置
+   *   （自动刷新 / 刷新按钮 / 操作后重载都走它：布局可以重排，位置不该跳回最上面）
+   */
+  async function show(view, opts = {}) {
     if (!VIEW_META[view]) return;
     // 视图要整体重渲染，旧的缩略图马上就不存在了 —— 无论后面走哪条分支，
     // 先把悬停放大浮层收掉（它挂在 body / dialog 上，#view 重渲染不会带走它）。
@@ -2971,6 +3017,9 @@
       await (state.showPromise || Promise.resolve());
       return;
     }
+    // 同视图刷新（自动刷新 / 刷新按钮 / 操作后重载）：先记下浏览位置。
+    // 必须赶在 runShow 把 #view 换成「正在加载…」之前 —— 换内容会让浏览器把滚动夹到 0。
+    const keepScroll = (opts.keepScroll && view === state.view) ? captureScrollPositions($('#view')) : [];
     state.view = view;
     document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('is-active', b.dataset.view === view));
     $('#page-title').textContent = VIEW_META[view].title;
@@ -2979,12 +3028,12 @@
     setSearchVisible(view);
 
     state.loading = true;
-    state.showPromise = runShow(view);
+    state.showPromise = runShow(view, keepScroll);
     await state.showPromise;
   }
 
   /** 真正加载并渲染一个视图（由 show 串行调度，不直接被调用） */
-  async function runShow(view) {
+  async function runShow(view, keepScroll = []) {
     $('#view').innerHTML = '<div class="loading">正在加载…</div>';
     try {
       await VIEW_META[view].load();
@@ -2995,6 +3044,8 @@
       $('#view').innerHTML = `<div class="empty"><div class="empty-ico">⚠️</div><div>${esc(err.message)}</div>
         <button class="btn btn-sm" data-action="retry">重试</button></div>`;
     } finally {
+      // 刷新时把浏览位置放回去（新内容已经渲染完、瀑布流跨度也算好了）
+      restoreScrollPositions(keepScroll);
       state.loading = false;
       state.showPromise = null;
       // 加载期间被点掉的导航：现在补上（后点的生效）
@@ -3009,7 +3060,8 @@
   async function refreshCurrent() {
     if (state.loading) { state.pendingView = state.view; return; }
     if (state.view !== 'overview') loadOverview().catch(() => { });
-    await show(state.view);
+    // 刷新保持浏览位置：只有内容 / 布局变，不该把用户弹回顶部
+    await show(state.view, { keepScroll: true });
   }
 
   /* ============================ 事件 ============================ */

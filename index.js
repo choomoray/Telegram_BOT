@@ -6,6 +6,7 @@ const { initCollections } = require('./db/index');
 const { loadSettings } = require('./db/settings');
 const { logOperation } = require('./utils/opLog');
 const { upsertChannelGroup, getChannelGroupById, updateChannelGroup } = require('./db/channelGroup');
+const { isIgnoredChat } = require('./utils/permissions');
 const { startHealthServer } = require('./healthServer');
 // 集中式停机状态 + 信号接管：require 即生效，覆盖整个启动期
 // （否则启动阶段卡在 connectDB 重试里时，Ctrl+C 会被静默吞掉，见 shutdown.js 注释）
@@ -102,15 +103,19 @@ async function start() {
         const { handleCallbackQuery } = require('./handlers/callbackHandler');
 
         // 消息事件（合并为一个监听器）
+        // 通知专用会话（启动/崩溃信息的话题群）：只往里发通知，消息一律不处理
         bot.on('message', safeHandler(async (msg) => {
             if (msg.chat.type === 'private') {
                 await handlePrivateMessage(msg);
+            } else if (isIgnoredChat(msg.chat.id)) {
+                logger.info(`通知专用会话，忽略消息: chatId=${msg.chat.id}`);
             } else if (['group', 'supergroup', 'channel'].includes(msg.chat.type)) {
                 await handleGroupMessage(msg);
             }
         }));
 
         bot.on('edited_message', safeHandler(async (msg) => {
+            if (isIgnoredChat(msg.chat.id)) return;
             if (['group', 'supergroup', 'channel'].includes(msg.chat.type)) {
                 await handleGroupEditedMessage(msg);
             }
@@ -122,11 +127,19 @@ async function start() {
 
         // 成员变动事件（成员进出 / 管理员解封；逻辑见 handlers/chatMemberHandler.js）
         const { handleChatMemberUpdate } = require('./handlers/chatMemberHandler');
-        bot.on('chat_member', safeHandler(handleChatMemberUpdate));
+        bot.on('chat_member', safeHandler(async (update) => {
+            if (update && update.chat && isIgnoredChat(update.chat.id)) return;
+            await handleChatMemberUpdate(update);
+        }));
 
         // 机器人管理员状态变更
         bot.on('my_chat_member', safeHandler(async (update) => {
             const { chat, new_chat_member } = update;
+            // 通知专用会话：不登记进 channel_group、不做任何管理动作
+            if (chat && isIgnoredChat(chat.id)) {
+                logger.info(`通知专用会话，忽略 my_chat_member: chatId=${chat.id}`);
+                return;
+            }
             if (new_chat_member.status === 'administrator') {
                 // 类型以 Telegram 给出的 chat.type 为准（超级群组 ≠ 频道，两者 id 都以 -100 开头）
                 const type = chat.type === 'channel' ? 'channel' : 'group';
@@ -151,6 +164,8 @@ async function start() {
         // 加入请求审批
         bot.on('chat_join_request', safeHandler(async (update) => {
             const { chat, from } = update;
+            // 通知专用会话：不审批、不记录
+            if (chat && isIgnoredChat(chat.id)) return;
             const userId = from.id;
             const chatId = chat.id;
             const userName = from.username || `${from.first_name || ''} ${from.last_name || ''}`.trim() || `User${userId}`;
@@ -232,12 +247,16 @@ async function start() {
 
         logger.success('系统就绪，Telegram Bot 已启动并等待消息...');
 
-        // 若本次是被看门狗从崩溃中拉起来的，**第一时间**向管理员播报「已自动重启 + 崩溃原因」：
-        //   - 时机：此处数据库已连接、bot 已开始 polling（见上面的 connectDB / startBotPolling）；
-        //   - 发送者：主 bot 自己（不 await，别拖慢启动；失败只记日志）；
-        //   - 报告不再由看门狗等健康确认后补发（那要几十秒到几分钟才到，用户已反馈太慢）。
-        require('./utils/crashNotify')
-            .reportRestartFromWatchdog()
+        // 启动 / 重启播报：统一发到**通知群的话题**（`STARTUP_NOTIFY_CHAT_ID` + `STARTUP_NOTIFY_THREAD_ID`），
+        // 不再私聊管理员（见 utils/crashNotify.js）：
+        //   1. 「🚀 BOT已启动」——每次启动都发；
+        //   2. 「♻️ BOT重启成功」——只有本次是被看门狗从崩溃中拉起来时才发（带崩溃现场）。
+        // 时机：此处数据库已连接、bot 已开始 polling；发送者：主 bot 自己（不 await，别拖慢启动；
+        // 失败只记日志）。报告不再由看门狗等健康确认后补发（那要几十秒到几分钟才到，用户反馈太慢）。
+        const crashNotify = require('./utils/crashNotify');
+        crashNotify.reportBotStarted()
+            .catch(err => logger.warn(`启动播报失败: ${err.message}`))
+            .then(() => crashNotify.reportRestartFromWatchdog())
             .catch(err => logger.warn(`重启播报失败: ${err.message}`));
 
         // 父进程（看门狗）看护：看门狗被硬杀时自行退出，避免变成孤儿实例抢轮询

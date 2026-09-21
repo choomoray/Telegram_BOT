@@ -30,16 +30,21 @@ async function handlePrivateMessage(msg) {
     // 更新最后活跃时间（无论什么消息）
     await updateLastSeen(userId).catch(() => { });
 
-    // ---------- 管理员 / 白名单 + 封禁检查 ----------
+    // ---------- 私聊准入（分层） ----------
+    //   admin     ：ADMIN_CHAT_ID 里的管理员 → 全部功能
+    //   whitelist ：白名单用户（white=1）→ /search、/exit + 随机看片
+    //   member    ：普通用户（在库、未封禁）= 随机视频 / 随机图片（用户要求开放）
+    //   banned / unknown ：拒绝并提示（被封禁 / 未授权）
+    let tier = 'admin';
     if (!isAdmin(userId)) {
-        const { isUserAllowed } = require('../db/users');
-        const allowed = await isUserAllowed(userId);
-        if (!allowed) {
+        const { getUserAccessTier } = require('../db/users');
+        tier = await getUserAccessTier(userId);
+        if (tier === 'banned' || tier === 'unknown') {
             await bot.sendMessage(userId, '❌ 您已被封禁或未被加入白名单，无法使用私聊功能', {
                 reply_to_message_id: msg.message_id,
                 allow_sending_without_reply: true
             }).catch(err => logger.error('发送权限错误提示失败:', err.message));
-            logger.info(`用户 ${userId} 尝试使用私聊，但被拒绝`);
+            logger.info(`用户 ${userId} 尝试使用私聊，但被拒绝（${tier}）`);
             return;
         }
     }
@@ -51,14 +56,13 @@ async function handlePrivateMessage(msg) {
 
     if (messageText.startsWith('/')) {
         const fullCommand = messageText.trim();
-        const result = await executeCommand(fullCommand, userId, msg);
+        // 把层级传下去：普通用户只放行随机看片（见 handlers/commands/index.js）
+        const result = await executeCommand(fullCommand, userId, msg, { tier });
         if (result === 'executed') {
             return;
         } else if (result === 'forbidden') {
-            await bot.sendMessage(userId, '❌ 无权使用该指令', {
-                reply_to_message_id: msg.message_id,
-                allow_sending_without_reply: true
-            }).catch(err => logger.error('发送权限提示失败:', err.message));
+            // 无权限的指令：**静默忽略**（只留日志，不回"无权使用该指令"之类的提示）
+            logger.warn(`用户 ${userId}（${tier}）尝试执行无权限指令，已静默忽略: ${fullCommand}`);
             return;
         } else {
             await bot.sendMessage(userId, '❌ 指令错误', {

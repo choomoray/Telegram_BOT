@@ -106,8 +106,16 @@ function buildConfig(argv = [], { platform = process.platform } = {}) {
         restartGraceMs: envInt('NODE_RESTART_GRACE_MS', 90000),
         // 短命通知进程存活上限（发完即退；到点强制结束）
         notifyTtlMs: envInt('WATCHDOG_NOTIFY_TTL', 5000),
+        // 启动 / 崩溃 / 重启通知发到哪个会话（用户指定的话题群；填 0 则退回管理员私聊）
+        // 链接 t.me/c/2223278475/85 → chat_id 补 -100 前缀；话题 ID = 该话题首条消息的 message_id
+        notifyChatId: envInt('STARTUP_NOTIFY_CHAT_ID', -1002223278475),
+        notifyThreadId: envInt('STARTUP_NOTIFY_THREAD_ID', 85),
         // 崩溃 / 重启报告里最多列几条 warn/erro（用户要求：只展示最近 3 条）
         reportTailLimit: envInt('WATCHDOG_REPORT_LINES', 3),
+        // 「重启成功 + 崩溃信息」播报的时效上限（分钟 → 毫秒）：
+        // 崩溃标记比这还旧就视为过期，bot 只留痕、不再向管理员播报
+        // （用户要求：超过 30 分钟的崩溃信息没必要再发，见 utils/crashNotify.js）
+        reportMaxAgeMs: envInt('WATCHDOG_REPORT_MAX_AGE_MIN', 30) * 60 * 1000,
 
         // 日志
         logFile: path.join(ROOT, 'watchdog', 'watchdog.log'),

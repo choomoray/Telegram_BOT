@@ -19,13 +19,17 @@ const {
     installLoggerStub,
     relaxTimers,
     sleep,
-    resetStore
+    resetStore,
+    stubModule
 } = require('./helpers/memoryDb');
 
 relaxTimers();
 installMemoryDb(root);
 installBotStub(root);
 installLoggerStub(root);
+// 群组/频道只收录**管理员**发送的内容：测试里的群组发送者（7）必须是管理员
+// （必须在 require handlers 之前打桩，见 utils/permissions.js）
+stubModule(path.join(root, 'config.js'), { ADMIN_CHAT_IDS: [7, 999], ADMIN_CHAT_ID: '7,999' });
 
 const { handleGroupMessage, handleGroupEditedMessage } = require('../handlers/groupMessageHandlers');
 const { handleSendMode } = require('../handlers/modes/sendMode');

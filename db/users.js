@@ -190,6 +190,30 @@ async function isUserAllowed(userId) {
     }
 }
 
+/**
+ * 私聊用户层级（比 isUserAllowed 多一档「普通用户」，供"普通用户也能用随机看片"用）：
+ *   - `'whitelist'`：在库里、未封禁、`white === 1`（白名单用户）
+ *   - `'member'`   ：在库里、未封禁、非白名单（**普通用户**）
+ *   - `'banned'`   ：在库里但 `state === 0`（被封禁）
+ *   - `'unknown'`  ：不在库里（未授权）
+ *
+ * 查询失败按 `'unknown'` 处理（宁可少给权限，也不误放行）。
+ * @param {number} userId
+ * @returns {Promise<'whitelist'|'member'|'banned'|'unknown'>}
+ */
+async function getUserAccessTier(userId) {
+    try {
+        const col = getCol();
+        const user = await col.findOne({ id: userId });
+        if (!user) return 'unknown';
+        if (user.state === 0) return 'banned';
+        return user.white === 1 ? 'whitelist' : 'member';
+    } catch (err) {
+        logger.error(`查询用户层级失败: ${err.message}`);
+        return 'unknown';
+    }
+}
+
 async function setUserState(userId, state) {
     try {
         const col = getCol();
@@ -227,6 +251,7 @@ module.exports = {
     banUserFully,
     unbanUserFully,
     isUserAllowed,
+    getUserAccessTier,
     setUserState,
     setUserWhite,
     getAllUsers,

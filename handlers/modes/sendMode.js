@@ -43,11 +43,46 @@ function chatIcon(type) {
     return type === 'channel' ? '📢' : '👥';
 }
 
+/** 列表加载中的提示语（加载完成后被就地刷新成真正的列表） */
+const GROUP_LIST_LOADING_TEXT = '♻️ 正在获取频道 / 群组 列表，请稍候...';
+
+/**
+ * 就地刷新发送模式面板：有可编辑的消息 ID 时就地编辑，否则新发一条。
+ *
+ * 「加载中 → 结果」的两步反馈都走它：加载提示不会被留在聊天里，
+ * 编辑失败（消息过旧 / 已被删除）时退化为新发一条，用户始终能看到结果。
+ *
+ * @param {number} userId - 私聊用户
+ * @param {number|null} messageId - 要编辑的消息 ID（null / -1 表示新发）
+ * @param {string} text - 面板文本
+ * @param {Array} [keyboard] - inline_keyboard 的行数组（不传则不带按钮）
+ */
+async function renderPanel(userId, messageId, text, keyboard) {
+    const opts = keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {};
+    if (messageId && messageId !== -1) {
+        try {
+            await bot.editMessageText(text, { chat_id: userId, message_id: messageId, ...opts });
+            return;
+        } catch (err) {
+            logger.warn(`刷新发送模式面板失败，改为新发一条: ${err.message}`);
+        }
+    }
+    await bot.sendMessage(userId, text, opts);
+}
+
 async function showGroupList(userId, replyToMessageId, page) {
     // 先按 Telegram 真实类型补正 type，再排序：
     //   互相绑定的一对相邻，且**先频道、后群组**，未绑定的排在后面（见 utils/chatKind.sortChatGroups）
-    const { withRealTypes, sortChatGroups } = require('../../utils/chatKind');
-    const groups = sortChatGroups(await withRealTypes(await getAllChannelGroups()));
+    let groups;
+    try {
+        const { withRealTypes, sortChatGroups } = require('../../utils/chatKind');
+        groups = sortChatGroups(await withRealTypes(await getAllChannelGroups()));
+    } catch (err) {
+        // 取列表失败也要有结果：否则加载提示会一直停在「正在获取…」，用户只能干等
+        logger.error(`获取频道/群组列表失败: ${err.message}`);
+        await renderPanel(userId, replyToMessageId, '❌ 获取频道 / 群组列表失败，请稍后重试');
+        return;
+    }
     const totalPages = Math.max(1, Math.ceil(groups.length / PAGE_SIZE));
     const current = Math.min(Math.max(1, page), totalPages);
     const slice = groups.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
@@ -72,17 +107,7 @@ async function showGroupList(userId, replyToMessageId, page) {
     }
 
     const text = `📤 请选择要发送到的群组/频道（共 ${groups.length} 个）：`;
-    if (replyToMessageId && replyToMessageId !== -1) {
-        await bot.editMessageText(text, {
-            chat_id: userId,
-            message_id: replyToMessageId,
-            reply_markup: { inline_keyboard: keyboard }
-        }).catch(async () => {
-            await bot.sendMessage(userId, text, { reply_markup: { inline_keyboard: keyboard } });
-        });
-    } else {
-        await bot.sendMessage(userId, text, { reply_markup: { inline_keyboard: keyboard } });
-    }
+    await renderPanel(userId, replyToMessageId, text, keyboard);
 }
 
 // ---------------- 回调处理 ----------------
@@ -95,15 +120,28 @@ async function handleCallback(query) {
 
     if (prefix === 'sendpage') {
         const page = parseInt(parts[1], 10) || 1;
-        await bot.answerCallbackQuery(query.id);
+        // 翻页同样要重新查库（并补正会话类型）：先回执 + 把面板换成加载中，
+        // 避免用户点了按钮后界面一动不动
+        await bot.answerCallbackQuery(query.id, { text: '♻️ 正在获取列表...' }).catch(() => { });
+        await renderPanel(userId, query.message.message_id, GROUP_LIST_LOADING_TEXT);
         await showGroupList(userId, query.message.message_id, page);
         return;
     }
 
     if (prefix === 'sendg') {
         const chatId = Number(parts[1]);
-        const groups = await getAllChannelGroups();
-        const group = groups.find(g => g.id === chatId);
+        // 立刻回执：切换目标要查库 + 用 Telegram 补正真实会话类型，不能等做完再回
+        // （回执只能答一次，所以这里答了、结尾就不再答，否则第二个答案会报 query 失效）
+        await bot.answerCallbackQuery(query.id, { text: '♻️ 正在切换目标...' }).catch(() => { });
+        await renderPanel(userId, query.message.message_id, '♻️ 正在切换目标...');
+
+        let group = null;
+        try {
+            const groups = await getAllChannelGroups();
+            group = groups.find(g => g.id === chatId);
+        } catch (err) {
+            logger.error(`查询目标群组失败: ${err.message}`);
+        }
         const name = group ? (group.name || `Chat${chatId}`) : `Chat${chatId}`;
 
         const rawState = getRawUserState(userId);
@@ -135,11 +173,11 @@ async function handleCallback(query) {
         }
 
         const icon = chatIcon(targetType);
-        await bot.editMessageText(`✅ 已选择：${icon} ${name}\n请发送要发送的消息（支持单个媒体或媒体组）：`, {
-            chat_id: userId,
-            message_id: query.message.message_id
-        });
-        await bot.answerCallbackQuery(query.id, { text: `已选择 ${name}` });
+        await renderPanel(
+            userId,
+            query.message.message_id,
+            `✅ 已选择：${icon} ${name}\n请发送要发送的消息（支持单个媒体或媒体组）：`
+        );
         logger.info(`用户 ${userId} 选择发送目标: ${chatId} (${name})`);
         return;
     }
@@ -150,6 +188,38 @@ async function handleCallback(query) {
 // 用户可继续发送媒体（模式仍为 send），纯文本视为打标签，点《✅ 完成》才结束。
 
 // ---------------- 发送与收录 ----------------
+
+/** 发送/收录过程中的即时反馈文案（发送与收录都要等库往返，先让用户看到状态） */
+const SENDING_TEXT = '♻️ 正在发送并收录中，请耐心等待...';
+
+/**
+ * 先发一条「处理中」提示，返回它的消息 ID（失败返回 null，此时结果改用新消息提示）。
+ * 用于发送 / 收录这类要等数据库的步骤：用户发完消息立刻有反馈。
+ */
+async function postProcessing(userId, replyToMessageId, text = SENDING_TEXT) {
+    try {
+        const sent = await bot.sendMessage(userId, text, {
+            reply_to_message_id: replyToMessageId,
+            allow_sending_without_reply: true
+        });
+        return sent.message_id;
+    } catch (err) {
+        logger.error(`发送处理中提示失败: ${err.message}`);
+        return null;
+    }
+}
+
+/** 就地把「处理中」提示刷新为最终结果；没有可编辑的提示消息时新发一条 */
+async function refreshProcessing(userId, processingMsgId, replyToMessageId, text) {
+    if (processingMsgId) {
+        await bot.editMessageText(text, { chat_id: userId, message_id: processingMsgId }).catch(() => { });
+        return;
+    }
+    await bot.sendMessage(userId, text, {
+        reply_to_message_id: replyToMessageId,
+        allow_sending_without_reply: true
+    }).catch(() => { });
+}
 
 async function sendSingleMediaToChat(chatId, mediaInfo) {
     const { type, fileId, caption, has_spoiler } = mediaInfo;
@@ -275,9 +345,9 @@ async function collectMediaGroup(userId, msg, mediaInfo) {
     }, GROUP_FLUSH_DELAY);
 
     if (isNewEntry) {
-        // 第一条消息：回复"正在发送中"，随后由 flushMediaGroup 刷新为最终结果
+        // 第一条消息：回复"正在发送并收录中"，随后由 flushMediaGroup 刷新为最终结果
         try {
-            const sent = await bot.sendMessage(userId, '♻️ 正在发送中，请耐心等待...', {
+            const sent = await bot.sendMessage(userId, SENDING_TEXT, {
                 reply_to_message_id: msg.message_id,
                 allow_sending_without_reply: true
             });
@@ -464,6 +534,8 @@ async function handleSendMode(msg, state) {
 
     // 文本消息：直接发送，并**收录到 media**（media_type='text'）——保留 Telegram 消息格式
     if (msg.text && !msg.photo && !msg.video && !msg.audio && !msg.document) {
+        // 文本同样要"发送 + 收录"两次写库：先给即时反馈，再就地刷新为结果
+        const processingMsgId = await postProcessing(userId, userMsgId);
         try {
             // 带上 entities 即保留富文本；不用 parse_mode（见 utils/forwardText.js 注释）
             const { buildForwardTextOptions, countEntities } = require('../../utils/forwardText');
@@ -498,9 +570,7 @@ async function handleSendMode(msg, state) {
                     groupId
                 }
             }).catch(() => { });
-            await bot.sendMessage(userId, `✅ 已发送到 ${targetName}`, {
-                reply_to_message_id: userMsgId
-            });
+            await refreshProcessing(userId, processingMsgId, userMsgId, `✅ 已发送到 ${targetName}`);
         } catch (err) {
             logger.error(`发送文本失败: ${err.message}`);
             logOperation({
@@ -513,9 +583,7 @@ async function handleSendMode(msg, state) {
                 detail: { targetName, textLength: msg.text.length },
                 error: err.message
             }).catch(() => { });
-            await bot.sendMessage(userId, '❌ 发送失败，请检查机器人是否为该群组管理员', {
-                reply_to_message_id: userMsgId
-            });
+            await refreshProcessing(userId, processingMsgId, userMsgId, '❌ 发送失败，请检查机器人是否为该群组管理员');
         }
         return true;
     }
@@ -534,26 +602,14 @@ async function handleSendMode(msg, state) {
         return true;
     }
 
-    // 单个媒体
+    // 单个媒体：即时反馈放在去重查询之前（查询本身也要等数据库）
+    const processingMsgId = await postProcessing(userId, userMsgId);
+
     const existing = await findMediaByFileUniqueId(mediaInfo.fileUniqueId);
     if (existing) {
-        await bot.sendMessage(userId, '❌ 该媒体已存在，无法再次发送', {
-            reply_to_message_id: userMsgId
-        });
+        await refreshProcessing(userId, processingMsgId, userMsgId, '❌ 该媒体已存在，无法再次发送');
         return true;
     }
-
-    // 先回复"正在发送中"，随后刷新为最终结果
-    let processingMsg = null;
-    try {
-        processingMsg = await bot.sendMessage(userId, '♻️ 正在发送中，请耐心等待...', {
-            reply_to_message_id: userMsgId,
-            allow_sending_without_reply: true
-        });
-    } catch (err) {
-        logger.error(`发送处理中消息失败: ${err.message}`);
-    }
-    const processingMsgId = processingMsg ? processingMsg.message_id : null;
 
     const groupId = `${targetChatId}_${msg.message_id}`;
     let sentMsg;
@@ -571,12 +627,7 @@ async function handleSendMode(msg, state) {
             detail: { targetName, targetType: state.targetType || 'group', mediaType: mediaInfo.type },
             error: err.message
         }).catch(() => { });
-        const text = '❌ 发送失败，请检查机器人是否为该群组管理员';
-        if (processingMsgId) {
-            await bot.editMessageText(text, { chat_id: userId, message_id: processingMsgId }).catch(() => { });
-        } else {
-            await bot.sendMessage(userId, text, { reply_to_message_id: userMsgId });
-        }
+        await refreshProcessing(userId, processingMsgId, userMsgId, '❌ 发送失败，请检查机器人是否为该群组管理员');
         return true;
     }
 
@@ -616,11 +667,7 @@ async function handleSendMode(msg, state) {
     });
     await syncGroupDeleteByText(groupId);
     if (!shownInPanel) {
-        if (processingMsgId) {
-            await bot.editMessageText(successText, { chat_id: userId, message_id: processingMsgId }).catch(() => { });
-        } else {
-            await bot.sendMessage(userId, successText, { reply_to_message_id: userMsgId }).catch(() => { });
-        }
+        await refreshProcessing(userId, processingMsgId, userMsgId, successText);
     }
     logger.info(`用户 ${userId} 发送单个媒体到 ${targetChatId}，group_id=${groupId}`);
     return true;

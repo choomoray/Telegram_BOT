@@ -276,6 +276,92 @@ test('崩溃标记：内容损坏时不抛错，返回 null', () => {
     }
 });
 
+// ---------------- 崩溃播报的时效（超过 30 分钟的旧崩溃不再发） ----------------
+
+test('崩溃标记年龄：优先用 crashedAtMs，老格式退回 timeText', () => {
+    const crashNotify = require('../utils/crashNotify');
+    assert.strictEqual(crashNotify.DEFAULT_MAX_AGE_MS, 30 * 60 * 1000, '默认时效上限是 30 分钟');
+
+    const now = Date.now();
+    assert.strictEqual(crashNotify.crashMarkerAgeMs({ crashedAtMs: now - 1000 }, now), 1000);
+
+    // 老版本标记没有 crashedAtMs：按本地时间解析 timeText（与看门狗 timeText() 同格式）
+    const pad = (n) => String(n).padStart(2, '0');
+    const t = new Date(now - 5 * 60 * 1000);
+    const timeText = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())} ` +
+        `${pad(t.getHours())}:${pad(t.getMinutes())}:${pad(t.getSeconds())}`;
+    const age = crashNotify.crashMarkerAgeMs({ timeText }, now);
+    assert.ok(Math.abs(age - 5 * 60 * 1000) < 5000, `应约为 5 分钟，实际 ${age}`);
+
+    assert.strictEqual(crashNotify.crashMarkerAgeMs({}, now), null, '无从判断时返回 null（按最新处理，不误吞报告）');
+});
+
+test('崩溃播报有时效：标记超过 30 分钟只留痕、不再发 Telegram；新鲜标记照常播报', async () => {
+    const fs = require('fs');
+    const { stubModule } = require('./helpers/memoryDb');
+    const root = path.join(__dirname, '..');
+    const botPath = path.join(root, 'bot.js');
+    const cfgPath = path.join(root, 'config.js');
+    const opLogPath = path.join(root, 'utils', 'opLog.js');
+    const markerPath = path.join(root, 'watchdog', 'crash-marker.json');
+    const savedBot = require.cache[botPath];
+    const savedCfg = require.cache[cfgPath];
+    const savedOpLog = require.cache[opLogPath];
+    const sent = [];
+    const logged = [];
+    stubModule(botPath, { async sendMessage(chatId, text) { sent.push({ chatId, text }); return {}; } });
+    stubModule(cfgPath, { ADMIN_CHAT_IDS: [111] });
+    stubModule(opLogPath, { logOperation: async (entry) => { logged.push(entry); } });
+
+    const crashNotify = require('../utils/crashNotify');
+    const marker = crashNotify.MARKER_FILE;
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    try {
+        // 31 分钟前崩的（典型场景：看门狗达到重启上限后退出，用户隔很久才手动启动）
+        fs.writeFileSync(marker, JSON.stringify({
+            reason: '进程异常退出（exitCode=1）',
+            crashedAtMs: Date.now() - 31 * 60 * 1000,
+            reportMaxAgeMs: 30 * 60 * 1000,
+            tail: [outLine('ERRO', 'boom')]
+        }));
+        const stale = await crashNotify.reportRestartFromWatchdog();
+        assert.strictEqual(stale.reported, false, '过期标记不播报');
+        assert.strictEqual(stale.reason, 'stale');
+        assert.strictEqual(sent.length, 0, '过期时不该发任何 Telegram 消息');
+        assert.strictEqual(logged.length, 1, '仍要写一条 opLog 留痕');
+        assert.strictEqual(logged[0].action, 'bot_watchdog_restart');
+        assert.strictEqual(logged[0].detail.stale, true, '留痕里注明"过期未播报"');
+        assert.ok(!fs.existsSync(marker), '标记读完即删');
+
+        // 刚崩完、看门狗立刻拉起的正常路径：照常播报
+        fs.writeFileSync(marker, JSON.stringify({
+            reason: '进程异常退出（exitCode=1）',
+            crashedAtMs: Date.now() - 5000,
+            tail: [outLine('ERRO', 'boom')]
+        }));
+        const fresh = await crashNotify.reportRestartFromWatchdog();
+        assert.strictEqual(fresh.reported, true);
+        assert.strictEqual(sent.length, 1, '新鲜崩溃照常播报「BOT重启成功」');
+        assert.match(sent[0].text, /^♻️ BOT重启成功/);
+    } finally {
+        try { fs.unlinkSync(marker); } catch { }
+        if (savedBot) require.cache[botPath] = savedBot; else delete require.cache[botPath];
+        if (savedCfg) require.cache[cfgPath] = savedCfg; else delete require.cache[cfgPath];
+        if (savedOpLog) require.cache[opLogPath] = savedOpLog; else delete require.cache[opLogPath];
+    }
+});
+
+test('看门狗写标记时带上崩溃时刻与时效上限（bot 侧才能判断过期）', () => {
+    const wdSrc = require('fs').readFileSync(path.join(__dirname, '..', 'watchdog.js'), 'utf8');
+    assert.match(wdSrc, /crashedAtMs:\s*Date\.now\(\)/, '标记要写崩溃发生时刻');
+    assert.match(wdSrc, /reportMaxAgeMs:\s*cfg\.reportMaxAgeMs/, '标记要带时效上限（bot 侧沿用）');
+
+    const cfgSrc = require('fs').readFileSync(path.join(__dirname, '..', 'watchdog', 'config.js'), 'utf8');
+    assert.match(cfgSrc, /WATCHDOG_REPORT_MAX_AGE_MIN',\s*30\)/, '默认 30 分钟，可用 WATCHDOG_REPORT_MAX_AGE_MIN 调整');
+    const built = buildConfig([]);
+    assert.ok(built.reportMaxAgeMs > 0, '配置里要能读到时效上限（毫秒）');
+});
+
 test('重启播报已移交给主 bot：bot 侧自己发「重启成功」，看门狗不再补发', () => {
     const crashNotify = require('../utils/crashNotify');
     const crashSrc = require('fs').readFileSync(path.join(__dirname, '..', 'utils', 'crashNotify.js'), 'utf8');
@@ -365,6 +451,124 @@ test('bot 侧重启播报：没配置 ADMIN_CHAT_ID 时不发也不抛错', asyn
     } finally {
         if (savedCfg) require.cache[cfgPath] = savedCfg; else delete require.cache[cfgPath];
     }
+});
+
+// ---------------- 通知去向：通知群（话题群） ----------------
+
+test('通知去向：配了通知群就只发那个话题，不再私聊管理员；填 0 则退回管理员私聊', () => {
+    const crashNotify = require('../utils/crashNotify');
+    const cfgPath = path.join(__dirname, '..', 'config.js');
+    const savedCfg = require.cache[cfgPath];
+    const { stubModule } = require('./helpers/memoryDb');
+    try {
+        // 配了通知群 → 只发那一个话题
+        stubModule(cfgPath, { STARTUP_NOTIFY_CHAT_ID: -1002223278475, STARTUP_NOTIFY_THREAD_ID: 85, ADMIN_CHAT_IDS: [111, 222] });
+        assert.deepStrictEqual(crashNotify.notifyTargets(), [{ chatId: -1002223278475, threadId: 85 }]);
+
+        // 未配置（0）→ 退回所有管理员私聊
+        stubModule(cfgPath, { STARTUP_NOTIFY_CHAT_ID: 0, ADMIN_CHAT_IDS: [111, 222] });
+        assert.deepStrictEqual(crashNotify.notifyTargets(), [
+            { chatId: 111, threadId: undefined },
+            { chatId: 222, threadId: undefined }
+        ]);
+    } finally {
+        if (savedCfg) require.cache[cfgPath] = savedCfg; else delete require.cache[cfgPath];
+    }
+});
+
+test('看门狗侧收件人：配了 notifyChatId 就只发那个话题（带 message_thread_id）', () => {
+    const targets = notify.reportTargets({ notifyChatId: -1002223278475, notifyThreadId: 85, adminChatIds: [111] });
+    assert.deepStrictEqual(targets, [{ chatId: -1002223278475, threadId: 85 }], '不再发管理员私聊');
+    assert.deepStrictEqual(
+        notify.reportTargets({ notifyChatId: 0, adminChatIds: [111, 222] }),
+        [{ chatId: 111, threadId: null }, { chatId: 222, threadId: null }],
+        '填 0 退回管理员私聊'
+    );
+    assert.deepStrictEqual(notify.reportTargets({}), [], '都没配 → 没有收件人');
+    assert.deepStrictEqual(notify.reportTargets({ notifyChatId: -100 }), [{ chatId: -100, threadId: null }],
+        '没配话题 ID 时按普通会话发');
+
+    // 话题群必须带 message_thread_id（否则消息只会落到 General 话题）
+    const src = require('fs').readFileSync(path.join(__dirname, '..', 'watchdog', 'notify.js'), 'utf8');
+    assert.match(src, /params\.message_thread_id = String\(threadId\)/);
+    assert.match(src, /sendMessage\(cfg\.telegramToken, chatId, text, threadId\)/);
+    // 看门狗把通知群配置透传给短命通知进程
+    const wdSrc = require('fs').readFileSync(path.join(__dirname, '..', 'watchdog.js'), 'utf8');
+    assert.match(wdSrc, /notifyChatId: cfg\.notifyChatId/);
+    assert.match(wdSrc, /notifyThreadId: cfg\.notifyThreadId/);
+    const nbotSrc = require('fs').readFileSync(path.join(__dirname, '..', 'watchdog', 'notify-bot.js'), 'utf8');
+    assert.match(nbotSrc, /notifyChatId: payload\.notifyChatId/);
+});
+
+test('看门狗配置：默认通知到启动话题群（-1002223278475 / 话题 85），可用环境变量改', () => {
+    const built = buildConfig([]);
+    assert.strictEqual(built.notifyChatId, -1002223278475);
+    assert.strictEqual(built.notifyThreadId, 85);
+    const cfgSrc = require('fs').readFileSync(path.join(__dirname, '..', 'watchdog', 'config.js'), 'utf8');
+    assert.match(cfgSrc, /envInt\('STARTUP_NOTIFY_CHAT_ID',\s*-1002223278475\)/);
+    assert.match(cfgSrc, /envInt\('STARTUP_NOTIFY_THREAD_ID',\s*85\)/);
+});
+
+test('bot 侧启动播报：「🚀 BOT已启动」发到通知群的话题（每次启动都发）', async () => {
+    const { stubModule } = require('./helpers/memoryDb');
+    const root = path.join(__dirname, '..');
+    const botPath = path.join(root, 'bot.js');
+    const cfgPath = path.join(root, 'config.js');
+    const dbPath = path.join(root, 'database.js');
+    const savedBot = require.cache[botPath];
+    const savedCfg = require.cache[cfgPath];
+    const savedDb = require.cache[dbPath];
+    const sent = [];
+    stubModule(botPath, { async sendMessage(chatId, text, opts) { sent.push({ chatId, text, opts }); return {}; } });
+    stubModule(cfgPath, { STARTUP_NOTIFY_CHAT_ID: -1002223278475, STARTUP_NOTIFY_THREAD_ID: 85, ADMIN_CHAT_IDS: [111] });
+    stubModule(dbPath, { getDatabaseName: () => 'telegram_bot' });
+    try {
+        const crashNotify = require('../utils/crashNotify');
+        const res = await crashNotify.reportBotStarted();
+        assert.strictEqual(res.sent, 1);
+        assert.strictEqual(sent.length, 1);
+        assert.strictEqual(sent[0].chatId, -1002223278475, '只发通知群，不发管理员私聊');
+        assert.strictEqual(sent[0].opts.message_thread_id, 85, '发到指定话题');
+        assert.match(sent[0].text, /^🚀 BOT已启动/);
+        assert.match(sent[0].text, /数据库：telegram_bot/);
+    } finally {
+        if (savedBot) require.cache[botPath] = savedBot; else delete require.cache[botPath];
+        if (savedCfg) require.cache[cfgPath] = savedCfg; else delete require.cache[cfgPath];
+        if (savedDb) require.cache[dbPath] = savedDb; else delete require.cache[dbPath];
+    }
+});
+
+test('bot 侧重启播报：配了通知群也只发主题群的话题（不再私聊管理员）', async () => {
+    const { stubModule } = require('./helpers/memoryDb');
+    const root = path.join(__dirname, '..');
+    const botPath = path.join(root, 'bot.js');
+    const cfgPath = path.join(root, 'config.js');
+    const savedBot = require.cache[botPath];
+    const savedCfg = require.cache[cfgPath];
+    const sent = [];
+    stubModule(botPath, { async sendMessage(chatId, text, opts) { sent.push({ chatId, text, opts }); return {}; } });
+    stubModule(cfgPath, { STARTUP_NOTIFY_CHAT_ID: -1002223278475, STARTUP_NOTIFY_THREAD_ID: 85, ADMIN_CHAT_IDS: [111, 222] });
+    try {
+        const crashNotify = require('../utils/crashNotify');
+        const n = await crashNotify.sendRestartReport({ tail: [], reportLimit: 3 });
+        assert.strictEqual(n, 1, '只发一个收件会话');
+        assert.deepStrictEqual(sent.map(s => s.chatId), [-1002223278475], '不再私聊管理员');
+        assert.strictEqual(sent[0].opts.message_thread_id, 85);
+        assert.match(sent[0].text, /^♻️ BOT重启成功/);
+    } finally {
+        if (savedBot) require.cache[botPath] = savedBot; else delete require.cache[botPath];
+        if (savedCfg) require.cache[cfgPath] = savedCfg; else delete require.cache[cfgPath];
+    }
+});
+
+test('index.js 接线：启动播报 + 通知专用会话不处理消息/成员变动', () => {
+    const idxSrc = require('fs').readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    assert.match(idxSrc, /reportBotStarted\(\)/, '每次启动都要播报「🚀 BOT已启动」');
+    assert.match(idxSrc, /isIgnoredChat/, '通知专用会话要走 isIgnoredChat 门禁');
+    // 四个入口都要挡住通知专用会话
+    assert.match(idxSrc, /isIgnoredChat\(msg\.chat\.id\)/, '消息入口');
+    assert.match(idxSrc, /isIgnoredChat\(chat\.id\)/, 'my_chat_member / chat_join_request 入口');
+    assert.match(idxSrc, /isIgnoredChat\(update\.chat\.id\)/, 'chat_member 入口');
 });
 
 // ---------------- 孤儿进程防护（看门狗被硬杀时 bot 要自己退出） ----------------

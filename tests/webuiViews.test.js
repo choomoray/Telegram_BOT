@@ -45,6 +45,12 @@ function makeElement(sel = '') {
         disabled: false,
         open: false,
         parentElement: null,
+        // 滚动位置：真实浏览器在内容变短时会把 scrollTop 夹回去（见下面的 innerHTML setter），
+        // 用来验证「刷新 / 瀑布流重排后浏览位置不动」
+        scrollTop: 0,
+        scrollLeft: 0,
+        scrollHeight: 0,
+        clientHeight: 0,
         classList: {
             add: (...c) => c.forEach(x => classes.add(x)),
             remove: (...c) => c.forEach(x => classes.delete(x)),
@@ -59,6 +65,9 @@ function makeElement(sel = '') {
         set innerHTML(v) {
             html = String(v ?? '');
             children = parseTree(html, el);
+            // 浏览器行为：内容被整体换掉后，原来的滚动位置会被夹回有效范围
+            // （内容变短时就是 0）—— 这里照做，好让"刷新会不会跳回最上面"可被断言
+            el.scrollTop = 0;
         },
         get children() { return children; },
         addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
@@ -992,6 +1001,78 @@ test('瀑布流：按每张卡的内容高度算 grid 行跨度（"先第一行�
     env.sandbox.window.__thumbLoad(img);
     assert.strictEqual(cards[0].style.gridRowEnd, `span ${Math.ceil((60 + 14) / (8 + 14))}`,
         '图片加载完按新高度重排该容器');
+});
+
+test('瀑布流重排不跳回最上面：量高度时不会把卡片复位成 1 行（容器高度不会瞬间塌掉）', async () => {
+    const card = (groupId, text) => ({
+        group_id: groupId, is_group: 1, is_delete: 0, cleanable: false,
+        mediaCount: 1, subgroups: 1, types: ['video'],
+        preview: { file_unique_id: `AQAD${groupId}`, media_type: 'video', thumbable: true },
+        text, tags: [], group: { chat_id: -100, message_id: 11 }, channel: null
+    });
+    const fx = fixtures();
+    fx['/api/media'] = { total: 3, page: 1, pageSize: 24, totalPages: 1, items: [card('1', '一'), card('2', '二'), card('3', '三')] };
+    const env = await boot(fx);
+    const view = await goto(env, 'media');
+    const grid = view.querySelector('.media-grid--fit');
+    const cards = [...grid.children];
+    assert.ok(cards.length >= 2);
+
+    // 用户滚到瀑布流中间：视频缩略图（现从 Telegram 下载，来得最晚）加载完会触发重排
+    view.scrollTop = 420;
+    // 量高度的瞬间若出现"卡片被复位成 span 1"的中间态 → 容器总高度塌成 8px/张 →
+    // 浏览器把滚动位置夹回 0，表现就是"视频一刷新就跳回最上面"
+    let collapsedAtMeasure = false;
+    cards.forEach(cardEl => {
+        cardEl.getBoundingClientRect = () => {
+            if (cardEl.style.gridRowEnd === 'span 1') collapsedAtMeasure = true;
+            return { height: 400, width: 200, top: 0, left: 0 };
+        };
+    });
+    env.sandbox.window.__layoutFlowGrid(view);
+
+    assert.strictEqual(collapsedAtMeasure, false, '量高度时不应把卡片复位成 1 行（容器高度会瞬间塌掉）');
+    assert.strictEqual(view.scrollTop, 420, '重排只改布局，浏览位置不动');
+
+    // 缩略图 onload 的真实路径（__thumbLoad → relayoutFlowOf）同样不许动浏览位置
+    view.scrollTop = 260;
+    const img = cards[0].querySelector('.thumb-img').querySelector('.thumb-src');
+    img.naturalWidth = 720;
+    img.naturalHeight = 1280;
+    env.sandbox.window.__thumbLoad(img);
+    assert.strictEqual(view.scrollTop, 260, '视频封面按真实比例定高后，浏览位置仍然不动');
+});
+
+test('刷新（自动刷新 / 刷新按钮 / R）保持浏览位置：只重排布局，不跳回最上面', async () => {
+    const fx = fixtures();
+    fx['/api/media'] = {
+        total: 1, page: 1, pageSize: 24, totalPages: 1,
+        items: [{
+            group_id: '-100_1', is_group: 2, is_delete: 0, cleanable: false,
+            mediaCount: 1, subgroups: 1, types: ['video'],
+            preview: { file_unique_id: 'AQAD1', media_type: 'video', thumbable: true },
+            text: '视频卡片', tags: [], group: { chat_id: -100, message_id: 11 }, channel: null
+        }]
+    };
+    const env = await boot(fx);
+    const view = await goto(env, 'media');
+    view.scrollTop = 360;   // 浏览到瀑布流中间
+
+    // 刷新按钮与「自动刷新」走的是同一条 refreshCurrent 路径
+    await env.document.querySelector('#refresh-btn').fire('click');
+    await tick();
+
+    assert.strictEqual(view.scrollTop, 360, '刷新后应停在原浏览位置');
+    assert.match(view.innerHTML, /瀑布流|media-grid/, '内容确实重新渲染了（不是没刷新）');
+});
+
+test('切换视图仍回到顶部：保位只作用于「同一视图的刷新」', async () => {
+    const fx = fixtures();
+    const env = await boot(fx);
+    const view = await goto(env, 'media');
+    view.scrollTop = 500;
+    await goto(env, 'tags');
+    assert.strictEqual(view.scrollTop, 0, '换视图是全新内容，应回到顶部');
 });
 
 test('媒体库：卡片瀑布流按容器宽度自适应（列宽固定 228px，与原来的网格同尺度）', () => {

@@ -1,12 +1,12 @@
 // tests/replyLocation.test.js
 /**
  * 消息回复模式的"回复位置"语义：
- *   - 频道转发消息（message.channel_forward 双位置）→ **必须弹出「👥 回复在群组 / 📢 回复在频道」按钮**，
- *     不能静默选一个位置；
- *   - 未指定位置时**默认回复在群组**（不是频道）；
- *   - 选定位置后就绪消息上要有「🔄 更改为发送至…」一键切换按钮；
- *   - 位置选择不能"粘住"状态：否则后续媒体既不询问、也不按默认群组，会静默回复到频道；
- *   - 只有单边位置（缺群组位置等）时按可用位置直接进入就绪，不弹空按钮。
+ *   - **默认回复在群组**，不再先弹「👥 回复在群组 / 📢 回复在频道」让用户点一下
+ *     （多一步操作，而且用户在选之前发媒体会被拦下）；
+ *   - 群组/频道双位置都在（频道转发消息）时，就绪消息下带
+ *     「🔄 更改为发送至📢 频道」按钮，随时一键切换；
+ *   - 只有单边位置（缺群组位置等）时按可用位置直接进入就绪，不弹空按钮；
+ *   - 老消息上遗留的「回复在群组/频道」按钮仍可用（兼容：就绪态下等价于切换位置）。
  */
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -113,41 +113,54 @@ function findButton(edits, callbackData) {
     return null;
 }
 
-// ---------------- 询问回复位置 ----------------
+// ---------------- 默认回复位置：群组（+ 一键切到频道） ----------------
 
-test('/message_reply 定位到频道转发消息：弹出「回复在群组 / 回复在频道」按钮询问', async () => {
+test('/message_reply 定位到频道转发消息：默认回复在群组，就绪消息上带「切换到频道」按钮', async () => {
     resetStore();
     seedForwardMessage();
     startReplyMode();
-    const { edits } = trackBot();
+    const { sent, edits } = trackBot();
 
     await locate();
 
-    const groupBtn = findButton(edits, 'mreply_loc:group');
-    const channelBtn = findButton(edits, 'mreply_loc:channel');
-    assert.ok(groupBtn, '必须有「回复在群组」按钮');
-    assert.ok(channelBtn, '必须有「回复在频道」按钮');
-    assert.deepStrictEqual([groupBtn.text, channelBtn.text], ['👥 回复在群组', '📢 回复在频道']);
-
-    const prompt = edits.find(e => e.text.includes('请选择回复位置'));
-    assert.ok(prompt, '应提示"请选择回复位置"');
+    // 不再弹「请选择回复位置」：直接按默认位置（群组）进入就绪，
+    // 双位置都在时给一个「🔄 更改为发送至📢 频道」按钮即可
+    assert.ok(!findButton(edits, 'mreply_loc:group'), '不再弹位置选择按钮');
+    assert.ok(!findButton(edits, 'mreply_loc:channel'), '不再弹位置选择按钮');
 
     const st = getRawUserState(USER);
-    assert.strictEqual(st.step, 'waiting_reply_location');
-    assert.ok(st.pendingMessageDoc, '应暂存待回复的 message');
+    assert.strictEqual(st.step, 'ready', '定位后直接就绪（不必先点按钮）');
+    assert.strictEqual(st.targetChatId, GROUP_CHAT, '默认回复在群组');
+    assert.strictEqual(st.targetMessageId, GROUP_MESSAGE_ID);
+    assert.ok(edits.some(e => (e.text || '').includes('已选择回复在👥 群组')),
+        `就绪文案应显示群组，实际：${edits.map(e => e.text).join(' | ')}`);
+    assert.ok(sent.some(s => s.chatId === GROUP_CHAT && s.text.includes('正在回复该消息')), '提示消息发在群里');
 
-    // 还没选位置就发媒体 → 只提示先点按钮，不静默回复
-    await handleMessageReplyMode(sendMsg(501, {
-        photo: [{ file_id: 'AgACX', file_unique_id: 'PX1' }]
+    const toChannel = findButton(edits, 'mreply_switch:channel');
+    assert.ok(toChannel, '双位置都在时应提供一键切换到频道的按钮');
+    assert.ok(toChannel.text.includes('频道'), `按钮文案应指向频道，实际：${toChannel.text}`);
+    assert.ok(!findButton(edits, 'mreply_switch:group'), '当前就在群组，不该再给"切回群组"的按钮');
+
+    // 默认位置立即可用：不必先点任何按钮，直接发媒体就回复到群组
+    const NEW_FILE = 'RF_DEFAULT';
+    const replyCalls = [];
+    bot.sendPhoto = async (chatId, fileId, opts) => {
+        replyCalls.push({ chatId, opts });
+        return { message_id: 9500, chat: { id: chatId }, photo: [{ file_id: fileId, file_unique_id: NEW_FILE }] };
+    };
+    replyMode.clearUserContext(USER);
+    await handleMessageReplyMode(sendMsg(520, {
+        photo: [{ file_id: 'AgACDEF', file_unique_id: NEW_FILE }]
     }), getRawUserState(USER));
-    assert.ok(!store.get(COLLECTIONS.MEDIA).some(m => m.file_unique_id === 'PX1'), '未选位置前不应回复任何媒体');
+    assert.deepStrictEqual(replyCalls.map(c => c.chatId), [GROUP_CHAT], '未点任何按钮也应回复到默认的群组位置');
+    assert.strictEqual(replyCalls[0].opts.reply_to_message_id, GROUP_MESSAGE_ID);
 });
 
 test('默认回复位置是群组：解析 null 位置时取群组位置而不是频道', async () => {
     resetStore();
     seedForwardMessage();
     startReplyMode();
-    const { edits } = trackBot();
+    trackBot();
 
     await locate();
     // 直接走"未指定位置"的解析（与按钮选择无关的默认值）
@@ -155,75 +168,94 @@ test('默认回复位置是群组：解析 null 位置时取群组位置而不�
     assert.strictEqual(resolved.chatId, GROUP_CHAT, '默认应回复在群组');
     assert.strictEqual(resolved.messageId, GROUP_MESSAGE_ID);
 
-    // 用户点「回复在群组」后进入就绪，提示消息也发到群组
-    await replyMode.handleLocationCallback(callbackQuery('mreply_loc:group'));
-    const ready = getRawUserState(USER);
-    assert.strictEqual(ready.step, 'ready');
-    assert.strictEqual(ready.targetChatId, GROUP_CHAT);
-    assert.strictEqual(ready.targetMessageId, GROUP_MESSAGE_ID);
-    assert.ok(edits.some(e => e.text.includes('已选择回复在👥 群组')), '就绪提示应显示已选择群组');
-
-    // 未选位置时（replyTarget 为空）也要按默认群组走
+    // 显式指定 /message_reply_group：不弹按钮、直接群组
     resetStore();
     seedForwardMessage();
     startReplyMode('group');
     const t2 = trackBot();
     await locate();
     const st2 = getRawUserState(USER);
-    assert.strictEqual(st2.step, 'ready', '显式指定 /message_reply_group 时不询问');
+    assert.strictEqual(st2.step, 'ready');
     assert.strictEqual(st2.targetChatId, GROUP_CHAT);
     assert.ok(t2.edits.some(e => e.text.includes('已选择回复在👥 群组')));
+
+    // 显式指定 /message_reply_channel：直接频道，并给"切回群组"的按钮
+    resetStore();
+    seedForwardMessage();
+    startReplyMode('channel');
+    const t3 = trackBot();
+    await locate();
+    const st3 = getRawUserState(USER);
+    assert.strictEqual(st3.step, 'ready');
+    assert.strictEqual(st3.targetChatId, CHANNEL_CHAT);
+    assert.ok(t3.edits.some(e => e.text.includes('已选择回复在📢 频道')));
+    assert.ok(findButton(t3.edits, 'mreply_switch:group'), '频道就绪时应提供切回群组的按钮');
 });
 
 // ---------------- 一键切换按钮 ----------------
 
-test('选定位置后：就绪消息带「🔄 更改为发送至…」一键切换按钮，点击即切换', async () => {
+test('就绪后点「更改为发送至…」：位置随之改变，后续媒体沿用新位置', async () => {
     resetStore();
     seedForwardMessage();
     startReplyMode();
     const { edits } = trackBot();
 
     await locate();
-    await replyMode.handleLocationCallback(callbackQuery('mreply_loc:group'));
 
     // 当前在群组 → 按钮指向频道
-    const toChannel = findButton(edits, 'mreply_switch:channel');
-    assert.ok(toChannel, '群组就绪时应提供切换到频道的按钮');
-    assert.ok(toChannel.text.includes('频道'), `按钮文案应指向频道，实际：${toChannel.text}`);
-
-    // 点击切换 → 位置变成频道，并且按钮反过来指向群组
     const before = edits.length;
     await replyMode.handleSwitchLocationCallback(callbackQuery('mreply_switch:channel'));
 
     const st = getRawUserState(USER);
+    assert.strictEqual(st.step, 'ready');
     assert.strictEqual(st.targetChatId, CHANNEL_CHAT, '应已切换到频道');
     assert.strictEqual(st.targetMessageId, CHANNEL_MESSAGE_ID);
+    assert.strictEqual(st.replyTarget, 'channel', '切换结果要落进状态，后续媒体沿用');
     assert.ok(edits.slice(before).some(e => (e.text || '').includes('已选择回复在📢 频道')));
     assert.ok(findButton(edits.slice(before), 'mreply_switch:group'), '切换后按钮应反过来指向群组');
-});
 
-test('位置选择只在用户点过按钮后才生效：后续媒体沿用选择、可用切换按钮改回群组', async () => {
-    resetStore();
-    seedForwardMessage();
-    startReplyMode();
-    const { edits } = trackBot();
+    // 后续媒体真的回复到频道（沿用切换后的位置）
+    const NEW_FILE = 'RF_SWITCH';
+    const replyCalls = [];
+    bot.sendPhoto = async (chatId, fileId, opts) => {
+        replyCalls.push({ chatId, opts });
+        return { message_id: 9600, chat: { id: chatId }, photo: [{ file_id: fileId, file_unique_id: NEW_FILE }] };
+    };
+    replyMode.clearUserContext(USER);
+    await handleMessageReplyMode(sendMsg(530, {
+        photo: [{ file_id: 'AgACSW', file_unique_id: NEW_FILE }]
+    }), getRawUserState(USER));
+    assert.deepStrictEqual(replyCalls.map(c => c.chatId), [CHANNEL_CHAT], '切换后应回复到频道位置');
+    assert.strictEqual(replyCalls[0].opts.reply_to_message_id, CHANNEL_MESSAGE_ID);
 
-    // 未点按钮前：replyTarget 为空 → 必须询问（默认群组的按钮先给出）
-    await locate();
-    assert.ok(!getRawUserState(USER).replyTarget, '未点按钮前不应有位置偏好');
-    assert.strictEqual(getRawUserState(USER).step, 'waiting_reply_location');
-
-    // 用户点「回复在频道」→ 选择落在状态里
-    await replyMode.handleLocationCallback(callbackQuery('mreply_loc:channel'));
-    const stAfterPick = getRawUserState(USER);
-    assert.strictEqual(stAfterPick.targetChatId, CHANNEL_CHAT);
-    assert.strictEqual(stAfterPick.replyTarget, 'channel', '按钮选择应成为当前回复位置（后续媒体沿用）');
-    assert.ok(findButton(edits, 'mreply_switch:group'), '应提供一键切换回群组的按钮');
-
-    // 用切换按钮改回群组 → 后续媒体回到群组
+    // 再切回群组 → 后续媒体回到群组
     await replyMode.handleSwitchLocationCallback(callbackQuery('mreply_switch:group'));
     assert.strictEqual(getRawUserState(USER).targetChatId, GROUP_CHAT, '一键切换后回复群组');
     assert.ok(findButton(edits, 'mreply_switch:channel'), '切换后按钮反过来指向频道');
+});
+
+test('老消息上的「回复在群组/频道」按钮仍可用（向后兼容）', async () => {
+    resetStore();
+    seedForwardMessage();
+    trackBot();
+
+    // 老流程留下的状态（新版定位后不再产生 waiting_reply_location）
+    setUserState(USER, {
+        mode: 'message_reply', step: 'waiting_reply_location',
+        targetGroupId: GROUP_ID,
+        pendingMessageDoc: store.get(COLLECTIONS.MESSAGE)[0],
+        pendingMediaDoc: store.get(COLLECTIONS.MEDIA)[0],
+        processingMsgId: 4000, packSize: null,
+        _onExit: async () => { }, lastActivity: Date.now()
+    });
+    await replyMode.handleLocationCallback(callbackQuery('mreply_loc:channel'));
+    const st = getRawUserState(USER);
+    assert.strictEqual(st.step, 'ready');
+    assert.strictEqual(st.targetChatId, CHANNEL_CHAT);
+
+    // 就绪态下再点老按钮 = 切换位置（等价于新的切换按钮）
+    await replyMode.handleLocationCallback(callbackQuery('mreply_loc:group'));
+    assert.strictEqual(getRawUserState(USER).targetChatId, GROUP_CHAT);
 });
 
 // ---------------- 单边位置 ----------------
@@ -301,7 +333,7 @@ test('非转发消息：直接用消息自身位置，不弹位置按钮', async
 
 // ---------------- 真实数据形态：位置只存在 media 上 / 空描述媒体 ----------------
 
-test('message 无 channel_forward：用 media 双位置照样弹「群组/频道」按钮', async () => {
+test('message 无 channel_forward：用 media 双位置照样默认群组 + 给切换按钮', async () => {
     resetStore();
     // 真实库里大量媒体是这样：message 只有文本（没有 channel_forward），双位置只在 media 上
     store.set(COLLECTIONS.MESSAGE, [{
@@ -320,18 +352,14 @@ test('message 无 channel_forward：用 media 双位置照样弹「群组/频道
 
     await locate();
 
-    assert.ok(findButton(edits, 'mreply_loc:group'), '只有 media 双位置时也要能选群组');
-    assert.ok(findButton(edits, 'mreply_loc:channel'));
-    assert.strictEqual(getRawUserState(USER).step, 'waiting_reply_location');
-
-    // 选群组 → 回复到群组位置（media.group）
-    await replyMode.handleLocationCallback(callbackQuery('mreply_loc:group'));
     const st = getRawUserState(USER);
-    assert.strictEqual(st.targetChatId, GROUP_CHAT);
+    assert.strictEqual(st.step, 'ready', '只有 media 双位置时也直接就绪');
+    assert.strictEqual(st.targetChatId, GROUP_CHAT, '默认群组位置（media.group）');
     assert.strictEqual(st.targetMessageId, GROUP_MESSAGE_ID);
+    assert.ok(findButton(edits, 'mreply_switch:channel'), '双位置都在 → 应给"切换到频道"的按钮');
 });
 
-test('空描述媒体（没有 message 记录）：也能定位并弹出「群组/频道」按钮', async () => {
+test('空描述媒体（没有 message 记录）：也能定位，默认回复在群组', async () => {
     resetStore();
     // 真实库里"有位置的媒体"绝大多数没有 message 记录（空描述）
     store.set(COLLECTIONS.MESSAGE, []);
@@ -347,18 +375,19 @@ test('空描述媒体（没有 message 记录）：也能定位并弹出「群�
 
     await locate();
 
-    assert.ok(findButton(edits, 'mreply_loc:group'), '空描述媒体也要能选群组');
-    assert.ok(findButton(edits, 'mreply_loc:channel'));
-    assert.strictEqual(getRawUserState(USER).step, 'waiting_reply_location');
+    const st = getRawUserState(USER);
+    assert.strictEqual(st.step, 'ready');
+    assert.strictEqual(st.targetChatId, GROUP_CHAT, '空描述媒体默认也回复在群组位置');
+    assert.ok(findButton(edits, 'mreply_switch:channel'), '空描述媒体同样给切换按钮');
 
-    // 选群组并真正回复一条新媒体（回复目标 = media.group 的位置）
+    // 直接回复一条新媒体：回复目标 = media.group 的位置
     const NEW_FILE = 'RF_NEW2';
     const replyCalls = [];
     bot.sendPhoto = async (chatId, fileId, opts) => {
         replyCalls.push({ chatId, opts });
         return { message_id: 9200, chat: { id: chatId }, photo: [{ file_id: fileId, file_unique_id: NEW_FILE }] };
     };
-    await replyMode.handleLocationCallback(callbackQuery('mreply_loc:group'));
+    replyMode.clearUserContext(USER);
     await handleMessageReplyMode(sendMsg(700, {
         photo: [{ file_id: 'AgACNEW2', file_unique_id: NEW_FILE }]
     }), getRawUserState(USER));
