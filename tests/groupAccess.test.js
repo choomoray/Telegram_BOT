@@ -271,9 +271,9 @@ test('私聊：无权限指令静默忽略；白名单命令照旧可用', async
     assert.ok(sent.some(s => /已进入查找模式/.test(s.text || '')), '白名单命令仍然可用');
 });
 
-// ---------------- 5. 普通用户：随机视频 / 随机图片 ----------------
+// ---------------- 5. 普通用户：搜索 + 随机看片 ----------------
 
-test('普通用户：私聊可以用 /random_pictures 与 /random_videos（其它指令仍静默）', async () => {
+test('普通用户：私聊可以用 /search、/random_pictures、/random_videos（其它指令仍静默）', async () => {
     resetStore();
     trackBot();
     const MEMBER_USER = 666;
@@ -293,6 +293,11 @@ test('普通用户：私聊可以用 /random_pictures 与 /random_videos（其�
         message_id: messageId, text
     });
 
+    // 搜索：进入查找模式（用户要求把搜索权限开放给普通用户）
+    await handlePrivateMessage(priv(9, '/search'));
+    assert.ok(sent.some(s => /已进入查找模式/.test(s.text || '')), '普通用户应能用 /search');
+
+    sent.length = 0;
     await handlePrivateMessage(priv(10, '/random_pictures'));
     assert.ok(sent.some(s => /正在搜集图片中/.test(s.text || '')), '普通用户应能用 /random_pictures');
 
@@ -300,14 +305,14 @@ test('普通用户：私聊可以用 /random_pictures 与 /random_videos（其�
     await handlePrivateMessage(priv(11, '/random_videos'));
     assert.ok(sent.some(s => /正在搜集视频中/.test(s.text || '')), '普通用户应能用 /random_videos');
 
-    // 其它指令（含白名单命令 /search、管理员命令 /clean）→ 静默，且不出现"无权限/封禁"提示
+    // 其它指令（管理员命令）→ 静默，且不出现"无权限/封禁"提示
     sent.length = 0;
-    await handlePrivateMessage(priv(12, '/search'));
-    await handlePrivateMessage(priv(13, '/clean'));
+    await handlePrivateMessage(priv(12, '/clean'));
+    await handlePrivateMessage(priv(13, '/send'));
     assert.strictEqual(sent.length, 0, '普通用户的其它指令必须静默忽略');
 });
 
-test('普通用户：私聊里发普通文本不做查询（静默）', async () => {
+test('普通用户：私聊里发普通文本 = 关键字查询（与 /search 同一份搜索权限）', async () => {
     resetStore();
     trackBot();
     const MEMBER_USER = 667;
@@ -317,15 +322,16 @@ test('普通用户：私聊里发普通文本不做查询（静默）', async ()
         sent.push({ chatId, text, opts });
         return { message_id: 6200 + sent.length, chat: { id: chatId } };
     };
+    bot.editMessageText = async () => true;
 
     await handlePrivateMessage({
         from: { id: MEMBER_USER }, chat: { id: MEMBER_USER, type: 'private' },
         message_id: 20, text: '随便搜点什么'
     });
-    assert.strictEqual(sent.length, 0, '普通用户不能搜索，也不该收到任何提示');
+    assert.ok(sent.some(s => /查询中/.test(s.text || '')), '普通用户的文本查询应被受理（以前是静默拒绝）');
 });
 
-test('被封禁 / 未授权用户：仍然拒绝（随机看片也不给）', async () => {
+test('被封禁 / 未授权用户：仍然拒绝（搜索与随机看片都不给）', async () => {
     resetStore();
     trackBot();
     const BANNED = 668;
@@ -341,14 +347,16 @@ test('被封禁 / 未授权用户：仍然拒绝（随机看片也不给）', as
         message_id: messageId, text
     });
 
-    await handlePrivateMessage(priv(30, '/random_pictures', BANNED));
-    assert.ok(sent.some(s => /被封禁或未被加入白名单/.test(s.text || '')), '封禁用户仍被拒绝');
-    assert.ok(!sent.some(s => /正在搜集图片中/.test(s.text || '')), '封禁用户不得触发随机看片');
+    for (const [label, userId] of [['封禁用户', BANNED], ['未授权用户', STRANGER]]) {
+        sent.length = 0;
+        await handlePrivateMessage(priv(30, '/random_pictures', userId));
+        assert.ok(sent.some(s => /被封禁或未被加入白名单/.test(s.text || '')), `${label}仍被拒绝`);
+        assert.ok(!sent.some(s => /正在搜集图片中/.test(s.text || '')), `${label}不得触发随机看片`);
 
-    sent.length = 0;
-    await handlePrivateMessage(priv(31, '/random_pictures', STRANGER));
-    assert.ok(sent.some(s => /被封禁或未被加入白名单/.test(s.text || '')), '未授权用户仍被拒绝');
-    assert.ok(!sent.some(s => /正在搜集图片中/.test(s.text || '')), '未授权用户不得触发随机看片');
+        sent.length = 0;
+        await handlePrivateMessage(priv(31, '/search', userId));
+        assert.ok(!sent.some(s => /已进入查找模式/.test(s.text || '')), `${label}不得进入查找模式`);
+    }
 });
 
 test('exec_cmd 按钮：非管理员点击静默忽略（不回"无权限"）', async () => {

@@ -55,9 +55,12 @@ const WHITELIST_ALLOWED_COMMANDS = new Set(['/search', '/exit']);
 
 /**
  * 普通用户（在库、未封禁、非白名单）在**私聊**里允许使用的命令
- * 用户要求：随机视频 / 随机图片对普通用户开放（结果发到自己的私聊）
+ * 用户要求：搜索与随机看片对普通用户开放（结果发到自己的私聊）
+ *   - `/search`：进入查找模式（发媒体定位它所在的媒体组）
+ *   - `/exit`：退出当前模式（配合上面两个模式用）
+ *   - `/random_videos`、`/random_pictures`：随机看片
  */
-const MEMBER_ALLOWED_COMMANDS = new Set(['/random_videos', '/random_pictures']);
+const MEMBER_ALLOWED_COMMANDS = new Set(['/search', '/exit', '/random_videos', '/random_pictures']);
 
 /**
  * 非管理员能用的命令集合（按用户层级）：

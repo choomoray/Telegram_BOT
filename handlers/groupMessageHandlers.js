@@ -28,7 +28,7 @@ const { logOperation } = require('../utils/opLog');
 const { getUserState } = require('../states');
 const handleModeMessage = require('./modes');
 const { extractMediaFromMessage } = require('../media'); // 统一媒体提取
-const { isInFlight } = require('../utils/inflight');     // /send 正在发送该文件（防自动转发抢跑）
+const { isInFlight, markInFlight, clearInFlight } = require('../utils/inflight');     // 频道帖落库窗口 / 自动转发去重信号
 
 const SUPPORTED_MEDIA_TYPES = ['photo', 'video', 'audio', 'document'];
 
@@ -111,11 +111,18 @@ async function updateProcessingMessage(msg, processingMessageId, finalText, auto
 
 /**
  * 识别当前群组消息是否为「频道转发」的媒体（关联频道自动转发或手动转发）
- * 识别路径：
- *   1. 转发来源标记：forward_origin.type==='channel'（新版 API）或 forward_from_chat（旧版 API）
- *   2. 自动转发标记 msg.is_automatic_forward === true（Telegram 对"频道→绑定讨论群组"的
- *      自动转发只给该标记、不一定带 forward_origin），结合绑定库 channel_group：
- *      群组文档 { id, type:'group', bind_id } 的 bind_id 即绑定频道 ID
+ *
+ * 识别路径（按可靠性排序）：
+ *   1. 转发来源标记：`forward_origin.type === 'channel'`（新版 API）或 `forward_from_chat`（旧版 API）；
+ *   2. **自动转发**（`msg.is_automatic_forward === true`，Telegram 把频道帖自动转发到绑定讨论群）：
+ *      2.1 `sender_chat` 就是那个频道 —— 新版 Bot API 的自动转发**不带 `forward_origin`**，
+ *          这条是最可靠的来源；匿名群管理员（sender_chat = 群自己）必须排除；
+ *      2.2 绑定库（群 → 频道）：不要求 `type` 字段写对（历史数据可能把讨论群记成 channel）；
+ *      2.3 反向绑定（频道 → 群）：某个频道把 `bind_id` 指向当前群。
+ *
+ * 为什么必须认全：认不出来时，自动转发那条会走"普通群消息收录"分支，
+ * 把同一条媒体**再收录一遍**（只有群组位置、另建一个组）—— 用户反馈的正是这个现象。
+ *
  * @param {Object} msg - 当前收到的群组消息
  * @returns {Promise<{channelChatId: number|null, isAutoForward: boolean}|null>} 频道转发信息，非频道转发返回 null
  */
@@ -137,12 +144,23 @@ async function resolveChannelForwardInfo(msg) {
             return { channelChatId: originChatId, isAutoForward: !!msg.is_automatic_forward };
         }
 
-        // 路径2：自动转发标记 + 绑定库定位频道
+        // 路径2：自动转发标记 + 来源识别
         if (msg.is_automatic_forward) {
+            // 2.1 sender_chat = 来源频道（自动转发最可靠的来源；排除"以群身份发言"的匿名管理员）
+            const sender = msg.sender_chat;
+            if (sender && sender.id && Number(sender.id) !== Number(msg.chat.id)
+                && (!sender.type || sender.type === 'channel')) {
+                return { channelChatId: sender.id, isAutoForward: true };
+            }
+            // 2.2 / 2.3 绑定库：正向（群 → 频道）与反向（频道 → 群）
             const channelGroupCol = getCollection(COLLECTIONS.CHANNEL_GROUP);
-            const groupDoc = await channelGroupCol.findOne({ id: msg.chat.id, type: 'group' });
+            const groupDoc = await channelGroupCol.findOne({ id: msg.chat.id });
             if (groupDoc && groupDoc.bind_id) {
                 return { channelChatId: groupDoc.bind_id, isAutoForward: true };
+            }
+            const channelDoc = await channelGroupCol.findOne({ bind_id: msg.chat.id });
+            if (channelDoc && channelDoc.id) {
+                return { channelChatId: channelDoc.id, isAutoForward: true };
             }
         }
 
@@ -211,18 +229,32 @@ async function transferRecordToGroup(msg, mediaInfo, channelForwardInfo) {
         const messageCol = getCollection(COLLECTIONS.MESSAGE);
         const mediaCol = getCollection(COLLECTIONS.MEDIA);
 
-        const existingMessage = await messageCol.findOne({ file_unique_id: fileUniqueId });
+        let existingMessage = await messageCol.findOne({ file_unique_id: fileUniqueId });
         let existingMedia = await mediaCol.findOne({ file_unique_id: fileUniqueId });
 
-        // 抢跑等待：`/send` 把媒体组发到「频道 + 关联讨论群」时，Telegram 会立刻自动转发，
-        // 此刻机器人自己那一轮发送/落库还没结束 —— 库里查不到这条媒体，照常收录就会另建一个
-        // **无描述、可清理** 的影子媒体组（用户看到"发送时带描述，发到频道后描述没了"）。
-        // 这里如果发现该文件正在被 /send 发送（utils/inflight.js），就短暂等它落库完成再查，
-        // 于是只补一个群组位置、不另建组（描述也就还在原来那条 media 上）。
+        // 抢跑等待：**先等"同一条媒体是否正被另一条处理链落库"，再决定要不要自己收录**。
+        //   - `/send` 把媒体发到「频道 + 关联讨论群」时，Telegram 会立刻自动转发，
+        //     此刻机器人自己那一轮发送/落库还没结束 —— 库里查不到这条媒体，
+        //     照常收录就会另建一个**无描述、可清理**的影子媒体组
+        //     （用户看到"发送时带描述，发到频道后描述没了"）；
+        //   - **频道帖的自动转发**同理：频道侧那条消息与群里的这一条是**两个并发的处理链**，
+        //     频道侧可能还没落库 —— 不等就会把同一条媒体**再收录一遍**
+        //     （只有群组位置、另建一个组；用户反馈的现象）。
+        //     频道帖落库前会 markInFlight（见 handleGroupMessage），这里靠它拿到"正在处理"的信号。
         if (!existingMedia) {
-            for (let i = 0; i < 8 && !existingMedia && isInFlight(fileUniqueId); i++) {
+            const auto = !!msg.is_automatic_forward;
+            for (let i = 0; i < 8 && !existingMedia; i++) {
+                const busy = isInFlight(fileUniqueId);
+                // 没有 in-flight 信号时：自动转发也多等一小会儿（频道侧通常几百毫秒内落库），
+                // 普通手动转发则不等
+                if (!busy && !(auto && i < 3)) break;
                 await new Promise(resolve => setTimeout(resolve, 400));
                 existingMedia = await mediaCol.findOne({ file_unique_id: fileUniqueId });
+            }
+            // 等到了媒体记录的话，message 记录（频道侧写的描述）通常也刚落库：
+            // 补取一次，下面的 channel_forward / 频道消息位置才不会漏（回复时要用）
+            if (existingMedia && !existingMessage) {
+                existingMessage = await messageCol.findOne({ file_unique_id: fileUniqueId });
             }
         }
 
@@ -759,7 +791,16 @@ async function handleGroupMessage(msg) {
 
     if (hasMedia) {
         logger.info(`[群组媒体消息] 收到: chatId=${msg.chat.id}, messageId=${msg.message_id}, mediaGroupId=${msg.media_group_id || '单条'}`);
-        await handleNewMediaMessage(msg);
+        // 频道帖：落库窗口内登记 in-flight —— 同一条媒体还会以「自动转发到关联讨论群」的形式
+        // 到达，那条处理链据此知道"频道侧正在落库"，只补群组位置、不另建组（见 transferRecordToGroup）
+        const channelPostMedia = msg.chat.type === 'channel' ? extractMediaFromMessage(msg) : null;
+        const channelPostFile = channelPostMedia && channelPostMedia.fileUniqueId;
+        if (channelPostFile) markInFlight(channelPostFile);
+        try {
+            await handleNewMediaMessage(msg);
+        } finally {
+            if (channelPostFile) clearInFlight(channelPostFile);
+        }
     } else {
         // 非媒体：
         //   - 有活跃模式（如群内两步 /edit 的等待输入）→ 交给模式处理器；

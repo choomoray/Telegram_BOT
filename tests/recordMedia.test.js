@@ -160,6 +160,50 @@ test('频道转发：媒体库中已存在时不重复收录，仅补双位置',
     assert.equal(docs[0].group.message_id, 5002);
 });
 
+// ---------------- 频道帖的「自动转发」不再被重复收录（用户反馈的回归） ----------------
+
+test('频道帖 + 讨论群自动转发**并发**到达：只收录一次，频道/群组双位置都在', async () => {
+    resetStore();
+    // 不加绑定、也不带 forward_origin —— 只能靠自动转发的 sender_chat 认出来源频道。
+    // 两条是并发的处理链（真实情况：Telegram 立刻把频道帖自动转发到讨论群）
+    await Promise.all([
+        handleGroupMessage(chanMsg(7001, { caption: '频道描述', photo: [{ file_id: 'CF1', file_unique_id: 'UCF1' }] })),
+        handleGroupMessage(groupMsg(7002, {
+            is_automatic_forward: true,
+            sender_chat: { id: CHANNEL, type: 'channel', title: '频道C' },
+            photo: [{ file_id: 'CF1', file_unique_id: 'UCF1' }]
+        }))
+    ]);
+
+    const docs = getMedia().filter(d => d.file_unique_id === 'UCF1');
+    assert.equal(docs.length, 1, '同一条媒体只能有一条记录（不能"又被收录一遍"）');
+    assert.deepEqual(docs[0].group, { chat_id: GROUP, message_id: 7002 }, '群组位置 = 自动转发那条');
+    assert.deepEqual(docs[0].channel, { chat_id: CHANNEL, message_id: 7001 }, '频道位置 = 频道帖那条');
+    assert.equal((store.get('group_list') || []).length, 1, '不应另建媒体组');
+    assert.equal(findGroupList(`${CHANNEL}_7001`).is_group, 1, '归属仍是频道侧那个组');
+
+    const msgDoc = getMessages().find(m => m.file_unique_id === 'UCF1');
+    assert.equal(msgDoc.channel_forward.channel_chat_id, CHANNEL, 'message 上要记频道转发双位置');
+    assert.equal(msgDoc.channel_forward.channel_message_id, 7001);
+});
+
+test('机器人看不到频道（只有群里的自动转发副本）：收录一次并记下来源频道', async () => {
+    resetStore();
+    await handleGroupMessage(groupMsg(7102, {
+        is_automatic_forward: true,
+        sender_chat: { id: CHANNEL, type: 'channel', title: '频道C' },
+        caption: '群里的描述',
+        photo: [{ file_id: 'CF2', file_unique_id: 'UCF2' }]
+    }));
+
+    const docs = getMedia().filter(d => d.file_unique_id === 'UCF2');
+    assert.equal(docs.length, 1, '只收录一次');
+    assert.deepEqual(docs[0].group, { chat_id: GROUP, message_id: 7102 });
+    const msgDoc = getMessages().find(m => m.file_unique_id === 'UCF2');
+    assert.equal(msgDoc.channel_forward.channel_chat_id, CHANNEL, '要记下来源频道（回复时可选回复在频道）');
+    assert.equal(msgDoc.channel_forward.channel_message_id, null, '频道消息位置未知 → null');
+});
+
 // ---------------- /send 发送模式 ----------------
 
 test('/send：空描述单条媒体照常收录，is_delete 记为时间戳', async () => {

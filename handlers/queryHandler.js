@@ -200,11 +200,12 @@ async function handleQuery(msg) {
     const text = msg.text || '';
 
     if (!isAdmin(userId)) {
-        // 白名单用户（非管理员）允许基础查询（与 README 权限模型一致）
-        const { isUserAllowed } = require('../db/users');
-        const allowed = await isUserAllowed(userId);
-        if (!allowed) {
-            logger.info(`用户 ${userId} 非管理员且不在白名单，查询请求已忽略`);
+        // 非管理员：**普通用户与白名单用户都可以查询**（用户要求把搜索权限开放给普通用户），
+        // 只有被封禁 / 未授权（不在 users 库里）才忽略；全程静默，不提示权限问题。
+        const { getUserAccessTier } = require('../db/users');
+        const tier = await getUserAccessTier(userId);
+        if (tier === 'banned' || tier === 'unknown') {
+            logger.info(`用户 ${userId}（${tier}）不可查询，请求已忽略`);
             return;
         }
     }
