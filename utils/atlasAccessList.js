@@ -427,19 +427,15 @@ async function waitForActive(ip, { waitMs = 120000, pollMs = 5000 } = {}) {
     }
 }
 
-// ---------------- 管理员通知 ----------------
+// ---------------- 运行状态通知 ----------------
 
+/**
+ * 数据库连接状态通知（连不上、白名单维护成功/超时/失败）：
+ * **统一发到通知群话题**（见 utils/notifyChat.js），不再私聊管理员（用户要求）。
+ * @param {string} text
+ */
 async function notifyAdmins(text) {
-    const ids = config.ADMIN_CHAT_IDS || [];
-    if (!ids.length) return;
-    try {
-        const bot = require('../bot');
-        for (const id of ids) {
-            await bot.sendMessage(id, text).catch(err => logger.warn(`发送 Atlas 通知失败(chat=${id}): ${err.message}`));
-        }
-    } catch (err) {
-        logger.warn(`发送 Atlas 通知失败: ${err.message}`);
-    }
+    await require('./notifyChat').sendNotify(text, { label: 'Atlas 状态通知' });
 }
 
 // ---------------- 主流程 ----------------

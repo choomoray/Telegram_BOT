@@ -9,9 +9,11 @@
  *   2. 给通知群发一条「♻️ BOT重启成功」（带崩溃前的最近 3 条 warn/erro）。
  * 读完即删，保证同一次崩溃只记 / 只报一次。
  *
- * **通知去向（用户要求）**：统一发到 `.env` 的 `STARTUP_NOTIFY_CHAT_ID` + `STARTUP_NOTIFY_THREAD_ID`
- * 指定的**话题群话题**（默认 -1002223278475 / 85），**不再私聊管理员**；
- * 该会话同时被列入"完全不处理"名单（只发通知，不收录、不响应、不管理）。未配置时退回私聊管理员。
+ * **通知去向（用户要求）**：统一走 `utils/notifyChat.js` —— 发到 `.env` 的
+ * `STARTUP_NOTIFY_CHAT_ID` + `STARTUP_NOTIFY_THREAD_ID` 指定的**话题群话题**
+ * （默认 -1002223278475 / 85），**不再私聊管理员**；该会话同时被列入"完全不处理"名单
+ * （只发通知，不收录、不响应、不管理）。未配置时退回私聊管理员。
+ * 数据库连接状态（Atlas 白名单自动维护）等运行状态通知也走同一个出口。
  *
  * **时效（用户要求）**：崩溃信息超过 30 分钟就过期 —— 过期时只写 opLog 留痕
  * （detail.stale=true），**不再**发 Telegram 播报。避免"看门狗早已放弃重启、
@@ -104,40 +106,11 @@ function consumeCrashMarker() {
  * 通知收件会话（用户要求）：
  *   配置了 `STARTUP_NOTIFY_CHAT_ID` → 只发那个**话题群**的指定话题（不再私聊管理员）；
  *   未配置（0）→ 退回管理员私聊，保持老行为。
- * @returns {Array<{chatId:number, threadId:(number|undefined)}>}
+ *
+ * 实现已抽到 `utils/notifyChat.js`（运行状态通知的统一出口，Atlas 白名单 / 搬运失效也走它），
+ * 这里保留同名导出是为了兼容既有调用与测试。
  */
-function notifyTargets() {
-    const { STARTUP_NOTIFY_CHAT_ID, STARTUP_NOTIFY_THREAD_ID, ADMIN_CHAT_IDS } = require('../config');
-    if (STARTUP_NOTIFY_CHAT_ID) {
-        return [{ chatId: STARTUP_NOTIFY_CHAT_ID, threadId: STARTUP_NOTIFY_THREAD_ID || undefined }];
-    }
-    return (Array.isArray(ADMIN_CHAT_IDS) ? ADMIN_CHAT_IDS : []).map(chatId => ({ chatId, threadId: undefined }));
-}
-
-/** 本地时间文本（`YYYY-MM-DD HH:mm:ss`，与看门狗 timeText() 同格式） */
-function nowText(d = new Date()) {
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
-        `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
-/** 把一条通知发给所有收件会话（通知群按话题发） */
-async function sendNotify(text, { disablePreview = true } = {}) {
-    const bot = require('../bot');
-    let sent = 0;
-    for (const { chatId, threadId } of notifyTargets()) {
-        try {
-            await bot.sendMessage(chatId, text, {
-                ...(threadId ? { message_thread_id: threadId } : {}),
-                ...(disablePreview ? { disable_web_page_preview: true } : {})
-            });
-            sent++;
-        } catch (err) {
-            logger.warn(`通知发送失败 chat_id=${chatId}${threadId ? ` thread=${threadId}` : ''}: ${err.message}`);
-        }
-    }
-    return sent;
-}
+const { notifyTargets, nowText, sendNotify } = require('./notifyChat');
 
 /**
  * 每次启动的播报：「🚀 BOT已启动」，发到通知群（话题群）。
@@ -164,13 +137,13 @@ async function reportBotStarted() {
         `时间：${nowText()}`
     ].join('\n');
 
-    const sent = await sendNotify(text);
+    const sent = await sendNotify(text, { label: '启动播报' });
     if (sent > 0) logger.success(`已播报「BOT已启动」（${sent} 个收件会话）`);
     return { sent, text };
 }
 
 /**
- * 给所有管理员发「♻️ BOT重启成功」（文案与看门狗崩溃报告同一套格式，见 watchdog/notify.js）
+ * 给所有收件会话发「♻️ BOT重启成功」（文案与看门狗崩溃报告同一套格式，见 watchdog/notify.js）
  * @param {Object} info - 崩溃标记内容（取其中的 tail / reportLimit）
  * @returns {Promise<number>} 成功发送的收件会话数
  */
@@ -185,7 +158,7 @@ async function sendRestartReport(info) {
     const limit = Number(info && info.reportLimit) > 0 ? Number(info.reportLimit) : DEFAULT_REPORT_LIMIT;
     const text = formatRestartReport({ ok: true, tail: (info && info.tail) || [], limit });
 
-    const sent = await sendNotify(text);
+    const sent = await sendNotify(text, { label: '重启成功播报' });
     if (sent > 0) logger.success(`已播报「BOT重启成功」（${sent} 个收件会话）`);
     return sent;
 }

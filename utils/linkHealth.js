@@ -280,20 +280,12 @@ function formatDeadReport(deadList) {
     return `⚠️ 检测到 ${dead.length} 条搬运收录链接已失效：\n\n${lines.join('\n')}${more}\n\n请在 WebUI 控制台「搬运」页编辑或删除失效链接。`;
 }
 
-/** 失效提醒发送给管理员（ADMIN_CHAT_ID） */
+/**
+ * 失效提醒发给收件会话：**通知群话题**（未配置时退回 ADMIN_CHAT_ID 私聊）
+ * —— 与启动 / 运行状态通知同一个出口，见 utils/notifyChat.js。
+ */
 async function notifyAdmins(text) {
-    const { ADMIN_CHAT_IDS } = require('../config');
-    if (!text || !Array.isArray(ADMIN_CHAT_IDS) || !ADMIN_CHAT_IDS.length) return 0;
-    let sent = 0;
-    for (const chatId of ADMIN_CHAT_IDS) {
-        try {
-            await bot.sendMessage(chatId, text, { disable_web_page_preview: true });
-            sent++;
-        } catch (err) {
-            logger.warn(`失效链接提醒发送失败 chat_id=${chatId}: ${err.message}`);
-        }
-    }
-    return sent;
+    return await require('./notifyChat').sendNotify(text, { label: '搬运失效提醒' });
 }
 
 module.exports = {

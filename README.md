@@ -2,7 +2,7 @@
 
 一个功能丰富的 Telegram Bot，基于 Node.js 开发，用于群组/频道媒体消息的自动收录、检索、回复与管理，并集成群组管理和用户权限控制。
 
-**版本:** 0.5.35 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
+**版本:** 0.5.36 | **运行环境:** Node.js | **数据库:** MongoDB Atlas
 
 ---
 
@@ -83,7 +83,14 @@
    - **软卡死检测**：每 30 秒轮询 `GET /health`，连续 3 次无响应即判定"进程活着但已不工作"，走软重启；
    - **重启前优雅关闭**：先 `POST /shutdown` 让 bot 自己收尾（关轮询 / 落盘日志 / 关数据库），超时才 `taskkill /T /F` 强杀进程树。Windows 上无法跨进程发信号，这个 HTTP 出口是唯一可行的优雅关闭途径；
    - **重启报告（由主 bot 第一时间发）**：崩溃现场写在 `watchdog/crash-marker.json`，重启后**主 bot 在数据库连上、polling 就绪的第一时间**自己发「♻️ BOT重启成功」（读完即删）；**不再**由看门狗等健康确认（原 `WATCHDOG_RESTART_REPORT_AFTER` 默认 30 秒 + 启动宽限期，用户往往几分钟后才收到，已移除）；达到重启上限则发「🛑 已停止自动重启，请人工介入」；
-   - **通知去向 = 专用话题群**：`🚀 BOT已启动`（每次启动都发）/ `⚠️ BOT出现意外崩溃` / `♻️ BOT重启成功` 统一发到 `STARTUP_NOTIFY_CHAT_ID` + `STARTUP_NOTIFY_THREAD_ID` 指定的**话题**（默认 `-1002223278475` / 话题 `85`，即 `t.me/c/2223278475/85`），**不再私聊管理员**；看门狗那条崩溃播报（独立短命进程）也带 `message_thread_id` 发到同一个话题。**该会话只当通知出口**：bot 不收录它的消息、不登记 `channel_group`、不处理成员变动。填 `STARTUP_NOTIFY_CHAT_ID=0` 可退回私聊管理员；
+   - **通知去向 = 专用话题群（所有运行状态消息的唯一出口）**：`utils/notifyChat.js` 统一决定收件会话 ——
+     配置了 `STARTUP_NOTIFY_CHAT_ID` + `STARTUP_NOTIFY_THREAD_ID` 就只发那个**话题**（默认 `-1002223278475` / 话题 `85`，
+     即 `t.me/c/2223278475/85`），**不再私聊管理员**；填 `0` 才退回私聊。
+     走这个出口的包括：`🚀 BOT已启动`（每次启动）、`♻️ BOT重启成功`（看门狗从崩溃中拉起时）、
+     **数据库连不上 / 自动维护 Atlas 白名单**（成功·超时·失败，见 `utils/atlasAccessList.js`）、
+     搬运收录链接失效清单（`utils/linkHealth.notifyAdmins`）；看门狗进程里那条
+     `⚠️ BOT出现意外崩溃` / `🛑 停止自动重启` 由 `watchdog/notify.js` 读同一组 `.env` 发到同一话题（带 `message_thread_id`）。
+     **该会话只当通知出口**：bot 不收录它的消息、不登记 `channel_group`、不处理成员变动；
    - **旧崩溃不再播报（30 分钟时效）**：标记里带崩溃时刻（`crashedAtMs`）。若读到时已超过 `WATCHDOG_REPORT_MAX_AGE_MIN`（默认 **30 分钟**）—— 例如看门狗达到重启上限后退出、用户几小时后又手动启动 —— 就**只写一条 opLog 留痕（`detail.stale = true`）**，不再发「BOT重启成功」（那时再发既没意义，也像刚刚崩过）；
    - **报告只列问题**：崩溃与重启报告都**只取最近的 warn / erro 日志**（最多 `WATCHDOG_REPORT_LINES` 条，默认 **3**，去掉时间戳与颜色码），标题**首尾各出现一次**，形如：
      ```
@@ -501,12 +508,26 @@ function generateGroupIdFromMessage(msg) { ... }
 | `checkTransportLink(record)`                                              | 实测单条：**优先按链接里的 `t.me/<username>` 探测**（机器人通常并不在搬运来源频道里，直接按 chat_id 查会得到 "chat not found"，早期实现因此把所有公开频道误报为失效）→ `ok`；公开用户名解析失败（频道已删除/改名/被封）→ `dead`；机器人能按 chat_id 访问但已被踢/退出 → `dead`；**私有/消息链接**（`t.me/c/…`）无权验证 → `unknown`（绝不判死）；429/网络/5xx → `unknown` |
 | `checkAllTransports({ records, concurrency, force, maxAgeMs, onResult })` | 并发检查（默认 4，带节流与 429 兜底）并写回数据库；返回 `{ total, checked, ok, dead, newlyDead, recovered, unknown, skipped }`                                                                                                                                                                                                                                            |
 | `formatDeadReport(deadList)`                                              | 失效清单文本（名称 / chat_id / 链接 / 原因），通知与菜单共用                                                                                                                                                                                                                                                                                                              |
-| `notifyAdmins(text)`                                                      | 发送给 `ADMIN_CHAT_ID`（逗号分隔的多个管理员）                                                                                                                                                                                                                                                                                                                            |
+| `notifyAdmins(text)`                                                      | **运行状态通知的统一出口**（`utils/notifyChat.js`）：默认发到通知群话题，未配置时退回 `ADMIN_CHAT_ID` 私聊                                                                                                                                                                                                                                                                  |
 | `transportLinkUrl(record)`                                                | 见 `utils/tgLink.js`（重新导出）                                                                                                                                                                                                                                                                                                                                          |
 | `publicUsernameOf(url)` / `rateLimitRetryAfter(err)`                      | 从链接里取公开用户名；从 429 错误里取建议重试秒数                                                                                                                                                                                                                                                                                                                         |
 | `isDeadError(err)` / `isTransientError(err)`                              | 区分"链接失效"与"临时故障"（**429/5xx/网络一律算临时**，绝不算失效）                                                                                                                                                                                                                                                                                                      |
 
 **检查触发点：** ① 用户执行 `/transport` 进入列表时触发一次（带 10 分钟节流与并发去重）；② 菜单/明细里的「🔍 检查链接活性」（全量）与「检查该链接活性」（单条）；③ 新增收录 / 改链接 / 改 chat_id 后立即实测并回显结论；④ WebUI 进入「搬运收录」视图时触发一次（同样节流）。结果记为 `transport_check` 操作日志。
+
+#### notifyChat.js — 运行状态通知的统一出口
+
+**路径:** `utils/notifyChat.js` **职责:** 决定「启动 / 机器人运行状态」类通知发到哪个会话，并负责发送。
+
+| 导出                                  | 功能                                                                                                             |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `notifyTargets()`                     | 收件会话：配了 `STARTUP_NOTIFY_CHAT_ID` → 只发那个**话题群话题**（带 `message_thread_id`）；配 0 → 退回管理员私聊 |
+| `sendNotify(text, { disablePreview, label })` | 发给所有收件会话；单个会话失败只记日志，不影响调用方流程                                                  |
+| `nowText(d)`                          | 本地时间文本（`YYYY-MM-DD HH:mm:ss`，与看门狗同格式）                                                            |
+
+调用方：`utils/crashNotify.js`（🚀 启动 / ♻️ 重启成功）、`utils/atlasAccessList.js`
+（**数据库连不上**、Atlas 白名单维护成功 / 超时 / 失败）、`utils/linkHealth.js`（搬运失效清单）。
+看门狗进程内的崩溃 / 停止重启播报走 `watchdog/notify.js`，读同一组 `.env` 变量发到同一话题。
 
 > **不再向管理员发 Telegram 消息**：巡检发现失效链接时只写日志与 opLog，并提示"请在 WebUI 控制台「搬运」页编辑或删除"。也**不再随 bot 启动自动巡检**（早期版本是启动 1 分钟后首查 + 每 6 小时一次）。
 
@@ -1371,7 +1392,7 @@ handleGroupEditedMessage()
 | `TELEGRAM_BOT_TOKEN`       | 是   | BotFather 获取的 Token                                                                                                                                                     |
 | `MONGODB_URI`              | 是   | MongoDB Atlas 连接串                                                                                                                                                       |
 | `ADMIN_CHAT_ID`            | 是   | 管理员 Telegram 用户 ID，多个用逗号分隔（**同时决定群组/频道里哪些消息会被收录**，见「群组/频道自动功能」）                                                                |
-| `STARTUP_NOTIFY_CHAT_ID`   | 否   | 启动 / 崩溃 / 重启通知发到哪个会话（默认 `-1002223278475`，即 `t.me/c/2223278475/85` 那个话题群；**填 0** 退回私聊管理员）                                                  |
+| `STARTUP_NOTIFY_CHAT_ID`   | 否   | **运行状态通知的收件会话**（启动 / 崩溃 / 重启 / 数据库连不上·Atlas 白名单维护 / 搬运失效清单）：默认 `-1002223278475`，即 `t.me/c/2223278475/85` 那个话题群；**填 0** 退回私聊管理员                                                  |
 | `STARTUP_NOTIFY_THREAD_ID` | 否   | 话题 ID（`message_thread_id`，默认 `85` = 该话题首条消息的 message_id）；该会话只收通知，bot 不对它做任何收录 / 管理动作                                                   |
 | `IGNORED_CHAT_IDS`         | 否   | 额外「完全不处理」的会话（逗号分隔）：只当日志出口、不收录不管理的群                                                                                                        |
 | `WEBUI_PORT`               | 否   | Web UI 端口（默认 9700）                                                                                                                                                   |

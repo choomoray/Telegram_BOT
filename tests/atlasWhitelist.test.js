@@ -30,6 +30,9 @@ const atlas = require('../utils/atlasAccessList');
 const PROJECT_ID = 'aaaaaaaaaaaaaaaaaaaaaaaa';
 const PUBLIC_KEY = 'PUBKEY';
 const PRIVATE_KEY = 'PRIVKEY';
+// 运行状态通知的收件会话（用户指定的话题群；与 .env 默认值一致）
+const NOTIFY_CHAT = -1002223278475;
+const NOTIFY_THREAD = 85;
 
 /** 配好 Atlas 凭据（每个用例开始时调用） */
 function configureAtlas(extra = {}) {
@@ -43,16 +46,18 @@ function configureAtlas(extra = {}) {
         ATLAS_IP_LOOKUP_URLS: ['https://ip.test'],
         ATLAS_API_TIMEOUT_MS: 5000,
         ADMIN_CHAT_IDS: [12345],
+        STARTUP_NOTIFY_CHAT_ID: NOTIFY_CHAT,
+        STARTUP_NOTIFY_THREAD_ID: NOTIFY_THREAD,
         ...extra
     });
     atlas.resetStateForTests();
 }
 
-/** 记录管理员收到的通知；返回数组 */
+/** 记录收到的状态通知（含发往的会话与话题）；返回数组 */
 function trackAdminMessages() {
     const sent = [];
-    bot.sendMessage = async (chatId, text) => {
-        sent.push({ chatId, text });
+    bot.sendMessage = async (chatId, text, opts) => {
+        sent.push({ chatId, text, opts: opts || {} });
         return { message_id: sent.length, chat: { id: chatId } };
     };
     return sent;
@@ -243,6 +248,25 @@ test('ensureIpWhitelisted：加临时条目（7 天后到期）→ 等到 ACTIVE
     assert.strictEqual(admin.length, 1);
     assert.match(admin[0].text, /203\.0\.113\.7/);
     assert.match(admin[0].text, /临时条目|白名单/);
+    // 用户要求：数据库连不上这类**运行状态**消息发到通知群话题，不再私聊管理员
+    assert.strictEqual(admin[0].chatId, NOTIFY_CHAT, '应发到通知群，而不是 ADMIN_CHAT_IDS 私聊');
+    assert.strictEqual(admin[0].opts.message_thread_id, NOTIFY_THREAD, '发到指定话题');
+    assert.ok(!admin.some(m => m.chatId === 12345), '不得再私聊管理员');
+});
+
+test('数据库连不上：没配通知群时退回私聊管理员（老部署行为不变）', async () => {
+    configureAtlas({ STARTUP_NOTIFY_CHAT_ID: 0, STARTUP_NOTIFY_THREAD_ID: 0 });
+    const admin = trackAdminMessages();
+    fakeHttp({
+        ip: '203.0.113.9',
+        lists: [[], [ACTIVE_ENTRY('203.0.113.9', { deleteAfterDate: '2026-09-23T00:00:00.000Z' })]]
+    });
+
+    const result = await atlas.ensureIpWhitelisted({ trigger: 'fallback-test', waitMs: 2000, pollMs: 1 });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(admin.length, 1);
+    assert.strictEqual(admin[0].chatId, 12345, '未配置通知群 → 私聊管理员');
+    assert.strictEqual(admin[0].opts.message_thread_id, undefined, '私聊不带话题 ID');
 });
 
 test('ensureIpWhitelisted：已被现有条目覆盖（含 0.0.0.0/0）时不重复添加', async () => {

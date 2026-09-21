@@ -561,6 +561,47 @@ test('bot 侧重启播报：配了通知群也只发主题群的话题（不再�
     }
 });
 
+test('运行状态通知统一出口：数据库连不上 / 启动重启 / 搬运失效 都走 utils/notifyChat', () => {
+    const fs = require('fs');
+    const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
+
+    // 三个运行状态通知来源都必须经统一出口（收件人是通知群话题，不再是管理员私聊）
+    for (const f of ['utils/crashNotify.js', 'utils/atlasAccessList.js', 'utils/linkHealth.js']) {
+        assert.match(read(f), /notifyChat/, `${f} 要经 utils/notifyChat 发通知`);
+    }
+
+    // 数据库连不上（Atlas 白名单自动维护）：不得再自己往 ADMIN_CHAT_IDS 私聊发
+    const atlas = read('utils/atlasAccessList.js');
+    assert.ok(!/ADMIN_CHAT_IDS/.test(atlas), 'Atlas 状态通知不得再直接发给管理员私聊');
+    assert.ok(!/bot\.sendMessage/.test(atlas), 'Atlas 状态通知不得自己发消息');
+
+    // 唯一的"收件人决策点"：配置了通知群就发话题群，否则退回私聊管理员
+    const notifyChat = read('utils/notifyChat.js');
+    assert.match(notifyChat, /STARTUP_NOTIFY_CHAT_ID/, '默认发通知群');
+    assert.match(notifyChat, /message_thread_id/, '话题群要带 message_thread_id');
+    assert.match(notifyChat, /ADMIN_CHAT_IDS/, '未配置时退回私聊管理员');
+});
+
+test('运行状态通知：未配置通知群时退回私聊管理员；配置了只发话题群', () => {
+    const { stubModule } = require('./helpers/memoryDb');
+    const root = path.join(__dirname, '..');
+    const cfgPath = path.join(root, 'config.js');
+    const savedCfg = require.cache[cfgPath];
+    const notifyChat = require('../utils/notifyChat');
+    try {
+        stubModule(cfgPath, { STARTUP_NOTIFY_CHAT_ID: -1002223278475, STARTUP_NOTIFY_THREAD_ID: 85, ADMIN_CHAT_IDS: [111] });
+        assert.deepStrictEqual(notifyChat.notifyTargets(), [{ chatId: -1002223278475, threadId: 85 }]);
+
+        stubModule(cfgPath, { STARTUP_NOTIFY_CHAT_ID: 0, ADMIN_CHAT_IDS: [111, 222] });
+        assert.deepStrictEqual(notifyChat.notifyTargets(), [
+            { chatId: 111, threadId: undefined },
+            { chatId: 222, threadId: undefined }
+        ]);
+    } finally {
+        if (savedCfg) require.cache[cfgPath] = savedCfg; else delete require.cache[cfgPath];
+    }
+});
+
 test('index.js 接线：启动播报 + 通知专用会话不处理消息/成员变动', () => {
     const idxSrc = require('fs').readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
     assert.match(idxSrc, /reportBotStarted\(\)/, '每次启动都要播报「🚀 BOT已启动」');
